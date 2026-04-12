@@ -1,6 +1,6 @@
 # Backend Architecture
 
-This document describes the Happy backend structure as implemented in `packages/happy-server`. It focuses on how the server is wired, how data flows through the system, and which subsystems handle which responsibilities.
+This document describes the Orbit backend structure as implemented in `packages/orbit-server`. It focuses on how the server is wired, how data flows through the system, and which subsystems handle which responsibilities.
 
 ## System overview
 
@@ -12,7 +12,7 @@ graph TB
         Daemon[Machine Daemon]
     end
 
-    subgraph "Happy Server"
+    subgraph "Orbit Server"
         API[Fastify API]
         Socket[Socket.IO]
         Events[Event Router]
@@ -47,7 +47,7 @@ graph TB
 - Metrics: Prometheus-style `/metrics` server + per-request HTTP metrics.
 
 ## Process lifecycle
-Entry point: `packages/happy-server/sources/main.ts`.
+Entry point: `packages/orbit-server/sources/main.ts`.
 
 ```mermaid
 flowchart TD
@@ -390,10 +390,10 @@ graph TB
 - WebSocket event counters and connection gauges are in `metrics2.ts`.
 
 ## Key implementation references
-- Entrypoint: `packages/happy-server/sources/main.ts`
-- API server: `packages/happy-server/sources/app/api/api.ts`
-- Socket server: `packages/happy-server/sources/app/api/socket.ts`
-- Event routing: `packages/happy-server/sources/app/events/eventRouter.ts`
-- Presence: `packages/happy-server/sources/app/presence`
-- Storage: `packages/happy-server/sources/storage`
-- Prisma schema: `packages/happy-server/prisma/schema.prisma`
+- Entrypoint: `packages/orbit-server/sources/main.ts`
+- API server: `packages/orbit-server/sources/app/api/api.ts`
+- Socket server: `packages/orbit-server/sources/app/api/socket.ts`
+- Event routing: `packages/orbit-server/sources/app/events/eventRouter.ts`
+- Presence: `packages/orbit-server/sources/app/presence`
+- Storage: `packages/orbit-server/sources/storage`
+- Prisma schema: `packages/orbit-server/prisma/schema.prisma`

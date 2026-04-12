@@ -312,11 +312,11 @@ Goal: talk to users regularly to understand why they use Happy, what their day-t
 
 ## Growth & Promotion Pipeline
 
-Goal: simple pipeline to promote Happy Coder and maintain the public repo presence.
+Goal: simple pipeline to promote Orbit and maintain the public repo presence.
 
 ### Promotion
 
-- Regular posts / content about Happy Coder — what it does, how it works, real usage examples
+- Regular posts / content about Orbit — what it does, how it works, real usage examples
 - Figure out channels (Twitter/X, Reddit, HN, Discord, etc.)
 - Collect and share user stories from the research interviews (with consent)
 
@@ -401,7 +401,7 @@ The session protocol (`role: 'session'` envelopes in `happy-wire/src/sessionProt
 - Native app test flow:
   1. Start an authenticated env with `yarn env:up:authenticated` or reuse the current env from `yarn env:current`.
   2. Source the env so Expo picks up the right server and dev auth vars: `source environments/data/envs/<env-name>/env.sh`.
-  3. For JS-only work, start Metro without recompiling native: `APP_ENV=development yarn --cwd packages/happy-app start --dev-client --port 8081`.
+  3. For JS-only work, start Metro without recompiling native: `APP_ENV=development yarn --cwd packages/orbit-app start --dev-client --port 8081`.
   4. Open the installed simulator or device build from Metro with `i` or `a`, or reopen the dev client onto the Metro URL.
   5. Confirm native auth is correct in Metro logs:
      - `credentials ...`

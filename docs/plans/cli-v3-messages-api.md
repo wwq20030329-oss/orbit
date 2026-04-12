@@ -10,7 +10,7 @@ Migrate `happy-cli`'s `ApiSessionClient` from Socket.IO-based message read/write
 This replaces the current fire-and-forget `socket.emit('message', ...)` (5 separate send methods all using this pattern) and the direct Socket.IO `update` event handler for receiving.
 
 ## Context (from discovery)
-- **Package**: `packages/happy-cli/src/api/apiSession.ts` — `ApiSessionClient` class (EventEmitter)
+- **Package**: `packages/orbit-cli/src/api/apiSession.ts` — `ApiSessionClient` class (EventEmitter)
 - **Current send methods** (all use `socket.emit('message', { sid, message: encrypted })`):
   - `sendClaudeSessionMessage(body)` — Claude JSONL output
   - `sendCodexMessage(body)` — Codex messages
@@ -38,7 +38,7 @@ This replaces the current fire-and-forget `socket.emit('message', ...)` (5 separ
 - Mark completed items with `[x]` immediately when done
 - Add newly discovered tasks with ➕ prefix
 - Document issues/blockers with ⚠️ prefix
-- ⚠️ `npx eslint` in `packages/happy-cli` currently fails because there is no `eslint.config.(js|mjs|cjs)` in this workspace, so lint verification could not be completed.
+- ⚠️ `npx eslint` in `packages/orbit-cli` currently fails because there is no `eslint.config.(js|mjs|cjs)` in this workspace, so lint verification could not be completed.
 
 ## Implementation Steps
 

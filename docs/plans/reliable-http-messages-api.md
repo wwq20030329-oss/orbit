@@ -143,7 +143,7 @@ This is server-side only. CLI client migration will happen separately. Existing 
 - [ ] Run linter — all issues must be fixed
 
 ⚠️ Full package test suite currently fails on an existing unrelated fixture issue: `sources/storage/processImage.spec.ts` expects `sources/storage/__testdata__/image.jpg` which is missing in this workspace.
-⚠️ No lint script is defined in `packages/happy-server/package.json`, so linter execution is currently not available.
+⚠️ No lint script is defined in `packages/orbit-server/package.json`, so linter execution is currently not available.
 
 ## Technical Details
 

@@ -1,0 +1,12 @@
+{
+  "$schema": "../../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Orbit (dev)",
+  "identifier": "com.orbit.desktop.dev",
+  "app": {
+    "windows": [
+      {
+        "title": "Orbit (dev)"
+      }
+    ]
+  }
+}

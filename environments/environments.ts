@@ -15,9 +15,26 @@ const ENVIRONMENTS_DATA_DIR = path.join(ENVIRONMENTS_ROOT, "data");
 const ENVIRONMENTS_DIR = path.join(ENVIRONMENTS_DATA_DIR, "envs");
 const CURRENT_ENV_PATH = path.join(ENVIRONMENTS_DATA_DIR, "current.json");
 const LAB_RAT_PROJECT_TEMPLATE_DIR = path.join(ENVIRONMENTS_ROOT, "lab-rat-todo-project");
+const IOS_APP_DIR = path.join(REPO_ROOT, "packages", "orbit-app");
+const IOS_PROJECT_DIR = path.join(IOS_APP_DIR, "ios");
+const IOS_WORKSPACE_PATH = path.join(IOS_PROJECT_DIR, "Orbitdev.xcworkspace");
+const IOS_SCHEME = "Orbitdev";
+const IOS_APP_NAME = "Orbitdev.app";
+const IOS_BUNDLE_IDENTIFIER = "com.orbit.app.dev";
+const IOS_METRO_PORT = 8081;
+const IOS_METRO_SERVICE = "ios-metro";
+const IOS_SIMULATOR_NAME = "Orbit iPhone 16";
+const IOS_PREFERRED_DEVICE_TYPES = [
+    "iPhone 16",
+    "iPhone 16 Pro",
+    "iPhone 15 Pro",
+    "iPhone 15",
+    "iPhone 14 Pro",
+    "iPhone 14",
+];
 
 // ============================================================================
-// Name generation (expanded from packages/happy-app/sources/utils/generateWorktreeName.ts)
+// Name generation (expanded from packages/orbit-app/sources/utils/generateWorktreeName.ts)
 // ============================================================================
 
 const adjectives = [
@@ -89,6 +106,32 @@ export interface EnvironmentConfig {
 
 interface CurrentConfig {
     current: string;
+}
+
+interface SimctlRuntime {
+    identifier: string;
+    isAvailable: boolean;
+    name: string;
+    platform?: string;
+    version?: string;
+}
+
+interface SimctlDeviceType {
+    identifier: string;
+    name: string;
+}
+
+interface SimctlDevice {
+    isAvailable?: boolean;
+    name: string;
+    state: string;
+    udid: string;
+}
+
+interface SimctlList {
+    devices: Record<string, SimctlDevice[]>;
+    devicetypes: SimctlDeviceType[];
+    runtimes: SimctlRuntime[];
 }
 
 // ============================================================================
@@ -183,6 +226,305 @@ function readDevAuth(envDir: string): { secret: string; token: string } | null {
     }
 }
 
+function runCommandChecked(
+    command: string,
+    args: string[],
+    opts?: {
+        cwd?: string;
+        env?: Record<string, string | undefined>;
+        stdio?: "inherit" | "pipe" | "ignore";
+    },
+): string {
+    const result = spawnSync(command, args, {
+        cwd: opts?.cwd,
+        env: opts?.env,
+        stdio: opts?.stdio ?? "pipe",
+        encoding: "utf-8",
+    });
+
+    if (result.error) {
+        throw result.error;
+    }
+
+    if (result.status !== 0) {
+        const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
+        const stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
+        const detail = stderr || stdout || `${command} exited with code ${result.status}`;
+        throw new Error(detail);
+    }
+
+    return typeof result.stdout === "string" ? result.stdout : "";
+}
+
+function parseVersionParts(value?: string): number[] {
+    const matches = value?.match(/\d+/g) ?? [];
+    return matches.length > 0 ? matches.map(Number) : [0];
+}
+
+function compareVersionPartsDesc(left: number[], right: number[]): number {
+    const length = Math.max(left.length, right.length);
+    for (let index = 0; index < length; index += 1) {
+        const leftPart = left[index] ?? 0;
+        const rightPart = right[index] ?? 0;
+        if (leftPart !== rightPart) {
+            return rightPart - leftPart;
+        }
+    }
+    return 0;
+}
+
+function readSimctlList(): SimctlList {
+    const raw = runCommandChecked("xcrun", ["simctl", "list", "--json"]);
+    return JSON.parse(raw) as SimctlList;
+}
+
+function getLatestIosRuntime(simctl: SimctlList): SimctlRuntime {
+    const runtimes = simctl.runtimes
+        .filter(runtime => runtime.isAvailable && ((runtime.platform ?? "").toLowerCase() === "ios" || runtime.identifier.includes("iOS")))
+        .sort((left, right) => compareVersionPartsDesc(
+            parseVersionParts(left.version ?? left.name ?? left.identifier),
+            parseVersionParts(right.version ?? right.name ?? right.identifier),
+        ));
+
+    const runtime = runtimes[0];
+    if (!runtime) {
+        throw new Error("No available iOS simulator runtime found. Open Xcode and install an iOS Simulator runtime first.");
+    }
+    return runtime;
+}
+
+function getPreferredDeviceTypeIdentifier(simctl: SimctlList): string {
+    for (const preferredName of IOS_PREFERRED_DEVICE_TYPES) {
+        const deviceType = simctl.devicetypes.find(candidate => candidate.name === preferredName);
+        if (deviceType) {
+            return deviceType.identifier;
+        }
+    }
+
+    const fallback = simctl.devicetypes.find(candidate => candidate.name.includes("iPhone"));
+    if (!fallback) {
+        throw new Error("No iPhone simulator device type found.");
+    }
+    return fallback.identifier;
+}
+
+function openSimulatorForDevice(udid: string): void {
+    spawnSync("open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", udid], {
+        stdio: "ignore",
+    });
+}
+
+function ensureBootedIosSimulator(): SimctlDevice {
+    const simctl = readSimctlList();
+    const allDevices = Object.values(simctl.devices)
+        .flat()
+        .filter(device => device.isAvailable !== false);
+
+    const bootedIphone = allDevices.find(device => device.state === "Booted" && device.name.includes("iPhone"));
+    if (bootedIphone) {
+        openSimulatorForDevice(bootedIphone.udid);
+        return bootedIphone;
+    }
+
+    const runtime = getLatestIosRuntime(simctl);
+    const runtimeDevices = (simctl.devices[runtime.identifier] ?? []).filter(device => device.isAvailable !== false);
+    const existingDevice = runtimeDevices.find(device => device.name === IOS_SIMULATOR_NAME)
+        ?? runtimeDevices.find(device => device.name.includes("iPhone"));
+
+    const device = existingDevice ?? {
+        udid: runCommandChecked(
+            "xcrun",
+            ["simctl", "create", IOS_SIMULATOR_NAME, getPreferredDeviceTypeIdentifier(simctl), runtime.identifier],
+        ).trim(),
+        name: IOS_SIMULATOR_NAME,
+        state: "Shutdown",
+    };
+
+    if (device.state !== "Booted") {
+        runCommandChecked("xcrun", ["simctl", "boot", device.udid], { stdio: "ignore" });
+        runCommandChecked("xcrun", ["simctl", "bootstatus", device.udid, "-b"], { stdio: "ignore" });
+    }
+
+    openSimulatorForDevice(device.udid);
+    return { ...device, state: "Booted" };
+}
+
+function shouldRunPodInstall(): boolean {
+    const podManifestPath = path.join(IOS_PROJECT_DIR, "Pods", "Manifest.lock");
+    const podfileLockPath = path.join(IOS_PROJECT_DIR, "Podfile.lock");
+    const cocoaAsyncSocketModuleMapPath = path.join(
+        IOS_PROJECT_DIR,
+        "Pods",
+        "Headers",
+        "Public",
+        "CocoaAsyncSocket",
+        "CocoaAsyncSocket.modulemap",
+    );
+    const cocoaAsyncSocketHeaderPath = path.join(
+        IOS_PROJECT_DIR,
+        "Pods",
+        "CocoaAsyncSocket",
+        "Source",
+        "GCD",
+        "GCDAsyncSocket.h",
+    );
+
+    if (!fs.existsSync(podManifestPath) || !fs.existsSync(cocoaAsyncSocketModuleMapPath) || !fs.existsSync(cocoaAsyncSocketHeaderPath)) {
+        return true;
+    }
+
+    if (!fs.existsSync(podfileLockPath)) {
+        return false;
+    }
+
+    return fs.statSync(podfileLockPath).mtimeMs > fs.statSync(podManifestPath).mtimeMs;
+}
+
+function ensureIosPodsInstalled(): void {
+    if (!shouldRunPodInstall()) {
+        return;
+    }
+
+    console.log("Installing iOS pods...");
+    runCommandChecked("pod", ["install"], {
+        cwd: IOS_PROJECT_DIR,
+        env: process.env,
+        stdio: "inherit",
+    });
+}
+
+async function ensureIosMetroRunning(envDir: string, envVars: Record<string, string | undefined>): Promise<void> {
+    const existingMetroPid = readPidFile(envDir, IOS_METRO_SERVICE);
+    if (existingMetroPid !== null && isProcessAlive(existingMetroPid) && isPortInUse(IOS_METRO_PORT)) {
+        console.log(`Metro already running on port ${IOS_METRO_PORT}.`);
+        return;
+    }
+
+    if (existingMetroPid !== null && !isProcessAlive(existingMetroPid)) {
+        removePidFile(envDir, IOS_METRO_SERVICE);
+    }
+
+    if (isPortInUse(IOS_METRO_PORT)) {
+        console.log(`Reusing existing Metro on port ${IOS_METRO_PORT}.`);
+        return;
+    }
+
+    const metroLogFile = path.join(envDir, "ios", "metro.log");
+    fs.mkdirSync(path.dirname(metroLogFile), { recursive: true });
+
+    console.log(`Starting Metro on port ${IOS_METRO_PORT}...`);
+    const metroPid = spawnService("yarn", ["start", "--dev-client", "-p", String(IOS_METRO_PORT)], {
+        cwd: IOS_APP_DIR,
+        env: { ...envVars, BROWSER: "none" },
+        logFile: metroLogFile,
+    });
+    writePidFile(envDir, IOS_METRO_SERVICE, metroPid);
+
+    await waitFor(() => isPortInUse(IOS_METRO_PORT), 30_000, "Metro");
+}
+
+async function ensureEnvironmentReadyForIos(name: string, envDir: string): Promise<void> {
+    const config = readEnvironmentConfig(name);
+    const serverRunning = isPortInUse(config.serverPort);
+    const webRunning = isPortInUse(config.expoPort);
+
+    if (!serverRunning || !webRunning) {
+        console.log("Environment services are not running. Starting them now...");
+        await startEnvironmentServices(name);
+    }
+
+    if (config.template === "authenticated-empty" && !readDevAuth(envDir)) {
+        console.log("Authenticated environment is missing dev credentials. Seeding it now...");
+        await seedEnvironment(name);
+    }
+}
+
+function getInstalledIosAppPath(udid: string): string | null {
+    const result = spawnSync("xcrun", ["simctl", "get_app_container", udid, IOS_BUNDLE_IDENTIFIER, "app"], {
+        encoding: "utf-8",
+        stdio: "pipe",
+    });
+
+    if (result.status !== 0) {
+        return null;
+    }
+
+    const appPath = (result.stdout ?? "").trim();
+    return appPath.length > 0 ? appPath : null;
+}
+
+function launchIosApp(udid: string): void {
+    console.log("Launching Orbit in the simulator...");
+    const launchOutput = runCommandChecked("xcrun", ["simctl", "launch", udid, IOS_BUNDLE_IDENTIFIER]);
+    if (launchOutput.trim().length > 0) {
+        console.log(launchOutput.trim());
+    }
+}
+
+function buildAndInstallIosApp(simulatorUdid: string, envDir: string, envVars: Record<string, string | undefined>): string {
+    ensureIosPodsInstalled();
+
+    const derivedDataPath = path.join(envDir, "ios", "derivedData");
+    fs.mkdirSync(derivedDataPath, { recursive: true });
+
+    console.log("Building native iOS app for simulator...");
+    runCommandChecked("xcodebuild", [
+        "-workspace", IOS_WORKSPACE_PATH,
+        "-scheme", IOS_SCHEME,
+        "-configuration", "Debug",
+        "-sdk", "iphonesimulator",
+        "-destination", `id=${simulatorUdid}`,
+        "-derivedDataPath", derivedDataPath,
+        "CODE_SIGNING_ALLOWED=NO",
+        "CODE_SIGNING_REQUIRED=NO",
+        "build",
+    ], {
+        cwd: REPO_ROOT,
+        env: envVars,
+        stdio: "inherit",
+    });
+
+    const appPath = path.join(derivedDataPath, "Build", "Products", "Debug-iphonesimulator", IOS_APP_NAME);
+    if (!fs.existsSync(appPath)) {
+        throw new Error(`Built app not found at ${appPath}`);
+    }
+
+    console.log("Installing app into the simulator...");
+    runCommandChecked("xcrun", ["simctl", "install", simulatorUdid, appPath], {
+        stdio: "inherit",
+    });
+
+    return appPath;
+}
+
+async function startIosSimulatorApp(
+    envName: string,
+    envDir: string,
+    envVars: Record<string, string | undefined>,
+    opts?: { forceRebuild?: boolean },
+): Promise<void> {
+    await ensureEnvironmentReadyForIos(envName, envDir);
+
+    const simulator = ensureBootedIosSimulator();
+    await ensureIosMetroRunning(envDir, envVars);
+    const installedAppPath = getInstalledIosAppPath(simulator.udid);
+
+    if (opts?.forceRebuild || !installedAppPath) {
+        buildAndInstallIosApp(simulator.udid, envDir, envVars);
+    } else {
+        console.log(`Reusing installed app in simulator "${simulator.name}".`);
+        console.log(`  Installed app: ${installedAppPath}`);
+    }
+
+    launchIosApp(simulator.udid);
+
+    console.log("");
+    console.log(`Orbit is running in Simulator "${simulator.name}".`);
+    console.log(`  Metro: http://localhost:${IOS_METRO_PORT}`);
+    console.log(`  App:   ${IOS_BUNDLE_IDENTIFIER}`);
+    console.log(`  Logs:  ${path.relative(process.cwd(), path.join(envDir, "ios", "metro.log"))}`);
+}
+
 // ============================================================================
 // PID file management
 // ============================================================================
@@ -231,6 +573,29 @@ async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs: numbe
         await new Promise(r => setTimeout(r, 500));
     }
     throw new Error(`Timed out waiting for ${label} after ${timeoutMs}ms`);
+}
+
+function sleepSync(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function removeDirWithRetries(dir: string, opts?: { attempts?: number; delayMs?: number }): void {
+    const attempts = opts?.attempts ?? 5;
+    const delayMs = opts?.delayMs ?? 150;
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+            fs.rmSync(dir, { recursive: true, force: true });
+            return;
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            const isRetriable = code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM";
+            if (!isRetriable || attempt === attempts) {
+                throw error;
+            }
+            sleepSync(delayMs * attempt);
+        }
+    }
 }
 
 function spawnService(
@@ -303,12 +668,12 @@ export async function createEnvironment(opts?: { noSwitch?: boolean }): Promise<
 
     console.log(`Running database migration for ${name}...`);
     const migrationEnv = buildEnvVars(envDir, serverPort, expoPort);
-    const standaloneTs = path.join(REPO_ROOT, "packages", "happy-server", "sources", "standalone.ts");
+    const standaloneTs = path.join(REPO_ROOT, "packages", "orbit-server", "sources", "standalone.ts");
     const result = spawnSync(
         "tsx",
         [standaloneTs, "migrate"],
         {
-            cwd: path.join(REPO_ROOT, "packages", "happy-server"),
+            cwd: path.join(REPO_ROOT, "packages", "orbit-server"),
             env: { ...process.env, ...migrationEnv },
             stdio: "inherit",
         }
@@ -338,7 +703,7 @@ export async function createEnvironment(opts?: { noSwitch?: boolean }): Promise<
     console.log(`  One-liner: ${buildCliCommand(envDir)}`);
     console.log("");
     console.log(`  source ${envShRelative}`);
-    console.log(`  happy`);
+    console.log(`  orbit`);
     console.log("");
     console.log(`Full env.sh path: ${path.join(envDir, "env.sh")}`);
 
@@ -354,7 +719,7 @@ export async function startEnvironmentServices(name: string): Promise<void> {
     const serverLogFile = path.join(envDir, "server", "stdout.log");
     console.log(`Starting server on port ${config.serverPort}...`);
     const serverPid = spawnService("yarn", ["standalone", "serve"], {
-        cwd: path.join(REPO_ROOT, "packages", "happy-server"),
+        cwd: path.join(REPO_ROOT, "packages", "orbit-server"),
         env: mergedEnv,
         logFile: serverLogFile,
     });
@@ -375,7 +740,7 @@ export async function startEnvironmentServices(name: string): Promise<void> {
     fs.mkdirSync(path.join(envDir, "web"), { recursive: true });
     console.log(`Starting web on port ${config.expoPort}...`);
     const webPid = spawnService("yarn", ["web", "--port", String(config.expoPort)], {
-        cwd: path.join(REPO_ROOT, "packages", "happy-app"),
+        cwd: path.join(REPO_ROOT, "packages", "orbit-app"),
         env: { ...mergedEnv, BROWSER: "none" },
         logFile: webLogFile,
     });
@@ -469,8 +834,8 @@ export async function seedEnvironment(name: string): Promise<void> {
     const daemonEnv = { ...process.env, ...envVars };
     delete daemonEnv.CLAUDECODE;
 
-    const happyBin = path.join(REPO_ROOT, "packages", "happy-cli", "bin", "orbit.mjs");
-    const daemon = spawn("node", [happyBin, "daemon", "start"], {
+    const orbitBin = path.join(REPO_ROOT, "packages", "orbit-cli", "bin", "orbit.mjs");
+    const daemon = spawn("node", [orbitBin, "daemon", "start"], {
         env: daemonEnv,
         stdio: "ignore",
         detached: true,
@@ -494,7 +859,7 @@ export function stopEnvironment(name: string): void {
     const envDir = getEnvironmentDir(name);
     let killed = 0;
 
-    for (const service of ["server", "web"] as const) {
+    for (const service of ["server", "web", IOS_METRO_SERVICE] as const) {
         const pid = readPidFile(envDir, service);
         if (pid !== null) {
             if (isProcessAlive(pid)) {
@@ -534,7 +899,7 @@ export function removeEnvironment(name: string): void {
     if (currentConfig?.current === name && fs.existsSync(CURRENT_ENV_PATH)) {
         fs.unlinkSync(CURRENT_ENV_PATH);
     }
-    fs.rmSync(envDir, { recursive: true, force: true });
+    removeDirWithRetries(envDir);
     console.log(`Removed environment: ${name}`);
 }
 
@@ -607,7 +972,7 @@ function commandRemove(name: string) {
         fs.unlinkSync(CURRENT_ENV_PATH);
     }
 
-    fs.rmSync(envDir, { recursive: true, force: true });
+    removeDirWithRetries(envDir);
     console.log(`Removed environment: ${name}`);
 }
 
@@ -631,7 +996,7 @@ function commandCurrent() {
     console.log(`Web app: ${webAppUrl}`);
 }
 
-function commandRun(service: string, serviceArgs: string[] = []) {
+async function commandRun(service: string, serviceArgs: string[] = []) {
     const currentConfig = readCurrentConfig();
     if (!currentConfig?.current) {
         console.error("No current environment. Run `yarn env:new` first.");
@@ -658,7 +1023,7 @@ function commandRun(service: string, serviceArgs: string[] = []) {
                 "yarn",
                 ["standalone", "serve"],
                 {
-                    cwd: path.join(REPO_ROOT, "packages", "happy-server"),
+                    cwd: path.join(REPO_ROOT, "packages", "orbit-server"),
                     env: mergedEnv,
                     stdio: "inherit",
                 }
@@ -672,7 +1037,7 @@ function commandRun(service: string, serviceArgs: string[] = []) {
                 "yarn",
                 ["web", "--port", String(config.expoPort)],
                 {
-                    cwd: path.join(REPO_ROOT, "packages", "happy-app"),
+                    cwd: path.join(REPO_ROOT, "packages", "orbit-app"),
                     // Expo treats `--web` as "open in browser". Disable that for env-managed runs.
                     env: { ...mergedEnv, BROWSER: "none" },
                     stdio: "inherit",
@@ -682,17 +1047,13 @@ function commandRun(service: string, serviceArgs: string[] = []) {
             break;
         }
         case "ios": {
-            console.log(`Starting iOS app for environment "${envName}"...`);
-            const result = spawnSync(
-                "yarn",
-                ["ios"],
-                {
-                    cwd: path.join(REPO_ROOT, "packages", "happy-app"),
-                    env: mergedEnv,
-                    stdio: "inherit",
-                }
-            );
-            process.exit(result.status ?? 1);
+            const forceRebuild = serviceArgs.includes("--rebuild");
+            const ignoredArgs = serviceArgs.filter(arg => arg !== "--rebuild");
+            if (ignoredArgs.length > 0) {
+                console.log(`Ignoring extra iOS arguments: ${ignoredArgs.join(" ")}`);
+            }
+            console.log(`Starting iOS simulator app for environment "${envName}"...`);
+            await startIosSimulatorApp(envName, envDir, mergedEnv, { forceRebuild });
             break;
         }
         case "android": {
@@ -701,7 +1062,7 @@ function commandRun(service: string, serviceArgs: string[] = []) {
                 "yarn",
                 ["android"],
                 {
-                    cwd: path.join(REPO_ROOT, "packages", "happy-app"),
+                    cwd: path.join(REPO_ROOT, "packages", "orbit-app"),
                     env: mergedEnv,
                     stdio: "inherit",
                 }
@@ -711,7 +1072,7 @@ function commandRun(service: string, serviceArgs: string[] = []) {
         }
         case "cli": {
             console.log(`Starting CLI for environment "${envName}"...`);
-            const cliBin = path.join(REPO_ROOT, "packages", "happy-cli", "bin", "orbit.mjs");
+            const cliBin = path.join(REPO_ROOT, "packages", "orbit-cli", "bin", "orbit.mjs");
             const result = spawnSync(
                 "node",
                 [cliBin, ...serviceArgs],
@@ -736,10 +1097,16 @@ function commandRun(service: string, serviceArgs: string[] = []) {
 function buildEnvVars(envDir: string, serverPort: number, expoPort: number): Record<string, string> {
     const devAuth = readDevAuth(envDir);
     const projectDir = path.join(envDir, "project");
+    const externalServerUrl = process.env.ORBIT_DEV_SERVER_URL || process.env.HAPPY_DEV_SERVER_URL;
+    const externalLogServerUrl = process.env.ORBIT_DEV_LOG_SERVER_URL || process.env.HAPPY_DEV_LOG_SERVER_URL || "";
+    const startupTimeoutMs = externalServerUrl && externalServerUrl.trim().length > 0 ? "5000" : "1200";
+    const resolvedServerUrl = externalServerUrl && externalServerUrl.trim().length > 0
+        ? normalizeExternalDevServerUrl(externalServerUrl.trim())
+        : `http://localhost:${serverPort}`;
 
     return {
         // Server
-        HANDY_MASTER_SECRET: "happy-dev-secret",
+        HANDY_MASTER_SECRET: "orbit-dev-secret",
         PORT: String(serverPort),
         NODE_ENV: "development",
         DATA_DIR: path.join(envDir, "server"),
@@ -748,17 +1115,25 @@ function buildEnvVars(envDir: string, serverPort: number, expoPort: number): Rec
         METRICS_ENABLED: "false",
 
         // App (Expo)
-        EXPO_PUBLIC_SERVER_URL: `http://localhost:${serverPort}`,
-        EXPO_PUBLIC_HAPPY_SERVER_URL: `http://localhost:${serverPort}`,
-        EXPO_PUBLIC_LOG_SERVER_URL: "http://localhost:8787",
+        EXPO_PUBLIC_SERVER_URL: resolvedServerUrl,
+        EXPO_PUBLIC_ORBIT_SERVER_URL: resolvedServerUrl,
+        EXPO_PUBLIC_HAPPY_SERVER_URL: resolvedServerUrl,
+        EXPO_PUBLIC_LOG_SERVER_URL: externalLogServerUrl,
         EXPO_PORT: String(expoPort),
 
         // CLI
-        HAPPY_SERVER_URL: `http://localhost:${serverPort}`,
+        ORBIT_SERVER_URL: resolvedServerUrl,
+        ORBIT_WEBAPP_URL: `http://localhost:${expoPort}`,
+        ORBIT_HOME_DIR: path.join(envDir, "cli", "home"),
+        ORBIT_PROJECT_DIR: projectDir,
+        ORBIT_VARIANT: "dev",
+        ORBIT_STARTUP_TIMEOUT_MS: startupTimeoutMs,
+        HAPPY_SERVER_URL: resolvedServerUrl,
         HAPPY_WEBAPP_URL: `http://localhost:${expoPort}`,
         HAPPY_HOME_DIR: path.join(envDir, "cli", "home"),
         HAPPY_PROJECT_DIR: projectDir,
         HAPPY_VARIANT: "dev",
+        HAPPY_STARTUP_TIMEOUT_MS: startupTimeoutMs,
         DEBUG: "1",
         ...(devAuth ? {
             EXPO_PUBLIC_DEV_TOKEN: devAuth.token,
@@ -767,10 +1142,26 @@ function buildEnvVars(envDir: string, serverPort: number, expoPort: number): Rec
     };
 }
 
+function normalizeExternalDevServerUrl(serverUrl: string): string {
+    try {
+        const parsed = new URL(serverUrl);
+        const isIpv4Host = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(parsed.hostname);
+
+        if (parsed.protocol === "http:" && isIpv4Host) {
+            parsed.hostname = `${parsed.hostname.replace(/\./g, "-")}.nip.io`;
+            return parsed.toString().replace(/\/$/, "");
+        }
+
+        return serverUrl.replace(/\/$/, "");
+    } catch {
+        return serverUrl.replace(/\/$/, "");
+    }
+}
+
 function buildEnvSh(name: string, envDir: string, serverPort: number, expoPort: number): string {
     const vars = buildEnvVars(envDir, serverPort, expoPort);
     const lines: string[] = [
-        `# Happy Dev Environment: ${name}`,
+        `# Orbit Dev Environment: ${name}`,
         `# Generated by environments/environments.ts`,
         `# Source this file in your terminal: source ${path.join(envDir, "env.sh")}`,
         "",
@@ -789,6 +1180,7 @@ function buildEnvSh(name: string, envDir: string, serverPort: number, expoPort: 
 
     lines.push("# App (Expo)");
     lines.push(`export EXPO_PUBLIC_SERVER_URL="${vars.EXPO_PUBLIC_SERVER_URL}"`);
+    lines.push(`export EXPO_PUBLIC_ORBIT_SERVER_URL="${vars.EXPO_PUBLIC_ORBIT_SERVER_URL}"`);
     lines.push(`export EXPO_PUBLIC_HAPPY_SERVER_URL="${vars.EXPO_PUBLIC_HAPPY_SERVER_URL}"`);
     lines.push(`export EXPO_PUBLIC_LOG_SERVER_URL="${vars.EXPO_PUBLIC_LOG_SERVER_URL}"`);
     if (vars.EXPO_PUBLIC_DEV_TOKEN && vars.EXPO_PUBLIC_DEV_SECRET) {
@@ -799,17 +1191,24 @@ function buildEnvSh(name: string, envDir: string, serverPort: number, expoPort: 
     lines.push("");
 
     lines.push("# CLI");
+    lines.push(`export ORBIT_SERVER_URL="${vars.ORBIT_SERVER_URL}"`);
+    lines.push(`export ORBIT_WEBAPP_URL="${vars.ORBIT_WEBAPP_URL}"`);
+    lines.push(`export ORBIT_HOME_DIR="${vars.ORBIT_HOME_DIR}"`);
+    lines.push(`export ORBIT_PROJECT_DIR="${vars.ORBIT_PROJECT_DIR}"`);
+    lines.push(`export ORBIT_VARIANT=dev`);
+    lines.push(`export ORBIT_STARTUP_TIMEOUT_MS="${vars.ORBIT_STARTUP_TIMEOUT_MS}"`);
     lines.push(`export HAPPY_SERVER_URL="${vars.HAPPY_SERVER_URL}"`);
     lines.push(`export HAPPY_WEBAPP_URL="${vars.HAPPY_WEBAPP_URL}"`);
     lines.push(`export HAPPY_HOME_DIR="${vars.HAPPY_HOME_DIR}"`);
     lines.push(`export HAPPY_PROJECT_DIR="${vars.HAPPY_PROJECT_DIR}"`);
     lines.push(`export HAPPY_VARIANT=dev`);
+    lines.push(`export HAPPY_STARTUP_TIMEOUT_MS="${vars.HAPPY_STARTUP_TIMEOUT_MS}"`);
     lines.push(`export DEBUG=1`);
     lines.push(`export PATH="${path.join(envDir, "bin")}:$PATH"`);
     lines.push("");
     lines.push("# Commands exposed by this env");
-    lines.push("# - happy");
-    lines.push("# - happy-agent");
+    lines.push("# - orbit");
+    lines.push("# - orbit-agent");
     lines.push("");
 
     return lines.join("\n");
@@ -821,12 +1220,12 @@ function writeEnvCommands(envDir: string): void {
 
     const commands = [
         {
-            name: "happy",
-            entrypoint: path.join(REPO_ROOT, "packages", "happy-cli", "bin", "orbit.mjs"),
+            name: "orbit",
+            entrypoint: path.join(REPO_ROOT, "packages", "orbit-cli", "bin", "orbit.mjs"),
         },
         {
-            name: "happy-agent",
-            entrypoint: path.join(REPO_ROOT, "packages", "happy-agent", "bin", "orbit-agent.mjs"),
+            name: "orbit-agent",
+            entrypoint: path.join(REPO_ROOT, "packages", "orbit-agent", "bin", "orbit-agent.mjs"),
         },
     ];
 
@@ -851,7 +1250,7 @@ function buildAuthenticatedWebUrl(expoPort: number, token: string, secret: strin
 }
 
 function buildCliCommand(envDir: string): string {
-    return `source "${path.join(envDir, "env.sh")}" && happy`;
+    return `source "${path.join(envDir, "env.sh")}" && orbit`;
 }
 
 // ============================================================================
@@ -886,7 +1285,7 @@ async function commandUp(template: Template, opts?: { noSwitch?: boolean }) {
         const envVars = buildEnvVars(envDir, config.serverPort, config.expoPort);
         const mergedEnv: Record<string, string | undefined> = { ...process.env, ...envVars };
         const buildResult = spawnSync("yarn", ["build"], {
-            cwd: path.join(REPO_ROOT, "packages", "happy-cli"),
+            cwd: path.join(REPO_ROOT, "packages", "orbit-cli"),
             env: mergedEnv,
             stdio: "inherit",
         });
@@ -1011,7 +1410,7 @@ async function main(): Promise<void> {
                 console.error("Usage: yarn env:server | yarn env:web | yarn env:cli");
                 process.exit(1);
             }
-            commandRun(args[0], args.slice(1));
+            await commandRun(args[0], args.slice(1));
             break;
         case "seed":
             await commandSeed();
@@ -1034,7 +1433,7 @@ async function main(): Promise<void> {
             commandTailscale();
             break;
         default:
-            console.log(`Happy Environment Manager
+            console.log(`Orbit Environment Manager
 
 Usage:
   yarn env:up --template <t>  Create + start everything (templates: ${VALID_TEMPLATES.join(", ")})
@@ -1050,7 +1449,8 @@ Usage:
 
   yarn env:server           Start the server (current environment)
   yarn env:web              Start the web app (current environment)
-  yarn env:ios              Start the iOS app (current environment)
+  yarn env:ios              Start the iOS simulator app (reuses installed app when possible)
+  yarn env:ios:rebuild      Force rebuild + reinstall the iOS simulator app
   yarn env:android          Start the Android app (current environment)
   yarn env:cli              Start the CLI (current environment)
 

@@ -7,20 +7,20 @@ COPY package.json yarn.lock ./
 COPY scripts ./scripts
 COPY patches ./patches
 
-RUN mkdir -p packages/happy-app packages/happy-server packages/happy-cli packages/happy-wire
+RUN mkdir -p packages/orbit-app packages/orbit-server packages/orbit-cli packages/orbit-wire
 
-COPY packages/happy-app/package.json packages/happy-app/
-COPY packages/happy-server/package.json packages/happy-server/
-COPY packages/happy-cli/package.json packages/happy-cli/
-COPY packages/happy-wire/package.json packages/happy-wire/
+COPY packages/orbit-app/package.json packages/orbit-app/
+COPY packages/orbit-server/package.json packages/orbit-server/
+COPY packages/orbit-cli/package.json packages/orbit-cli/
+COPY packages/orbit-wire/package.json packages/orbit-wire/
 
 # Workspace postinstall requirements
-COPY packages/happy-app/patches packages/happy-app/patches
-COPY packages/happy-server/prisma packages/happy-server/prisma
-COPY packages/happy-cli/scripts packages/happy-cli/scripts
-COPY packages/happy-cli/tools packages/happy-cli/tools
+COPY packages/orbit-app/patches packages/orbit-app/patches
+COPY packages/orbit-server/prisma packages/orbit-server/prisma
+COPY packages/orbit-cli/scripts packages/orbit-cli/scripts
+COPY packages/orbit-cli/tools packages/orbit-cli/tools
 
-RUN SKIP_HAPPY_WIRE_BUILD=1 yarn install --frozen-lockfile --ignore-engines
+RUN SKIP_ORBIT_WIRE_BUILD=1 yarn install --frozen-lockfile --ignore-engines
 
 # Stage 2: build the web app
 FROM deps AS builder
@@ -33,16 +33,16 @@ ENV APP_ENV=production
 ENV EXPO_PUBLIC_POSTHOG_API_KEY=$POSTHOG_API_KEY
 ENV EXPO_PUBLIC_REVENUE_CAT_STRIPE=$REVENUE_CAT_STRIPE
 
-COPY packages/happy-wire ./packages/happy-wire
-COPY packages/happy-app ./packages/happy-app
+COPY packages/orbit-wire ./packages/orbit-wire
+COPY packages/orbit-app ./packages/orbit-app
 
-RUN yarn workspace @slopus/happy-wire build
-RUN yarn workspace happy-app expo export --platform web --output-dir dist
+RUN yarn workspace @orbit/wire build
+RUN yarn workspace orbit-app expo export --platform web --output-dir dist
 
 # Stage 3: runtime with Nginx
 FROM nginx:alpine AS runner
 
-COPY --from=builder /repo/packages/happy-app/dist /usr/share/nginx/html
+COPY --from=builder /repo/packages/orbit-app/dist /usr/share/nginx/html
 
 # Remove default nginx configuration
 RUN rm /etc/nginx/conf.d/default.conf

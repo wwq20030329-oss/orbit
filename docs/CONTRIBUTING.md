@@ -1,6 +1,6 @@
-# Contributing to Happy
+# Contributing to Orbit
 
-Happy is built by engineers who use AI coding tools all day — and we built Happy so we could use them from anywhere. Contributions that make Happy better for that workflow are welcome.
+Orbit is built by engineers who use AI coding tools all day — and we built Orbit so we could supervise them from anywhere. Contributions that make Orbit better for that workflow are welcome.
 
 If you don't get a response on your PR or issue, tag **@bra1ndump**.
 
@@ -54,57 +54,57 @@ Every issue should start with a **one-paragraph summary** of the problem. Don't 
 ### Getting Started
 
 ```bash
-git clone https://github.com/slopus/happy.git
-cd happy
+git clone https://github.com/wwq20030329-oss/orbit.git
+cd orbit
 yarn install
 ```
 
-### Happy App (Mobile + Web)
+### Orbit App (Mobile + Web)
 
 ```bash
-yarn workspace happy-app start          # Expo dev server
-yarn workspace happy-app ios:dev        # iOS simulator
-yarn workspace happy-app android:dev    # Android emulator
+yarn workspace orbit-app start          # Expo dev server
+yarn workspace orbit-app ios:dev        # iOS simulator
+yarn workspace orbit-app android:dev    # Android emulator
 yarn web                                # Browser (shortcut)
-yarn workspace happy-app typecheck      # Run after all changes
+yarn workspace orbit-app typecheck      # Run after all changes
 ```
 
 The app has three build variants — all can be installed simultaneously on the same device:
 
 | Variant | Bundle ID | App Name | Use Case |
 |---------|-----------|----------|----------|
-| Development | `com.slopus.happy.dev` | Happy (dev) | Local development with hot reload |
-| Preview | `com.slopus.happy.preview` | Happy (preview) | Beta testing & OTA updates |
-| Production | `com.ex3ndr.happy` | Happy | App Store release |
+| Development | `com.orbit.app.dev` | Orbit (dev) | Local development with hot reload |
+| Preview | `com.orbit.app.preview` | Orbit (preview) | Beta testing & OTA updates |
+| Production | `com.orbit.app` | Orbit | App Store release |
 
 Swap `ios:dev` for `ios:preview` or `ios:production` (same for `android:`).
 
-#### macOS Desktop (Tauri)
+#### Desktop (Tauri)
 
 ```bash
-yarn workspace happy-app tauri:dev      # Run with hot reload
-yarn workspace happy-app tauri:build:dev
+yarn workspace orbit-app tauri:dev      # Run with hot reload
+yarn workspace orbit-app tauri:build:dev
 ```
 
-### Happy CLI
+### Orbit CLI
 
 ```bash
-yarn workspace happy build
-yarn workspace happy test
-yarn workspace happy dev                # Run without building (uses tsx)
+yarn workspace orbit build
+yarn workspace orbit test
+yarn workspace orbit dev                # Run without building (uses tsx)
 ```
 
-#### Local `happy-dev` Command
+#### Local `orbit-dev` Command
 
-To test your local build without overwriting the global `happy`:
+To test your local build without overwriting the global `orbit`:
 
 ```bash
-cd packages/happy-cli
-yarn link:dev       # Creates global happy-dev symlink
+cd packages/orbit-cli
+yarn link:dev       # Creates global orbit-dev symlink
 yarn unlink:dev     # Removes it
 ```
 
-Now `happy` runs the stable npm version, `happy-dev` runs your local build.
+Now `orbit` runs the stable npm version, `orbit-dev` runs your local build.
 
 #### Stable vs Dev Data Isolation
 
@@ -112,35 +112,35 @@ The CLI keeps stable and dev data completely separate:
 
 | | Stable | Development |
 |-|--------|-------------|
-| Data | `~/.happy/` | `~/.happy-dev/` |
+| Data | `~/.orbit/` | `~/.orbit-dev/` |
 | Start daemon | `npm run stable:daemon:start` | `npm run dev:daemon:start` |
 
 First time? Run `npm run setup:dev` to create the dev data directory.
 
-### Happy Server
+### Orbit Server
 
 ```bash
-yarn workspace happy-server standalone:dev   # Local server (no Docker needed)
+yarn workspace orbit-server standalone:dev   # Local server (no Docker needed)
 ```
 
 Runs on `localhost:3005` with embedded PGlite. To point the app at your local server:
 
 ```bash
-EXPO_PUBLIC_HAPPY_SERVER_URL=http://localhost:3005 yarn workspace happy-app start
+EXPO_PUBLIC_ORBIT_SERVER_URL=http://localhost:3005 yarn workspace orbit-app start
 ```
 
 ## Project Structure
 
 This is a monorepo with four packages:
 
-- **happy-app** — React Native + Expo mobile/web client
-- **happy-cli** — Node.js CLI that wraps Claude Code and Codex
-- **happy-agent** — Remote agent control
-- **happy-server** — Backend for encrypted sync
+- **orbit-app** — React Native + Expo mobile/web client branded as Orbit
+- **orbit-cli** — Node.js CLI that wraps Claude Code and Codex under the `orbit` command
+- **orbit-agent** — Remote agent control
+- **orbit-server** — Backend for encrypted sync
 
-For architecture details, check the [docs/](.) folder or ask Happy itself — it knows how the project is set up.
+For architecture details, check the [docs/](.) folder or ask Orbit itself — it knows how the project is set up.
 
 ## Community
 
 - [Discord](https://discord.gg/fX9WBAhyfD) — best place for questions and discussion
-- [Documentation](https://happy.engineering/docs/)
+- [Documentation](https://github.com/wwq20030329-oss/orbit/tree/main/docs)

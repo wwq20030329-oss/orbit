@@ -1,4 +1,4 @@
-# Standalone happy-server: single container, no external dependencies
+# Standalone orbit-server: single container, no external dependencies
 # Uses PGlite (embedded Postgres), local filesystem storage, no Redis
 
 # Stage 1: install dependencies
@@ -12,30 +12,30 @@ COPY package.json yarn.lock ./
 COPY scripts ./scripts
 COPY patches ./patches
 
-RUN mkdir -p packages/happy-app packages/happy-server packages/happy-cli packages/happy-agent packages/happy-wire
+RUN mkdir -p packages/orbit-app packages/orbit-server packages/orbit-cli packages/orbit-agent packages/orbit-wire
 
-COPY packages/happy-app/package.json packages/happy-app/
-COPY packages/happy-server/package.json packages/happy-server/
-COPY packages/happy-cli/package.json packages/happy-cli/
-COPY packages/happy-agent/package.json packages/happy-agent/
-COPY packages/happy-wire/package.json packages/happy-wire/
+COPY packages/orbit-app/package.json packages/orbit-app/
+COPY packages/orbit-server/package.json packages/orbit-server/
+COPY packages/orbit-cli/package.json packages/orbit-cli/
+COPY packages/orbit-agent/package.json packages/orbit-agent/
+COPY packages/orbit-wire/package.json packages/orbit-wire/
 
 # Workspace postinstall requirements
-COPY packages/happy-app/patches packages/happy-app/patches
-COPY packages/happy-server/prisma packages/happy-server/prisma
-COPY packages/happy-cli/scripts packages/happy-cli/scripts
-COPY packages/happy-cli/tools packages/happy-cli/tools
+COPY packages/orbit-app/patches packages/orbit-app/patches
+COPY packages/orbit-server/prisma packages/orbit-server/prisma
+COPY packages/orbit-cli/scripts packages/orbit-cli/scripts
+COPY packages/orbit-cli/tools packages/orbit-cli/tools
 
-RUN SKIP_HAPPY_WIRE_BUILD=1 yarn install --frozen-lockfile --ignore-engines
+RUN SKIP_ORBIT_WIRE_BUILD=1 yarn install --frozen-lockfile --ignore-engines
 
 # Stage 2: copy source and type-check
 FROM deps AS builder
 
-COPY packages/happy-wire ./packages/happy-wire
-COPY packages/happy-server ./packages/happy-server
+COPY packages/orbit-wire ./packages/orbit-wire
+COPY packages/orbit-server ./packages/orbit-server
 
-RUN yarn workspace @slopus/happy-wire build
-RUN yarn workspace happy-server build
+RUN yarn workspace @orbit/wire build
+RUN yarn workspace orbit-server build
 
 # Stage 3: runtime
 FROM node:20-slim AS runner
@@ -49,10 +49,10 @@ ENV DATA_DIR=/data
 ENV PGLITE_DIR=/data/pglite
 
 COPY --from=builder /repo/node_modules /repo/node_modules
-COPY --from=builder /repo/packages/happy-wire /repo/packages/happy-wire
-COPY --from=builder /repo/packages/happy-server /repo/packages/happy-server
+COPY --from=builder /repo/packages/orbit-wire /repo/packages/orbit-wire
+COPY --from=builder /repo/packages/orbit-server /repo/packages/orbit-server
 
 VOLUME /data
 EXPOSE 3005
 
-CMD ["sh", "-c", "node_modules/.bin/tsx packages/happy-server/sources/standalone.ts migrate && exec node_modules/.bin/tsx packages/happy-server/sources/standalone.ts serve"]
+CMD ["sh", "-c", "node_modules/.bin/tsx packages/orbit-server/sources/standalone.ts migrate && exec node_modules/.bin/tsx packages/orbit-server/sources/standalone.ts serve"]

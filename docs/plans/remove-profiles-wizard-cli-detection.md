@@ -14,7 +14,7 @@ The new session creation screen UI will be implemented separately — this plan 
 
 ### 1.1 Add `cliAvailability` to `MachineMetadata` schema
 
-**File:** `packages/happy-cli/src/api/types.ts` (line 130)
+**File:** `packages/orbit-cli/src/api/types.ts` (line 130)
 
 Add to `MachineMetadataSchema`:
 ```typescript
@@ -31,13 +31,13 @@ Using `.optional()` so older daemons without this field still parse fine.
 
 ### 1.2 Add matching field to app-side schema
 
-**File:** `packages/happy-app/sources/sync/storageTypes.ts` (line 119)
+**File:** `packages/orbit-app/sources/sync/storageTypes.ts` (line 119)
 
 Add same `cliAvailability` optional field to the app's `MachineMetadataSchema`.
 
 ### 1.3 Implement cross-platform CLI detection in the daemon
 
-**File:** `packages/happy-cli/src/daemon/run.ts`
+**File:** `packages/orbit-cli/src/daemon/run.ts`
 
 Add a `detectCLIAvailability()` function that:
 - Checks `os.platform()` to pick POSIX vs Windows detection
@@ -48,7 +48,7 @@ Add a `detectCLIAvailability()` function that:
 
 ### 1.4 Run detection at daemon boot
 
-**File:** `packages/happy-cli/src/daemon/run.ts` (line 27-34)
+**File:** `packages/orbit-cli/src/daemon/run.ts` (line 27-34)
 
 Update `initialMachineMetadata` construction to call `detectCLIAvailability()` and include the result:
 ```typescript
@@ -65,7 +65,7 @@ export const initialMachineMetadata: MachineMetadata = {
 
 ### 1.5 Re-detect every 20 seconds on keep-alive
 
-**File:** `packages/happy-cli/src/api/apiMachine.ts` (line 299-312)
+**File:** `packages/orbit-cli/src/api/apiMachine.ts` (line 299-312)
 
 Modify `startKeepAlive()` to also run `detectCLIAvailability()` every 20 seconds. If the result differs from the last known state, call `updateMachineMetadata()` to push the change. This avoids unnecessary metadata updates when nothing changed.
 
@@ -79,11 +79,11 @@ startKeepAlive():
       lastKnownAvailability = newAvailability
 ```
 
-The `detectCLIAvailability` function needs to be importable from apiMachine.ts — put it in a shared util like `packages/happy-cli/src/utils/detectCLI.ts`.
+The `detectCLIAvailability` function needs to be importable from apiMachine.ts — put it in a shared util like `packages/orbit-cli/src/utils/detectCLI.ts`.
 
 ### 1.6 Delete `useCLIDetection` hook from app
 
-**File:** `packages/happy-app/sources/hooks/useCLIDetection.ts` — **DELETE**
+**File:** `packages/orbit-app/sources/hooks/useCLIDetection.ts` — **DELETE**
 
 The app now reads `machine.metadata.cliAvailability` directly from the machine record (already decrypted and available via `useMachine()`). No RPC bash call needed.
 
@@ -95,42 +95,42 @@ The app now reads `machine.metadata.cliAvailability` directly from the machine r
 
 | File | Reason |
 |------|--------|
-| `packages/happy-app/sources/sync/profileUtils.ts` | Built-in profile definitions & docs |
-| `packages/happy-app/sources/sync/profileSync.ts` | Profile sync service |
-| `packages/happy-app/sources/components/ProfileEditForm.tsx` | Profile editor form |
-| `packages/happy-app/sources/components/EnvironmentVariablesList.tsx` | Env var list component |
-| `packages/happy-app/sources/components/EnvironmentVariableCard.tsx` | Env var card component |
-| `packages/happy-app/sources/hooks/useEnvironmentVariables.ts` | Queries daemon env vars for profiles |
-| `packages/happy-app/sources/hooks/envVarUtils.ts` | Env var substitution utils |
-| `packages/happy-app/sources/hooks/useCLIDetection.ts` | Replaced by daemon-side detection |
-| `packages/happy-app/sources/app/(app)/settings/profiles.tsx` | Profile settings page |
+| `packages/orbit-app/sources/sync/profileUtils.ts` | Built-in profile definitions & docs |
+| `packages/orbit-app/sources/sync/profileSync.ts` | Profile sync service |
+| `packages/orbit-app/sources/components/ProfileEditForm.tsx` | Profile editor form |
+| `packages/orbit-app/sources/components/EnvironmentVariablesList.tsx` | Env var list component |
+| `packages/orbit-app/sources/components/EnvironmentVariableCard.tsx` | Env var card component |
+| `packages/orbit-app/sources/hooks/useEnvironmentVariables.ts` | Queries daemon env vars for profiles |
+| `packages/orbit-app/sources/hooks/envVarUtils.ts` | Env var substitution utils |
+| `packages/orbit-app/sources/hooks/useCLIDetection.ts` | Replaced by daemon-side detection |
+| `packages/orbit-app/sources/app/(app)/settings/profiles.tsx` | Profile settings page |
 
 ### 2.2 Files to EDIT — remove profile references
 
-**`packages/happy-app/sources/sync/settings.ts`**
+**`packages/orbit-app/sources/sync/settings.ts`**
 - Remove: `AIBackendProfileSchema`, `AnthropicConfigSchema`, `OpenAIConfigSchema`, `AzureOpenAIConfigSchema`, `TogetherAIConfigSchema`, `TmuxConfigSchema`, `EnvironmentVariableSchema`, `ProfileCompatibilitySchema`
 - Remove: `getProfileEnvironmentVariables()`, `validateProfileForAgent()`
 - Remove from `SettingsSchema`: `profiles` field, `lastUsedProfile` field
 - Keep: `lastUsedAgent`, `lastUsedPermissionMode`, `lastUsedModelMode`, `recentMachinePaths` (still useful)
 
-**`packages/happy-app/sources/components/AgentInput.tsx`**
+**`packages/orbit-app/sources/components/AgentInput.tsx`**
 - Remove: imports from `profileUtils` and `settings` (lines 25-26)
 - Remove: `profileId` and `onProfileClick` props (lines 77-78)
 - Remove: profile data computation (lines 342-351)
 - Remove: profile selector button UI (lines 991-1022)
 
-**`packages/happy-app/sources/components/SettingsView.tsx`**
+**`packages/orbit-app/sources/components/SettingsView.tsx`**
 - Remove: profiles settings Item (lines 325-330)
 
-**`packages/happy-app/sources/sync/ops.ts`**
+**`packages/orbit-app/sources/sync/ops.ts`**
 - Remove `environmentVariables` from `SpawnSessionOptions` interface entirely
 - Remove `environmentVariables` from the RPC params type in `machineSpawnNewSession()`
 - The daemon only uses its own process.env + auth tokens
 
-**`packages/happy-cli/src/persistence.ts`**
+**`packages/orbit-cli/src/persistence.ts`**
 - Remove: `AIBackendProfileSchema` duplicate, `validateProfileForAgent()`, `getProfileEnvironmentVariables()`, `readSettings()` profile-related code, `activeProfileId` handling
 
-**`packages/happy-cli/src/daemon/run.ts`**
+**`packages/orbit-cli/src/daemon/run.ts`**
 - Remove: `getProfileEnvironmentVariablesForAgent()` function (lines 37-65)
 - Remove: Layer 2 profile env var logic in `spawnSession()` (lines 293-324) — simplify to just auth env + daemon's process.env
 - The env merge becomes: `{ ...authEnv }` only, expanded against `process.env`
@@ -143,36 +143,36 @@ The app now reads `machine.metadata.cliAvailability` directly from the machine r
 
 | File | Reason |
 |------|--------|
-| `packages/happy-app/sources/app/(app)/new/index.tsx` | Main wizard page — will be replaced with new simpler screen |
-| `packages/happy-app/sources/app/(app)/new/pick/machine.tsx` | Machine picker sub-screen (uses SearchableListSelector with favorites) |
-| `packages/happy-app/sources/app/(app)/new/pick/path.tsx` | Path picker sub-screen (uses SearchableListSelector with favorites) |
-| `packages/happy-app/sources/app/(app)/new/pick/profile-edit.tsx` | Profile edit sub-screen |
-| `packages/happy-app/sources/components/NewSessionWizard.tsx` | Legacy wizard component |
-| `packages/happy-app/sources/utils/tempDataStore.ts` | Temp data between wizard screens |
+| `packages/orbit-app/sources/app/(app)/new/index.tsx` | Main wizard page — will be replaced with new simpler screen |
+| `packages/orbit-app/sources/app/(app)/new/pick/machine.tsx` | Machine picker sub-screen (uses SearchableListSelector with favorites) |
+| `packages/orbit-app/sources/app/(app)/new/pick/path.tsx` | Path picker sub-screen (uses SearchableListSelector with favorites) |
+| `packages/orbit-app/sources/app/(app)/new/pick/profile-edit.tsx` | Profile edit sub-screen |
+| `packages/orbit-app/sources/components/NewSessionWizard.tsx` | Legacy wizard component |
+| `packages/orbit-app/sources/utils/tempDataStore.ts` | Temp data between wizard screens |
 
 Note: `SearchableListSelector` component itself is NOT deleted — it's a generic reusable component. Only its wizard-specific usages (favorites, double-section layout) go away. The new session screen's machine/path pickers will use simpler UI (implemented separately).
 
 ### 3.2 Files to EDIT — remove wizard references
 
-**`packages/happy-app/sources/app/(app)/_layout.tsx`**
+**`packages/orbit-app/sources/app/(app)/_layout.tsx`**
 - Remove: Stack.Screen entries for `new/index`, `new/pick/machine`, `new/pick/path`, `new/pick/profile-edit` (lines 300-327)
 
-**`packages/happy-app/sources/components/MainView.tsx`** — keep `router.push('/new')` (route stays the same)
+**`packages/orbit-app/sources/components/MainView.tsx`** — keep `router.push('/new')` (route stays the same)
 
-**`packages/happy-app/sources/components/SidebarView.tsx`** — keep `router.push('/new')`
+**`packages/orbit-app/sources/components/SidebarView.tsx`** — keep `router.push('/new')`
 
-**`packages/happy-app/sources/components/HomeHeader.tsx`** — keep `router.push('/new')`
+**`packages/orbit-app/sources/components/HomeHeader.tsx`** — keep `router.push('/new')`
 
-**`packages/happy-app/sources/components/CommandPalette/CommandPaletteProvider.tsx`** — keep `router.push('/new')`
+**`packages/orbit-app/sources/components/CommandPalette/CommandPaletteProvider.tsx`** — keep `router.push('/new')`
 
-**`packages/happy-app/sources/components/EmptySessionsTablet.tsx`** — keep `router.push('/new')`
+**`packages/orbit-app/sources/components/EmptySessionsTablet.tsx`** — keep `router.push('/new')`
 
 All navigation stays at `/new` — no route changes needed.
 
-**`packages/happy-app/sources/sync/persistence.ts`**
+**`packages/orbit-app/sources/sync/persistence.ts`**
 - KEEP: `NewSessionDraft` type, `loadNewSessionDraft()`, `saveNewSessionDraft()`, `clearNewSessionDraft()` — useful for the new simpler session screen too (stores machine, path, agent, permissions)
 
-**`packages/happy-app/sources/sync/settings.ts`**
+**`packages/orbit-app/sources/sync/settings.ts`**
 - Remove: `useEnhancedSessionWizard` from settings
 - Remove: `favoriteDirectories` — only used by wizard's SearchableListSelector
 - Remove: `favoriteMachines` — only used by wizard's SearchableListSelector
@@ -191,7 +191,7 @@ Remove from ALL language files (`en.ts`, `ru.ts`, `pl.ts`, `es.ts`, `ca.ts`, `it
 
 Since the new UI will be implemented separately, create a minimal placeholder:
 
-**`packages/happy-app/sources/app/(app)/new/index.tsx`** — replace with stub that:
+**`packages/orbit-app/sources/app/(app)/new/index.tsx`** — replace with stub that:
 - Shows "New Session" header
 - Has the `AgentInput` composer at the bottom (reuse existing component)
 - Reads `lastUsedAgent`, `lastUsedPermissionMode`, `lastUsedModelMode` from settings for defaults
