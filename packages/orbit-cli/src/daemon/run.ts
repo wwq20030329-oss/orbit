@@ -1,6 +1,5 @@
 import fs from 'fs/promises';
 import os from 'os';
-import * as tmp from 'tmp';
 
 import { ApiClient } from '@/api/api';
 import { TrackedSession } from './types';
@@ -28,9 +27,45 @@ import { detectResumeSupport } from '@/resume/localOrbitAgentAuth';
 import { resolveOrbitSession } from '@/resume/resolveOrbitSession';
 import {
   buildNativeCliResumeLaunch,
+  deleteNativeCliHistoryEntry,
   listNativeCliHistory,
   type NativeCliTool,
 } from '@/history/nativeCliHistory';
+import {
+  buildReplayEnvelopes,
+  extractClaudeReplayMessages,
+  loadClaudeReplayMessages,
+  loadCodexReplayMessages,
+  loadGeminiReplayMessages,
+  type ReplayTextMessage,
+} from '@/history/nativeCliHistoryReplay';
+import {
+  applyRuntimeLivenessToNativeHistoryEntries,
+  buildNativeLiveMirrorMetadata,
+  buildNativeLiveMirrorTag,
+  buildNativeLiveRuntimeDescriptor,
+  buildNativeLiveRuntimeId,
+  buildNativeLiveSnapshot,
+  formatNativeLiveReplayMessage,
+  getNativeLiveMirrorKey,
+} from './nativeLiveMirror';
+import {
+  buildOrbitLiveRuntimeDescriptor,
+  buildOrbitLiveRuntimeId,
+  buildOrbitLiveSnapshot,
+} from './orbitLiveRuntime';
+import { createInFlightRequestDeduper } from './inFlightRequestDeduper';
+import { killDuplicateDaemonSpawnedSessionProcesses, killOrphanDaemonSpawnedSessionProcesses } from './doctor';
+import { LiveRuntimeManager } from './liveRuntimeManager';
+import {
+  findTrackedSessionsByNativeHistorySource,
+  findTrackedSessionsByOrbitSessionId,
+  findTrackedSessionsForStopTarget,
+  type TrackedSessionEntry,
+} from './trackedSessions';
+import { createCodexAuthHome } from './codexAuthHome';
+import { createShutdownController, type ShutdownRequestSource } from './shutdownController';
+import { waitForSessionWebhook } from './webhookAwaiter';
 
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
@@ -45,34 +80,23 @@ export const initialMachineMetadata: MachineMetadata = {
 };
 
 export async function startDaemon(): Promise<void> {
-  // We don't have cleanup function at the time of server construction
-  // Control flow is:
-  // 1. Create promise that will resolve when shutdown is requested
-  // 2. Setup signal handlers to resolve this promise with the source of the shutdown
-  // 3. Once our setup is complete - if all goes well - we await this promise
-  // 4. When it resolves we can cleanup and exit
-  //
-  // In case the setup malfunctions - our signal handlers will not properly
-  // shut down. We will force exit the process with code 1.
-  let requestShutdown: (source: 'orbit-app' | 'orbit-cli' | 'os-signal' | 'exception', errorMessage?: string) => void;
-  let resolvesWhenShutdownRequested = new Promise<({ source: 'orbit-app' | 'orbit-cli' | 'os-signal' | 'exception', errorMessage?: string })>((resolve) => {
-    requestShutdown = (source, errorMessage) => {
-      logger.debug(`[DAEMON RUN] Requesting shutdown (source: ${source}, errorMessage: ${errorMessage})`);
+  const shutdownController = createShutdownController({
+    forceExitAfterMs: 1_000,
+    onForceExit: async () => {
+      logger.debug('[DAEMON RUN] Startup malfunctioned, forcing exit with code 1');
 
-      // Fallback - in case startup malfunctions - we will force exit the process with code 1
-      setTimeout(async () => {
-        logger.debug('[DAEMON RUN] Startup malfunctioned, forcing exit with code 1');
-
-        // Give time for logs to be flushed
-        await new Promise(resolve => setTimeout(resolve, 100))
-
-        process.exit(1);
-      }, 1_000);
-
-      // Start graceful shutdown
-      resolve({ source, errorMessage });
-    };
+      await new Promise(resolve => setTimeout(resolve, 100));
+      process.exit(1);
+    },
   });
+
+  const requestShutdown = (source: ShutdownRequestSource, errorMessage?: string) => {
+    logger.debug(`[DAEMON RUN] Requesting shutdown (source: ${source}, errorMessage: ${errorMessage})`);
+    const accepted = shutdownController.requestShutdown({ source, errorMessage });
+    if (!accepted) {
+      logger.debug('[DAEMON RUN] Shutdown already requested, ignoring duplicate request');
+    }
+  };
 
   // Setup signal handlers
   process.on('SIGINT', () => {
@@ -138,6 +162,16 @@ export async function startDaemon(): Promise<void> {
   // 2. Should not have another daemon process running
 
   try {
+    const orphanCleanup = await killOrphanDaemonSpawnedSessionProcesses();
+    if (orphanCleanup.killed > 0 || orphanCleanup.errors.length > 0) {
+      logger.debug('[DAEMON RUN] Cleaned orphan daemon-spawned sessions', orphanCleanup);
+    }
+
+    const duplicateCleanup = await killDuplicateDaemonSpawnedSessionProcesses();
+    if (duplicateCleanup.killed > 0 || duplicateCleanup.errors.length > 0) {
+      logger.debug('[DAEMON RUN] Cleaned duplicate daemon-spawned resume processes', duplicateCleanup);
+    }
+
     // Start caffeinate
     const caffeinateStarted = startCaffeinate();
     if (caffeinateStarted) {
@@ -150,12 +184,61 @@ export async function startDaemon(): Promise<void> {
 
     // Setup state - key by PID
     const pidToTrackedSession = new Map<number, TrackedSession>();
+    let liveRuntimeManagerRef: LiveRuntimeManager | null = null;
 
     // Session spawning awaiter system
     const pidToAwaiter = new Map<number, (session: TrackedSession) => void>();
+    const inFlightSpawnRequests = createInFlightRequestDeduper<SpawnSessionResult>();
 
     // Helper functions
     const getCurrentChildren = () => Array.from(pidToTrackedSession.values());
+    const getTrackedSessionEntries = (): TrackedSessionEntry[] => (
+      Array.from(pidToTrackedSession.entries()).map(([pid, session]) => ({ pid, session }))
+    );
+
+    const cleanupTrackedSessionResources = (pid: number, session: TrackedSession, reason: string) => {
+      const cleanup = session.resourceCleanup;
+      if (!cleanup) {
+        return;
+      }
+
+      session.resourceCleanup = undefined;
+      void Promise.resolve(cleanup()).catch((error) => {
+        logger.debug(`[DAEMON RUN] Failed to clean tracked session resources for PID ${pid} (${reason}):`, error);
+      });
+    };
+
+    const stopTrackedSession = (pid: number, session: TrackedSession, reason: string) => {
+      if (session.startedBy === 'daemon' && session.childProcess) {
+        try {
+          session.childProcess.kill('SIGTERM');
+          logger.debug(`[DAEMON RUN] Sent SIGTERM to tracked daemon session PID ${pid} (${reason})`);
+        } catch (error) {
+          logger.debug(`[DAEMON RUN] Failed to kill tracked daemon session PID ${pid} (${reason}):`, error);
+        }
+      } else {
+        try {
+          process.kill(pid, 'SIGTERM');
+          logger.debug(`[DAEMON RUN] Sent SIGTERM to tracked external session PID ${pid} (${reason})`);
+        } catch (error) {
+          logger.debug(`[DAEMON RUN] Failed to kill tracked external session PID ${pid} (${reason}):`, error);
+        }
+      }
+
+      pidToTrackedSession.delete(pid);
+      pidToAwaiter.delete(pid);
+      cleanupTrackedSessionResources(pid, session, reason);
+    };
+
+    const cleanupTrackedSessionDuplicates = (matches: TrackedSessionEntry[], reason: string) => {
+      if (matches.length < 2) {
+        return;
+      }
+
+      for (const duplicate of matches.slice(1)) {
+        stopTrackedSession(duplicate.pid, duplicate.session, `${reason} duplicate cleanup`);
+      }
+    };
 
     // Handle webhook from an Orbit session reporting itself
     const onOrbitSessionWebhook = (sessionId: string, sessionMetadata: Metadata) => {
@@ -256,17 +339,12 @@ export async function startDaemon(): Promise<void> {
 
         // Resolve authentication token if provided
         const authEnv: Record<string, string> = {};
+        let resourceCleanup: (() => Promise<void>) | undefined;
         if (options.token) {
           if (options.agent === 'codex') {
-
-            // Create a temporary directory for Codex
-            const codexHomeDir = tmp.dirSync();
-
-            // Write the token to the temporary directory
-            fs.writeFile(join(codexHomeDir.name, 'auth.json'), options.token);
-
-            // Set the environment variable for Codex
-            authEnv.CODEX_HOME = codexHomeDir.name;
+            const codexAuthHome = await createCodexAuthHome(options.token);
+            authEnv.CODEX_HOME = codexAuthHome.homeDir;
+            resourceCleanup = codexAuthHome.cleanup;
           } else { // Assuming claude
             authEnv.CLAUDE_CODE_OAUTH_TOKEN = options.token;
           }
@@ -382,6 +460,7 @@ export async function startDaemon(): Promise<void> {
               startedBy: 'daemon',
               pid: tmuxResult.pid, // Real PID from tmux -P flag
               tmuxSessionId: tmuxResult.sessionId,
+              resourceCleanup,
               directoryCreated,
               message: directoryCreated
                 ? `The path '${directory}' did not exist. We created a new folder and spawned a new session in tmux session '${tmuxSessionName}'. Use 'tmux attach -t ${tmuxSessionName}' to view the session.`
@@ -394,26 +473,18 @@ export async function startDaemon(): Promise<void> {
             // Wait for webhook to populate session with orbitSessionId (exact same as regular flow)
             logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${tmuxResult.pid} (tmux)`);
 
-            return new Promise((resolve) => {
-              // Set timeout for webhook (same as regular flow)
-              const timeout = setTimeout(() => {
-                pidToAwaiter.delete(tmuxResult.pid!);
+            return waitForSessionWebhook({
+              pid: tmuxResult.pid,
+              pidToAwaiter,
+              timeoutMs: 15_000,
+              timeoutLabel: `PID ${tmuxResult.pid} (tmux)`,
+              onTimeout: () => {
                 logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${tmuxResult.pid} (tmux)`);
-                resolve({
-                  type: 'error',
-                  errorMessage: `Session webhook timeout for PID ${tmuxResult.pid} (tmux)`
-                });
-              }, 15_000); // Same timeout as regular sessions
-
-              // Register awaiter for tmux session (exact same as regular flow)
-              pidToAwaiter.set(tmuxResult.pid!, (completedSession) => {
-                clearTimeout(timeout);
-                logger.debug(`[DAEMON RUN] Session ${completedSession.orbitSessionId} fully spawned with webhook (tmux)`);
-                resolve({
-                  type: 'success',
-                  sessionId: completedSession.orbitSessionId!
-                });
-              });
+                const trackedSession = pidToTrackedSession.get(tmuxResult.pid!);
+                if (trackedSession) {
+                  stopTrackedSession(tmuxResult.pid!, trackedSession, `webhook-timeout:${tmuxResult.pid}`);
+                }
+              },
             });
           } else {
             logger.debug(`[DAEMON RUN] Failed to spawn in tmux: ${tmuxResult.error}, falling back to regular spawning`);
@@ -464,6 +535,7 @@ export async function startDaemon(): Promise<void> {
             },
             directoryCreated,
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined,
+            resourceCleanup,
           });
         }
 
@@ -488,12 +560,14 @@ export async function startDaemon(): Promise<void> {
       env,
       directoryCreated = false,
       message,
+      resourceCleanup,
     }: {
       args: string[];
       cwd: string;
       env: NodeJS.ProcessEnv;
       directoryCreated?: boolean;
       message?: string;
+      resourceCleanup?: () => Promise<void>;
     }): Promise<SpawnSessionResult> => {
       const orbitProcess = spawnOrbitCLI(args, {
         cwd,
@@ -516,6 +590,7 @@ export async function startDaemon(): Promise<void> {
         startedBy: 'daemon',
         pid: orbitProcess.pid,
         childProcess: orbitProcess,
+        resourceCleanup,
         directoryCreated,
         message,
       };
@@ -538,54 +613,77 @@ export async function startDaemon(): Promise<void> {
 
       logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${orbitProcess.pid}`);
 
-      return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          pidToAwaiter.delete(orbitProcess.pid!);
+      return waitForSessionWebhook({
+        pid: orbitProcess.pid,
+        pidToAwaiter,
+        timeoutMs: 15_000,
+        timeoutLabel: `PID ${orbitProcess.pid}`,
+        onTimeout: () => {
           logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${orbitProcess.pid}`);
-          resolve({
-            type: 'error',
-            errorMessage: `Session webhook timeout for PID ${orbitProcess.pid}`
-          });
-        }, 15_000);
-
-        pidToAwaiter.set(orbitProcess.pid!, (completedSession) => {
-          clearTimeout(timeout);
-          logger.debug(`[DAEMON RUN] Session ${completedSession.orbitSessionId} fully spawned with webhook`);
-          resolve({
-            type: 'success',
-            sessionId: completedSession.orbitSessionId!
-          });
-        });
+          const timedOutSession = pidToTrackedSession.get(orbitProcess.pid!);
+          if (timedOutSession) {
+            stopTrackedSession(orbitProcess.pid!, timedOutSession, `webhook-timeout:${orbitProcess.pid}`);
+          }
+        },
       });
     };
 
     const resumeSession = async (orbitSessionId: string): Promise<SpawnSessionResult> => {
-      try {
-        const previousSession = await resolveOrbitSession(orbitSessionId);
-        const launch = buildResumeLaunch(previousSession, {
-          startedBy: 'daemon',
-          claudeStartingMode: 'remote',
-        });
+      return inFlightSpawnRequests.run(`resume-orbit:${orbitSessionId}`, async () => {
+        try {
+          const existingMatches = findTrackedSessionsByOrbitSessionId(getTrackedSessionEntries(), orbitSessionId);
+          const existingTrackedSession = existingMatches[0];
+          if (existingTrackedSession?.session.orbitSessionId) {
+            cleanupTrackedSessionDuplicates(existingMatches, `resume-orbit:${orbitSessionId}`);
+            logger.debug(`[DAEMON RUN] Reusing tracked Orbit session ${orbitSessionId} on PID ${existingTrackedSession.pid}`);
+            return {
+              type: 'success',
+              sessionId: existingTrackedSession.session.orbitSessionId,
+            };
+          }
 
-        await fs.access(launch.cwd);
+          const previousSession = await resolveOrbitSession(orbitSessionId);
+          const launch = buildResumeLaunch(previousSession, {
+            startedBy: 'daemon',
+            claudeStartingMode: 'remote',
+          });
 
-        return spawnTrackedOrbitProcess({
-          args: launch.args,
-          cwd: launch.cwd,
-          env: { ...process.env },
-        });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        logger.debug('[DAEMON RUN] Failed to resume session:', error);
-        return {
-          type: 'error',
-          errorMessage: `Failed to resume session: ${errorMessage}`,
-        };
-      }
+          await fs.access(launch.cwd);
+
+          return spawnTrackedOrbitProcess({
+            args: launch.args,
+            cwd: launch.cwd,
+            env: { ...process.env },
+          });
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.debug('[DAEMON RUN] Failed to resume session:', error);
+          return {
+            type: 'error',
+            errorMessage: `Failed to resume session: ${errorMessage}`,
+          };
+        }
+      });
     };
 
     const listNativeCliHistoryForMachine = async (limit?: number) => {
-      return await listNativeCliHistory({ limit });
+      const entries = await listNativeCliHistory({ limit });
+      return applyRuntimeLivenessToNativeHistoryEntries(
+        entries,
+        liveRuntimeManagerRef?.listRuntimes() ?? [],
+      );
+    };
+
+    const deleteNativeCliHistoryEntryForMachine = async (params: {
+      tool: NativeCliTool;
+      backendId: string;
+      workingDirectory?: string;
+    }) => {
+      return await deleteNativeCliHistoryEntry({
+        tool: params.tool,
+        backendId: params.backendId,
+        workingDirectory: params.workingDirectory,
+      });
     };
 
     const resumeNativeCliHistorySession = async (params: {
@@ -594,85 +692,94 @@ export async function startDaemon(): Promise<void> {
       workingDirectory: string;
       title: string;
       summary?: string | null;
+      updatedAt?: number | null;
     }): Promise<SpawnSessionResult> => {
-      try {
-        await fs.access(params.workingDirectory);
+      const dedupeKey = `resume-native:${params.tool}:${params.backendId}:${params.workingDirectory}`;
+      return inFlightSpawnRequests.run(dedupeKey, async () => {
+        try {
+          const existingMatches = findTrackedSessionsByNativeHistorySource(
+            getTrackedSessionEntries(),
+            params.tool,
+            params.backendId,
+          );
+          const existingTrackedSession = existingMatches[0];
+          if (existingTrackedSession?.session.orbitSessionId) {
+            cleanupTrackedSessionDuplicates(existingMatches, dedupeKey);
+            logger.debug(
+              `[DAEMON RUN] Reusing tracked native history session ${params.tool}:${params.backendId} on PID ${existingTrackedSession.pid}`,
+            );
+            return {
+              type: 'success',
+              sessionId: existingTrackedSession.session.orbitSessionId,
+            };
+          }
 
-        const launch = buildNativeCliResumeLaunch({
-          id: `${params.tool}:${params.backendId}`,
-          tool: params.tool,
-          backendId: params.backendId,
-          workingDirectory: params.workingDirectory,
-          title: params.title,
-          summary: params.summary ?? null,
-          updatedAt: Date.now(),
-        }, {
-          startedBy: 'daemon',
-          claudeStartingMode: 'remote',
-        });
+          await fs.access(params.workingDirectory);
 
-        return spawnTrackedOrbitProcess({
-          args: launch.args,
-          cwd: launch.cwd,
-          env: {
-            ...process.env,
-            ORBIT_IMPORT_NATIVE_HISTORY: '1',
-            ORBIT_NATIVE_HISTORY_TOOL: params.tool,
-            ORBIT_NATIVE_HISTORY_BACKEND_ID: params.backendId,
-            ORBIT_NATIVE_HISTORY_TITLE: params.title,
-            ORBIT_NATIVE_HISTORY_SUMMARY: params.summary ?? '',
-          },
-        });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        logger.debug('[DAEMON RUN] Failed to resume native CLI history session:', error);
-        return {
-          type: 'error',
-          errorMessage: `Failed to resume native CLI history session: ${errorMessage}`,
-        };
-      }
+          const launch = buildNativeCliResumeLaunch({
+            id: `${params.tool}:${params.backendId}`,
+            tool: params.tool,
+            backendId: params.backendId,
+            workingDirectory: params.workingDirectory,
+            title: params.title,
+            summary: params.summary ?? null,
+            updatedAt: params.updatedAt ?? Date.now(),
+          }, {
+            startedBy: 'daemon',
+            claudeStartingMode: 'remote',
+          });
+
+          return spawnTrackedOrbitProcess({
+            args: launch.args,
+            cwd: launch.cwd,
+            env: {
+              ...process.env,
+              ORBIT_IMPORT_NATIVE_HISTORY: '1',
+              ORBIT_NATIVE_HISTORY_TOOL: params.tool,
+              ORBIT_NATIVE_HISTORY_BACKEND_ID: params.backendId,
+              ORBIT_NATIVE_HISTORY_TITLE: params.title,
+              ORBIT_NATIVE_HISTORY_SUMMARY: params.summary ?? '',
+              ORBIT_NATIVE_HISTORY_UPDATED_AT: String(params.updatedAt ?? Date.now()),
+            },
+          });
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.debug('[DAEMON RUN] Failed to resume native CLI history session:', error);
+          return {
+            type: 'error',
+            errorMessage: `Failed to resume native CLI history session: ${errorMessage}`,
+          };
+        }
+      });
     };
 
     // Stop a session by sessionId or PID fallback
     const stopSession = (sessionId: string): boolean => {
       logger.debug(`[DAEMON RUN] Attempting to stop session ${sessionId}`);
 
-      // Try to find by sessionId first
-      for (const [pid, session] of pidToTrackedSession.entries()) {
-        if (session.orbitSessionId === sessionId ||
-          (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
-
-          if (session.startedBy === 'daemon' && session.childProcess) {
-            try {
-              session.childProcess.kill('SIGTERM');
-              logger.debug(`[DAEMON RUN] Sent SIGTERM to daemon-spawned session ${sessionId}`);
-            } catch (error) {
-              logger.debug(`[DAEMON RUN] Failed to kill session ${sessionId}:`, error);
-            }
-          } else {
-            // For externally started sessions, try to kill by PID
-            try {
-              process.kill(pid, 'SIGTERM');
-              logger.debug(`[DAEMON RUN] Sent SIGTERM to external session PID ${pid}`);
-            } catch (error) {
-              logger.debug(`[DAEMON RUN] Failed to kill external session PID ${pid}:`, error);
-            }
-          }
-
-          pidToTrackedSession.delete(pid);
-          logger.debug(`[DAEMON RUN] Removed session ${sessionId} from tracking`);
-          return true;
-        }
+      const matches = findTrackedSessionsForStopTarget(getTrackedSessionEntries(), sessionId);
+      if (matches.length === 0) {
+        logger.debug(`[DAEMON RUN] Session ${sessionId} not found`);
+        return false;
       }
 
-      logger.debug(`[DAEMON RUN] Session ${sessionId} not found`);
-      return false;
+      for (const match of matches) {
+        stopTrackedSession(match.pid, match.session, `stop-session:${sessionId}`);
+      }
+
+      logger.debug(`[DAEMON RUN] Removed ${matches.length} tracked session(s) for ${sessionId}`);
+      return true;
     };
 
     // Handle child process exit
     const onChildExited = (pid: number) => {
       logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
+      const session = pidToTrackedSession.get(pid);
       pidToTrackedSession.delete(pid);
+      pidToAwaiter.delete(pid);
+      if (session) {
+        cleanupTrackedSessionResources(pid, session, 'child-exited');
+      }
     };
 
     // Start control server
@@ -716,26 +823,318 @@ export async function startDaemon(): Promise<void> {
 
     // Create realtime machine session
     const apiMachine = api.machineSyncClient(machine);
+    const nativeLiveMirrorClients = new Map<string, ReturnType<typeof api.sessionSyncClient>>();
+    const nativeLiveMirrorCounts = new Map<string, number>();
+    const liveRuntimeManager = new LiveRuntimeManager({ bufferSize: 500 });
+    liveRuntimeManagerRef = liveRuntimeManager;
+    const nativeLiveRuntimeCounts = new Map<string, number>();
+    const nativeLiveRuntimeSnapshots = new Map<string, string>();
+    const orbitTmuxRuntimeSnapshots = new Map<string, string>();
+
+    const findTrackedTmuxRuntime = (runtimeId: string) => {
+      return getCurrentChildren().find((session) => (
+        session.orbitSessionId
+        && session.tmuxSessionId
+        && buildOrbitLiveRuntimeId(session.orbitSessionId) === runtimeId
+      )) ?? null;
+    };
+
+    liveRuntimeManager.on('frame', (frame) => {
+      apiMachine.emitLiveFrame(frame);
+    });
+
+    liveRuntimeManager.on('detach', (event) => {
+      apiMachine.detachLiveRuntime(event);
+    });
 
     // Set RPC handlers
     apiMachine.setRPCHandlers({
       spawnSession,
       resumeSession,
       listNativeCliHistory: listNativeCliHistoryForMachine,
+      deleteNativeCliHistoryEntry: deleteNativeCliHistoryEntryForMachine,
       resumeNativeCliHistorySession,
       stopSession,
       requestShutdown: () => requestShutdown('orbit-app')
     });
 
+    apiMachine.setLiveMirrorHandlers({
+      onResize: async (payload) => {
+        const trackedRuntime = findTrackedTmuxRuntime(payload.runtimeId);
+        if (trackedRuntime?.tmuxSessionId) {
+          const tmux = getTmuxUtilities(parseTmuxSessionIdentifier(trackedRuntime.tmuxSessionId).session);
+          const resized = await tmux.resizePane(trackedRuntime.tmuxSessionId, payload.cols, payload.rows);
+          if (!resized) {
+            return;
+          }
+        }
+
+        const descriptor = liveRuntimeManager.updateRuntimeSize(payload.runtimeId, payload.cols, payload.rows);
+        apiMachine.updateLiveRuntime(descriptor);
+      },
+      onControl: async (payload) => {
+        const runtime = liveRuntimeManager.getRuntime(payload.runtimeId);
+        if (!runtime) {
+          return;
+        }
+        const descriptor = liveRuntimeManager.upsertRuntimeDescriptor({
+          ...runtime,
+          controlMode: payload.mode,
+          updatedAt: Date.now(),
+        });
+        apiMachine.updateLiveRuntime(descriptor);
+      },
+      onInput: async (payload) => {
+        const trackedRuntime = findTrackedTmuxRuntime(payload.runtimeId);
+        if (!trackedRuntime?.tmuxSessionId) {
+          return;
+        }
+
+        const tmux = getTmuxUtilities(parseTmuxSessionIdentifier(trackedRuntime.tmuxSessionId).session);
+        await tmux.sendInput(trackedRuntime.tmuxSessionId, payload.data);
+      },
+    });
+
     // Connect to server
     apiMachine.connect();
+
+    const enableNativeLiveMirrors = process.env.ORBIT_ENABLE_NATIVE_LIVE_MIRRORS === '1';
+    const enableLiveRuntimeMirror = process.env.ORBIT_ENABLE_LIVE_RUNTIME_MIRROR !== '0';
+    const liveRuntimeMirrorIntervalMs = parseInt(process.env.ORBIT_LIVE_RUNTIME_MIRROR_INTERVAL || '1500');
+
+    const loadReplayMessagesForEntry = async (entry: Awaited<ReturnType<typeof listNativeCliHistory>>[number]): Promise<ReplayTextMessage[]> => {
+      if (entry.tool === 'claude') {
+        return extractClaudeReplayMessages(
+          await loadClaudeReplayMessages(entry.workingDirectory, entry.backendId),
+        );
+      }
+
+      if (entry.tool === 'codex') {
+        return await loadCodexReplayMessages(entry.backendId);
+      }
+
+      return await loadGeminiReplayMessages(entry.backendId);
+    };
+
+    const syncOrbitTmuxRuntimes = async (): Promise<Set<string>> => {
+      const runtimeIds = new Set<string>();
+
+      for (const trackedSession of getCurrentChildren()) {
+        const descriptor = buildOrbitLiveRuntimeDescriptor(trackedSession, machineId);
+        if (!descriptor) {
+          continue;
+        }
+
+        runtimeIds.add(descriptor.runtimeId);
+        const existingRuntime = liveRuntimeManager.getRuntime(descriptor.runtimeId);
+        if (!existingRuntime) {
+          const { seq: _seq, updatedAt: _updatedAt, ...registerOptions } = descriptor;
+          const registeredRuntime = liveRuntimeManager.registerRuntime(registerOptions);
+          apiMachine.registerLiveRuntime(registeredRuntime);
+        } else {
+          const updatedRuntime = liveRuntimeManager.upsertRuntimeDescriptor({
+            ...descriptor,
+            seq: existingRuntime.seq,
+            cols: existingRuntime.cols,
+            rows: existingRuntime.rows,
+            controlMode: existingRuntime.controlMode,
+          });
+          apiMachine.updateLiveRuntime(updatedRuntime);
+        }
+
+        const tmux = getTmuxUtilities(parseTmuxSessionIdentifier(trackedSession.tmuxSessionId!).session);
+        const paneText = await tmux.capturePaneText(trackedSession.tmuxSessionId!, { scrollbackLines: 300 });
+        const snapshot = buildOrbitLiveSnapshot(paneText);
+        const previousSnapshot = orbitTmuxRuntimeSnapshots.get(descriptor.runtimeId);
+        if (snapshot && snapshot !== previousSnapshot) {
+          orbitTmuxRuntimeSnapshots.set(descriptor.runtimeId, snapshot);
+          liveRuntimeManager.appendFrame(descriptor.runtimeId, 'snapshot', snapshot, Date.now());
+        }
+      }
+
+      return runtimeIds;
+    };
+
+    const syncLiveRuntimeMirror = async () => {
+      const liveRuntimeIds = await syncOrbitTmuxRuntimes();
+      const liveEntries = (await listNativeCliHistory({ limit: 100 }))
+        .filter((entry) => entry.isLive);
+
+      for (const entry of liveEntries) {
+        const runtimeId = buildNativeLiveRuntimeId(entry);
+        liveRuntimeIds.add(runtimeId);
+        const nextDescriptor = buildNativeLiveRuntimeDescriptor(entry, machineId);
+        const existingRuntime = liveRuntimeManager.getRuntime(runtimeId);
+
+        if (!existingRuntime) {
+          const { seq: _seq, updatedAt: _updatedAt, ...registerOptions } = nextDescriptor;
+          const descriptor = liveRuntimeManager.registerRuntime(registerOptions);
+          apiMachine.registerLiveRuntime(descriptor);
+        } else {
+          const descriptor = liveRuntimeManager.upsertRuntimeDescriptor({
+            ...nextDescriptor,
+            seq: existingRuntime.seq,
+          });
+          apiMachine.updateLiveRuntime(descriptor);
+        }
+
+        const messages = await loadReplayMessagesForEntry(entry);
+        const snapshot = buildNativeLiveSnapshot(messages);
+        const previousSnapshot = nativeLiveRuntimeSnapshots.get(runtimeId);
+        if (snapshot.length > 0 && snapshot !== previousSnapshot) {
+          nativeLiveRuntimeSnapshots.set(runtimeId, snapshot);
+          liveRuntimeManager.appendFrame(runtimeId, 'snapshot', snapshot, entry.updatedAt);
+        }
+
+        const previousCount = nativeLiveRuntimeCounts.get(runtimeId) ?? 0;
+        const startIndex = previousCount > messages.length ? 0 : previousCount;
+        for (const message of messages.slice(startIndex)) {
+          liveRuntimeManager.appendFrame(
+            runtimeId,
+            'output',
+            formatNativeLiveReplayMessage(message),
+            message.timestamp,
+          );
+        }
+        nativeLiveRuntimeCounts.set(runtimeId, messages.length);
+      }
+
+      for (const runtime of liveRuntimeManager.listRuntimes()) {
+        if (liveRuntimeIds.has(runtime.runtimeId)) {
+          continue;
+        }
+
+        liveRuntimeManager.detachRuntime(runtime.runtimeId, 'runtime-ended', 'Live runtime ended');
+        nativeLiveRuntimeCounts.delete(runtime.runtimeId);
+        nativeLiveRuntimeSnapshots.delete(runtime.runtimeId);
+        orbitTmuxRuntimeSnapshots.delete(runtime.runtimeId);
+      }
+    };
+
+    const syncNativeLiveMirrors = async () => {
+      const liveEntries = (await listNativeCliHistory({ limit: 100 }))
+        .filter((entry) => entry.isLive);
+      const liveKeys = new Set(liveEntries.map((entry) => getNativeLiveMirrorKey(entry)));
+
+      for (const entry of liveEntries) {
+        const key = getNativeLiveMirrorKey(entry);
+        let client = nativeLiveMirrorClients.get(key);
+
+        if (!client) {
+          const sessionRecord = await api.getOrCreateSession({
+            tag: buildNativeLiveMirrorTag(entry),
+            metadata: buildNativeLiveMirrorMetadata(entry, machineId),
+            state: { controlledByUser: false },
+            suppressNetworkFailure: true,
+          });
+
+          if (!sessionRecord) {
+            continue;
+          }
+
+          client = api.sessionSyncClient(sessionRecord);
+          nativeLiveMirrorClients.set(key, client);
+        }
+
+        if (entry.tool === 'claude') {
+          const messages = await loadClaudeReplayMessages(entry.workingDirectory, entry.backendId);
+          const previousCount = nativeLiveMirrorCounts.get(key) ?? 0;
+          const startIndex = previousCount > messages.length ? 0 : previousCount;
+          for (const message of messages.slice(startIndex)) {
+            client.sendClaudeSessionMessage(message);
+          }
+          nativeLiveMirrorCounts.set(key, messages.length);
+        } else if (entry.tool === 'codex') {
+          const messages = await loadCodexReplayMessages(entry.backendId);
+          const envelopes = buildReplayEnvelopes(entry.backendId, messages);
+          const previousCount = nativeLiveMirrorCounts.get(key) ?? 0;
+          const startIndex = previousCount > envelopes.length ? 0 : previousCount;
+          for (const envelope of envelopes.slice(startIndex)) {
+            client.sendSessionProtocolMessage(envelope);
+          }
+          nativeLiveMirrorCounts.set(key, envelopes.length);
+        } else {
+          const messages = await loadGeminiReplayMessages(entry.backendId);
+          const envelopes = buildReplayEnvelopes(entry.backendId, messages);
+          const previousCount = nativeLiveMirrorCounts.get(key) ?? 0;
+          const startIndex = previousCount > envelopes.length ? 0 : previousCount;
+          for (const envelope of envelopes.slice(startIndex)) {
+            client.sendSessionProtocolMessage(envelope);
+          }
+          nativeLiveMirrorCounts.set(key, envelopes.length);
+        }
+
+        client.keepAlive(false, 'local');
+        await client.flush();
+      }
+
+      for (const [key, client] of nativeLiveMirrorClients.entries()) {
+        if (liveKeys.has(key)) {
+          continue;
+        }
+        client.sendSessionDeath();
+        await client.flush();
+        await client.close();
+        nativeLiveMirrorClients.delete(key);
+      }
+    };
+
+    let nativeLiveMirrorRunning = false;
+    const runNativeLiveMirrors = async () => {
+      if (nativeLiveMirrorRunning) {
+        return;
+      }
+      nativeLiveMirrorRunning = true;
+      try {
+        await syncNativeLiveMirrors();
+      } catch (error) {
+        logger.debug('[DAEMON RUN] Native live mirror sync failed:', error);
+      } finally {
+        nativeLiveMirrorRunning = false;
+      }
+    };
+
+    let liveRuntimeMirrorRunning = false;
+    const runLiveRuntimeMirror = async () => {
+      if (liveRuntimeMirrorRunning) {
+        return;
+      }
+      liveRuntimeMirrorRunning = true;
+      try {
+        await syncLiveRuntimeMirror();
+      } catch (error) {
+        logger.debug('[DAEMON RUN] Live runtime mirror sync failed:', error);
+      } finally {
+        liveRuntimeMirrorRunning = false;
+      }
+    };
+
+    let nativeLiveMirrorInterval: ReturnType<typeof setInterval> | null = null;
+    let liveRuntimeMirrorInterval: ReturnType<typeof setInterval> | null = null;
+    if (enableNativeLiveMirrors) {
+      await runNativeLiveMirrors();
+      nativeLiveMirrorInterval = setInterval(() => {
+        void runNativeLiveMirrors();
+      }, 5000);
+    } else {
+      logger.debug('[DAEMON RUN] Native live mirror sync disabled; relying on on-demand history resume');
+    }
+
+    if (enableLiveRuntimeMirror) {
+      await runLiveRuntimeMirror();
+      liveRuntimeMirrorInterval = setInterval(() => {
+        void runLiveRuntimeMirror();
+      }, liveRuntimeMirrorIntervalMs);
+    } else {
+      logger.debug('[DAEMON RUN] Live runtime mirror disabled');
+    }
 
     // Every 60 seconds:
     // 1. Prune stale sessions
     // 2. Check if daemon needs update
     // 3. If outdated, restart with latest version
     // 4. Write heartbeat
-    const heartbeatIntervalMs = parseInt(process.env.ORBIT_DAEMON_HEARTBEAT_INTERVAL || process.env.HAPPY_DAEMON_HEARTBEAT_INTERVAL || '60000');
+    const heartbeatIntervalMs = parseInt(process.env.ORBIT_DAEMON_HEARTBEAT_INTERVAL || '60000');
     let heartbeatRunning = false
     const restartOnStaleVersionAndHeartbeat = setInterval(async () => {
       if (heartbeatRunning) {
@@ -755,7 +1154,12 @@ export async function startDaemon(): Promise<void> {
         } catch (error) {
           // Process is dead, remove from tracking
           logger.debug(`[DAEMON RUN] Removing stale session with PID ${pid} (process no longer exists)`);
+          const staleSession = pidToTrackedSession.get(pid);
           pidToTrackedSession.delete(pid);
+          pidToAwaiter.delete(pid);
+          if (staleSession) {
+            cleanupTrackedSessionResources(pid, staleSession, 'heartbeat-stale-prune');
+          }
         }
       }
 
@@ -825,11 +1229,18 @@ export async function startDaemon(): Promise<void> {
     // Setup signal handlers
     const cleanupAndShutdown = async (source: 'orbit-app' | 'orbit-cli' | 'os-signal' | 'exception', errorMessage?: string) => {
       logger.debug(`[DAEMON RUN] Starting proper cleanup (source: ${source}, errorMessage: ${errorMessage})...`);
+      shutdownController.clearForcedExitTimer();
 
       // Clear health check interval
       if (restartOnStaleVersionAndHeartbeat) {
         clearInterval(restartOnStaleVersionAndHeartbeat);
         logger.debug('[DAEMON RUN] Health check interval cleared');
+      }
+      if (nativeLiveMirrorInterval) {
+        clearInterval(nativeLiveMirrorInterval);
+      }
+      if (liveRuntimeMirrorInterval) {
+        clearInterval(liveRuntimeMirrorInterval);
       }
 
       // Update daemon state before shutting down
@@ -843,7 +1254,13 @@ export async function startDaemon(): Promise<void> {
       // Give time for metadata update to send
       await new Promise(resolve => setTimeout(resolve, 100));
 
+      for (const runtime of liveRuntimeManager.listRuntimes()) {
+        liveRuntimeManager.detachRuntime(runtime.runtimeId, 'runtime-ended', 'Daemon shutting down');
+      }
       apiMachine.shutdown();
+      for (const client of nativeLiveMirrorClients.values()) {
+        await client.close();
+      }
       await stopControlServer();
       await cleanupDaemonState();
       await stopCaffeinate();
@@ -856,7 +1273,7 @@ export async function startDaemon(): Promise<void> {
     logger.debug('[DAEMON RUN] Daemon started successfully, waiting for shutdown request');
 
     // Wait for shutdown request
-    const shutdownRequest = await resolvesWhenShutdownRequested;
+    const shutdownRequest = await shutdownController.whenShutdownRequested;
     await cleanupAndShutdown(shutdownRequest.source, shutdownRequest.errorMessage);
   } catch (error) {
     logger.debug('[DAEMON RUN][FATAL] Failed somewhere unexpectedly - exiting with code 1', error);

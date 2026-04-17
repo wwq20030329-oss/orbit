@@ -14,6 +14,7 @@ export interface TrackedSession {
   orbitSessionMetadataFromLocalWebhook?: Metadata;
   pid: number;
   childProcess?: ChildProcess;
+  resourceCleanup?: () => Promise<void> | void;
   error?: string;
   directoryCreated?: boolean;
   message?: string;
