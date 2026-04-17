@@ -83,6 +83,13 @@ import {
     handleRealtimeUpdateMachineState,
     type MachineRealtimeUpdateDependencies,
 } from './machineRealtimeUpdate';
+import {
+    abortAndDrainPendingOutbox,
+    didBackgroundSendTimeoutExpireOnResume,
+    getBackgroundSendWatchdogDisposition,
+    hasPendingOutboxMessages,
+    shouldStartBackgroundSendWatchdog,
+} from './outboxSendLifecycle';
 
 type V3PostSessionMessagesResponse = {
     messages: Array<{
@@ -204,9 +211,13 @@ class Sync {
         AppState.addEventListener('change', (nextAppState) => {
             this.appState = nextAppState;
             if (nextAppState === 'active') {
-                const shouldFailAfterResume = this.backgroundSendStartedAt !== null
-                    && this.hasPendingOutboxMessages()
-                    && (Date.now() - this.backgroundSendStartedAt) >= Sync.BACKGROUND_SEND_TIMEOUT_MS;
+                const hasPendingMessages = hasPendingOutboxMessages(this.sendAbortControllers, this.pendingOutbox);
+                const shouldFailAfterResume = didBackgroundSendTimeoutExpireOnResume({
+                    backgroundSendStartedAt: this.backgroundSendStartedAt,
+                    hasPendingMessages,
+                    now: Date.now(),
+                    timeoutMs: Sync.BACKGROUND_SEND_TIMEOUT_MS,
+                });
                 void this.cancelBackgroundSendTimeoutNotification();
                 this.clearBackgroundSendWatchdog();
                 if (shouldFailAfterResume) {
@@ -479,23 +490,13 @@ class Sync {
         });
     }
 
-    private hasPendingOutboxMessages() {
-        if (this.sendAbortControllers.size > 0) {
-            return true;
-        }
-        for (const messages of this.pendingOutbox.values()) {
-            if (messages.length > 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private maybeStartBackgroundSendWatchdog() {
-        if (Platform.OS === 'web' || this.appState === 'active') {
-            return;
-        }
-        if (!this.hasPendingOutboxMessages() || this.backgroundSendTimeout) {
+        if (!shouldStartBackgroundSendWatchdog({
+            appState: this.appState,
+            hasPendingMessages: hasPendingOutboxMessages(this.sendAbortControllers, this.pendingOutbox),
+            hasWatchdog: this.backgroundSendTimeout !== null,
+            isWeb: Platform.OS === 'web',
+        })) {
             return;
         }
 
@@ -569,21 +570,8 @@ class Sync {
     }
 
     private failPendingOutboxMessages(reasonText: string) {
-        for (const controller of this.sendAbortControllers.values()) {
-            controller.abort();
-        }
-        this.sendAbortControllers.clear();
-
         const now = Date.now();
-        const sessionIds: string[] = [];
-        for (const [sessionId, pending] of this.pendingOutbox) {
-            if (pending.length === 0) {
-                continue;
-            }
-            pending.length = 0;
-            this.pendingOutbox.delete(sessionId);
-            sessionIds.push(sessionId);
-        }
+        const sessionIds = abortAndDrainPendingOutbox(this.sendAbortControllers, this.pendingOutbox);
 
         for (const sessionId of sessionIds) {
             this.enqueueMessages(sessionId, [{
@@ -601,7 +589,7 @@ class Sync {
     }
 
     private async handleBackgroundSendTimeout() {
-        if (!this.hasPendingOutboxMessages()) {
+        if (!hasPendingOutboxMessages(this.sendAbortControllers, this.pendingOutbox)) {
             await this.cancelBackgroundSendTimeoutNotification();
             this.backgroundSendStartedAt = null;
             return;
@@ -1764,11 +1752,7 @@ class Sync {
     private flushOutbox = async (sessionId: string) => {
         const pending = this.pendingOutbox.get(sessionId);
         if (!pending || pending.length === 0) {
-            if (!this.hasPendingOutboxMessages()) {
-                this.clearBackgroundSendWatchdog();
-                await this.cancelBackgroundSendTimeoutNotification();
-                this.backgroundSendStartedAt = null;
-            }
+            await this.reconcileBackgroundSendWatchdog();
             return;
         }
 
@@ -1815,11 +1799,23 @@ class Sync {
         if (pending.length === 0) {
             this.pendingOutbox.delete(sessionId);
         }
-        if (!this.hasPendingOutboxMessages()) {
+        await this.reconcileBackgroundSendWatchdog();
+    }
+
+    private reconcileBackgroundSendWatchdog = async () => {
+        const disposition = getBackgroundSendWatchdogDisposition({
+            appState: this.appState,
+            hasPendingMessages: hasPendingOutboxMessages(this.sendAbortControllers, this.pendingOutbox),
+        });
+
+        if (disposition === 'clear') {
             this.clearBackgroundSendWatchdog();
             await this.cancelBackgroundSendTimeoutNotification();
             this.backgroundSendStartedAt = null;
-        } else if (this.appState !== 'active') {
+            return;
+        }
+
+        if (disposition === 'start') {
             this.maybeStartBackgroundSendWatchdog();
         }
     }

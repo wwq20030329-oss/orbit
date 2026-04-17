@@ -28,6 +28,7 @@ import {
     hydrateSessionPreferences,
     normalizeSessionDraft,
 } from './sessionPreferences';
+import { buildLegacySessionListData } from './legacySessionListData';
 
 // Debounce timer for realtimeMode changes
 let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -376,48 +377,7 @@ export const storage = create<StorageState>()((set, get) => {
                 };
             });
 
-            // Build active set from all sessions (including existing ones)
-            const activeSet = new Set<string>();
-            Object.values(mergedSessions).forEach(session => {
-                if (isSessionActive(session)) {
-                    activeSet.add(session.id);
-                }
-            });
-
-            // Separate active and inactive sessions
-            const activeSessions: Session[] = [];
-            const inactiveSessions: Session[] = [];
-
-            // Process all sessions from merged set
-            Object.values(mergedSessions).forEach(session => {
-                if (activeSet.has(session.id)) {
-                    activeSessions.push(session);
-                } else {
-                    inactiveSessions.push(session);
-                }
-            });
-
-            // Sort both arrays by creation date for stable ordering
-            activeSessions.sort((a, b) => b.createdAt - a.createdAt);
-            inactiveSessions.sort((a, b) => b.createdAt - a.createdAt);
-
-            // Build flat list data for FlashList
-            const listData: SessionListItem[] = [];
-
-            if (activeSessions.length > 0) {
-                listData.push('online');
-                listData.push(...activeSessions);
-            }
-
-            // Legacy sessionsData - to be removed
-            // Machines are now integrated into sessionListViewData
-
-            if (inactiveSessions.length > 0) {
-                listData.push('offline');
-                listData.push(...inactiveSessions);
-            }
-
-            // console.log(`📊 Storage: applySessions called with ${sessions.length} sessions, active: ${activeSessions.length}, inactive: ${inactiveSessions.length}`);
+            const listData: SessionListItem[] = buildLegacySessionListData(Object.values(mergedSessions));
 
             // Process AgentState updates for sessions that already have messages loaded
             const updatedSessionMessages = { ...state.sessionMessages };
