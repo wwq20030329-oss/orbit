@@ -63,6 +63,11 @@ import {
   type GeminiThoughtLevelBackend,
 } from '@/gemini/sessionConfigSync';
 import { ensureGeminiBackendSession } from '@/gemini/backendLifecycle';
+import {
+  buildPromptForTurn,
+  executeGeminiPromptTurn,
+  normalizeGeminiTurnError,
+} from '@/gemini/promptExecution';
 
 type ConfigurableGeminiBackend = AgentBackend & GeminiThoughtLevelBackend;
 
@@ -1078,86 +1083,21 @@ export async function runGemini(opts: {
           throw new Error('Gemini backend or session not initialized');
         }
         
-        // The prompt already includes system prompt and change_title instruction (added in onUserMessage handler)
-        // This is done in the message queue, so message.message already contains everything
-        let promptToSend = message.message;
-        
-        // Inject conversation history context if model was just changed
-        if (injectHistoryContext && conversationHistory.hasHistory()) {
-          const historyContext = conversationHistory.getContextForNewSession();
-          promptToSend = historyContext + promptToSend;
-          logger.debug(`[gemini] Injected conversation history context (${historyContext.length} chars)`);
-          // Don't clear history - keep accumulating for future model changes
-        }
-        
-        logger.debug(`[gemini] Sending prompt to Gemini (length: ${promptToSend.length}): ${promptToSend.substring(0, 100)}...`);
-        logger.debug(`[gemini] Full prompt: ${promptToSend}`);
-        await applyThoughtLevelIfRequested(message.mode.effortLevel, geminiBackend as ConfigurableGeminiBackend | null);
-        
-        // Retry logic for transient Gemini API errors (empty response, internal errors)
-        const MAX_RETRIES = 3;
-        const RETRY_DELAY_MS = 2000;
-        let lastError: unknown = null;
-        
-        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-          try {
-            await geminiBackend.sendPrompt(acpSessionId, promptToSend);
-            logger.debug('[gemini] Prompt sent successfully');
-            
-            // Wait for Gemini to finish responding (all chunks received + final idle)
-            // This ensures we don't send task_complete until response is truly done
-            if (geminiBackend.waitForResponseComplete) {
-              await geminiBackend.waitForResponseComplete(120000);
-              logger.debug('[gemini] Response complete');
-            }
-            
-            break; // Success, exit retry loop
-          } catch (promptError) {
-            lastError = promptError;
-            const errObj = promptError as any;
-            const errorDetails = errObj?.data?.details || errObj?.details || errObj?.message || '';
-            const errorCode = errObj?.code;
-            
-            // Check for quota exhausted - this is NOT retryable
-            const isQuotaError = errorDetails.includes('exhausted') || 
-                                 errorDetails.includes('quota') ||
-                                 errorDetails.includes('capacity');
-            if (isQuotaError) {
-              // Extract reset time from error message like "Your quota will reset after 3h20m35s."
-              const resetTimeMatch = errorDetails.match(/reset after (\d+h)?(\d+m)?(\d+s)?/i);
-              let resetTimeMsg = '';
-              if (resetTimeMatch) {
-                const parts = resetTimeMatch.slice(1).filter(Boolean).join('');
-                resetTimeMsg = ` Quota resets in ${parts}.`;
-              }
-              const quotaMsg = `Gemini quota exceeded.${resetTimeMsg} Try using a different model (gemini-2.5-flash-lite) or wait for quota reset.`;
-              messageBuffer.addMessage(quotaMsg, 'status');
-              session.sendAgentMessage('gemini', { type: 'message', message: quotaMsg });
-              throw promptError; // Don't retry quota errors
-            }
-            
-            // Check if this is a retryable error (empty response, internal error -32603)
-            const isEmptyResponseError = errorDetails.includes('empty response') || 
-                                         errorDetails.includes('Model stream ended');
-            const isInternalError = errorCode === -32603;
-            const isRetryable = isEmptyResponseError || isInternalError;
-            
-            if (isRetryable && attempt < MAX_RETRIES) {
-              logger.debug(`[gemini] Retryable error on attempt ${attempt}/${MAX_RETRIES}: ${errorDetails}`);
-              messageBuffer.addMessage(`Gemini returned empty response, retrying (${attempt}/${MAX_RETRIES})...`, 'status');
-              await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * attempt));
-              continue;
-            }
-            
-            // Not retryable or max retries reached
-            throw promptError;
-          }
-        }
-        
-        if (lastError && MAX_RETRIES > 1) {
-          // If we had errors but eventually succeeded, log it
-          logger.debug('[gemini] Prompt succeeded after retries');
-        }
+        const { promptToSend } = buildPromptForTurn({
+          basePrompt: message.message,
+          injectHistoryContext,
+          conversationHistory,
+        });
+        await executeGeminiPromptTurn({
+          backend: geminiBackend as ConfigurableGeminiBackend,
+          acpSessionId,
+          promptToSend,
+          effortLevel: message.mode.effortLevel,
+          applyThoughtLevel: applyThoughtLevelIfRequested,
+          onRetry: (attempt, maxRetries) => {
+            messageBuffer.addMessage(`Gemini returned empty response, retrying (${attempt}/${maxRetries})...`, 'status');
+          },
+        });
         
         // Mark as not first message after sending prompt
         if (first) {
@@ -1166,75 +1106,12 @@ export async function runGemini(opts: {
       } catch (error) {
         logger.debug('[gemini] Error in gemini session:', error);
         const isAbortError = error instanceof Error && error.name === 'AbortError';
+        const errorMsg = normalizeGeminiTurnError(error, displayedModel || DEFAULT_GEMINI_MODEL);
 
         if (isAbortError) {
-          messageBuffer.addMessage('Aborted by user', 'status');
-          session.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
+          messageBuffer.addMessage(errorMsg, 'status');
+          session.sendSessionEvent({ type: 'message', message: errorMsg });
         } else {
-          // Parse error message
-          let errorMsg = 'Process error occurred';
-          
-          if (typeof error === 'object' && error !== null) {
-            const errObj = error as any;
-            
-            // Extract error information from various possible formats
-            const errorDetails = errObj.data?.details || errObj.details || '';
-            const errorCode = errObj.code || errObj.status || (errObj.response?.status);
-            const errorMessage = errObj.message || errObj.error?.message || '';
-            const errorString = String(error);
-            
-            // Check for 404 error (model not found)
-            if (errorCode === 404 || errorDetails.includes('notFound') || errorDetails.includes('404') || 
-                errorMessage.includes('not found') || errorMessage.includes('404')) {
-              const currentModel = displayedModel || 'gemini-2.5-pro';
-              errorMsg = `Model "${currentModel}" not found. Available models: gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite`;
-            }
-            // Check for empty response / internal error after retries exhausted
-            else if (errorCode === -32603 || 
-                     errorDetails.includes('empty response') || errorDetails.includes('Model stream ended')) {
-              errorMsg = 'Gemini API returned empty response after retries. This is a temporary issue - please try again.';
-            }
-            // Check for rate limit error (429) - multiple possible formats
-            else if (errorCode === 429 || 
-                     errorDetails.includes('429') || errorMessage.includes('429') || errorString.includes('429') ||
-                     errorDetails.includes('rateLimitExceeded') || errorDetails.includes('RESOURCE_EXHAUSTED') ||
-                     errorMessage.includes('Rate limit exceeded') || errorMessage.includes('Resource exhausted') ||
-                     errorString.includes('rateLimitExceeded') || errorString.includes('RESOURCE_EXHAUSTED')) {
-              errorMsg = 'Gemini API rate limit exceeded. Please wait a moment and try again. The API will retry automatically.';
-            }
-            // Check for quota/capacity exceeded error
-            else if (errorDetails.includes('quota') || errorMessage.includes('quota') || errorString.includes('quota') ||
-                     errorDetails.includes('exhausted') || errorDetails.includes('capacity')) {
-              // Extract reset time from error message like "Your quota will reset after 3h20m35s."
-              const resetTimeMatch = (errorDetails + errorMessage + errorString).match(/reset after (\d+h)?(\d+m)?(\d+s)?/i);
-              let resetTimeMsg = '';
-              if (resetTimeMatch) {
-                const parts = resetTimeMatch.slice(1).filter(Boolean).join('');
-                resetTimeMsg = ` Quota resets in ${parts}.`;
-              }
-              errorMsg = `Gemini quota exceeded.${resetTimeMsg} Try using a different model (gemini-2.5-flash-lite) or wait for quota reset.`;
-            }
-            // Check for authentication error (Google Workspace accounts need project ID)
-            else if (errorMessage.includes('Authentication required') || 
-                     errorDetails.includes('Authentication required') ||
-                     errorCode === -32000) {
-              errorMsg = `Authentication required. For Google Workspace accounts, you need to set a Google Cloud Project:\n` +
-                         `  orbit gemini project set <your-project-id>\n` +
-                         `Or use a different Google account: orbit connect gemini\n` +
-                         `Guide: https://goo.gle/gemini-cli-auth-docs#workspace-gca`;
-            }
-            // Check for empty error (command not found)
-            else if (Object.keys(error).length === 0) {
-              errorMsg = 'Failed to start Gemini. Is "gemini" CLI installed? Run: npm install -g @google/gemini-cli';
-            }
-            // Use message from error object
-            else if (errObj.message || errorMessage) {
-              errorMsg = errorDetails || errorMessage || errObj.message;
-            }
-          } else if (error instanceof Error) {
-            errorMsg = error.message;
-          }
-          
           messageBuffer.addMessage(errorMsg, 'status');
           // Use sendAgentMessage for consistency with ACP format
           session.sendAgentMessage('gemini', {
