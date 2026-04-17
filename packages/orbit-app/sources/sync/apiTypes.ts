@@ -36,11 +36,13 @@ export const ApiUpdateNewSessionSchema = z.object({
     createdAt: z.number(),
     updatedAt: z.number(),
 });
+export type ApiUpdateNewSession = z.infer<typeof ApiUpdateNewSessionSchema>;
 
 export const ApiDeleteSessionSchema = z.object({
     t: z.literal('delete-session'),
     sid: z.string(), // Session ID
 });
+export type ApiDeleteSession = z.infer<typeof ApiDeleteSessionSchema>;
 
 export const ApiUpdateAccountSchema = z.object({
     t: z.literal('update-account'),
@@ -153,6 +155,7 @@ export const ApiUpdateSchema = z.union([
 ]);
 
 export type ApiUpdateNewMessage = z.infer<typeof ApiUpdateNewMessageSchema>;
+export type ApiUpdateSessionState = z.infer<typeof ApiUpdateSessionStateSchema>;
 export type ApiRelationshipUpdated = z.infer<typeof ApiRelationshipUpdatedSchema>;
 export type ApiKvBatchUpdate = z.infer<typeof ApiKvBatchUpdateSchema>;
 export type ApiUpdate = z.infer<typeof ApiUpdateSchema>;

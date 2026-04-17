@@ -5,7 +5,16 @@ import { handleUnauthorizedResponse } from '@/auth/authRecovery';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { storage } from './storage';
-import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema, type ApiUpdateContainer, type ApiUpdateNewMessage } from './apiTypes';
+import {
+    ApiEphemeralUpdateSchema,
+    ApiMessage,
+    ApiUpdateContainerSchema,
+    type ApiDeleteSession,
+    type ApiUpdateContainer,
+    type ApiUpdateNewMessage,
+    type ApiUpdateNewSession,
+    type ApiUpdateSessionState,
+} from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
 import { Session, Machine } from './storageTypes';
 import { InvalidateSync } from '@/utils/sync';
@@ -63,6 +72,11 @@ import {
 } from './sessionMessageBootstrap';
 import { fetchSessionMessagesPage } from './sessionMessagesApi';
 import { handleRealtimeMessageUpdate } from './sessionRealtimeMessageUpdate';
+import {
+    handleRealtimeDeleteSessionUpdate,
+    handleRealtimeNewSessionUpdate,
+    handleRealtimeUpdateSessionState,
+} from './sessionRealtimeSessionUpdate';
 
 type V3PostSessionMessagesResponse = {
     messages: Array<{
@@ -2005,98 +2019,87 @@ class Sync {
             });
 
         } else if (updateData.body.t === 'new-session') {
+            const newSessionUpdate = updateData as ApiUpdateContainer & { body: ApiUpdateNewSession };
             log.log('🆕 New session update received');
-            try {
-                const decryptedSessions = await this.decryptSessions([updateData.body]);
-                if (decryptedSessions.length > 0) {
-                    this.applySessions(decryptedSessions);
-                } else {
+            await handleRealtimeNewSessionUpdate(newSessionUpdate, {
+                decryptSessions: this.decryptSessions,
+                applySessions: this.applySessions,
+                invalidateSessions: () => {
+                    log.log(`🆕 Failed to hydrate new session ${newSessionUpdate.body.id}, refreshing sessions`);
                     this.sessionsSync.invalidate();
-                }
-            } catch (error) {
-                log.log(`🆕 Failed to hydrate new session ${updateData.body.id}, refreshing sessions`);
-                this.sessionsSync.invalidate();
-            }
+                },
+                getSession: (sessionId) => storage.getState().sessions[sessionId],
+                getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
+                isSessionVisible: this.isSessionVisible,
+                invalidateMessages: (sessionId) => this.getMessagesSync(sessionId).invalidate(),
+                invalidateGitStatus: (sessionId) => gitStatusSync.invalidate(sessionId),
+                rememberDeletedSessionHints: rememberNativeCliHintsForSession,
+                deleteSession: (sessionId) => storage.getState().deleteSession(sessionId),
+                removeSessionEncryption: (sessionId) => this.encryption.removeSessionEncryption(sessionId),
+                removeProjectSession: (sessionId) => projectManager.removeSession(sessionId),
+                clearGitStatus: (sessionId) => gitStatusSync.clearForSession(sessionId),
+                clearSessionCaches: () => {},
+                onPermissionRequested: () => {},
+                didSessionControlReturnToApp,
+            });
         } else if (updateData.body.t === 'delete-session') {
+            const deleteSessionUpdate = updateData as ApiUpdateContainer & { body: ApiDeleteSession };
             log.log('🗑️ Delete session update received');
-            const sessionId = updateData.body.sid;
-            const deletedSession = storage.getState().sessions[sessionId];
-
-            if (deletedSession) {
-                rememberNativeCliHintsForSession(deletedSession);
-            }
-
-            // Remove session from storage
-            storage.getState().deleteSession(sessionId);
-
-            // Remove encryption keys from memory
-            this.encryption.removeSessionEncryption(sessionId);
-
-            // Remove from project manager
-            projectManager.removeSession(sessionId);
-
-            // Clear any cached git status
-            gitStatusSync.clearForSession(sessionId);
-            this.messagesSync.delete(sessionId);
-            this.sendSync.delete(sessionId);
-            this.pendingOutbox.delete(sessionId);
-            this.sessionLastSeq.delete(sessionId);
-            this.sessionMessageLocks.delete(sessionId);
-            this.sessionMessageQueue.delete(sessionId);
-            this.sessionQueueProcessing.delete(sessionId);
-
-            log.log(`🗑️ Session ${sessionId} deleted from local storage`);
+            handleRealtimeDeleteSessionUpdate(deleteSessionUpdate, {
+                decryptSessions: this.decryptSessions,
+                applySessions: this.applySessions,
+                invalidateSessions: () => this.sessionsSync.invalidate(),
+                getSession: (sessionId) => storage.getState().sessions[sessionId],
+                getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
+                isSessionVisible: this.isSessionVisible,
+                invalidateMessages: (sessionId) => this.getMessagesSync(sessionId).invalidate(),
+                invalidateGitStatus: (sessionId) => gitStatusSync.invalidate(sessionId),
+                rememberDeletedSessionHints: rememberNativeCliHintsForSession,
+                deleteSession: (sessionId) => storage.getState().deleteSession(sessionId),
+                removeSessionEncryption: (sessionId) => this.encryption.removeSessionEncryption(sessionId),
+                removeProjectSession: (sessionId) => projectManager.removeSession(sessionId),
+                clearGitStatus: (sessionId) => gitStatusSync.clearForSession(sessionId),
+                clearSessionCaches: (sessionId) => {
+                    this.messagesSync.delete(sessionId);
+                    this.sendSync.delete(sessionId);
+                    this.pendingOutbox.delete(sessionId);
+                    this.sessionLastSeq.delete(sessionId);
+                    this.sessionMessageLocks.delete(sessionId);
+                    this.sessionMessageQueue.delete(sessionId);
+                    this.sessionQueueProcessing.delete(sessionId);
+                },
+                onPermissionRequested: () => {},
+                didSessionControlReturnToApp,
+            });
+            log.log(`🗑️ Session ${deleteSessionUpdate.body.sid} deleted from local storage`);
         } else if (updateData.body.t === 'update-session') {
-            const session = storage.getState().sessions[updateData.body.id];
-            if (session) {
-                // Get session encryption
-                const sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
-                if (!sessionEncryption) {
-                    console.error(`Session encryption not found for ${updateData.body.id} - this should never happen`);
-                    return;
-                }
-
-                const agentState = updateData.body.agentState && sessionEncryption
-                    ? await sessionEncryption.decryptAgentState(updateData.body.agentState.version, updateData.body.agentState.value)
-                    : session.agentState;
-                const metadata = updateData.body.metadata && sessionEncryption
-                    ? await sessionEncryption.decryptMetadata(updateData.body.metadata.version, updateData.body.metadata.value)
-                    : session.metadata;
-
-                this.applySessions([{
-                    ...session,
-                    agentState,
-                    agentStateVersion: updateData.body.agentState
-                        ? updateData.body.agentState.version
-                        : session.agentStateVersion,
-                    metadata,
-                    metadataVersion: updateData.body.metadata
-                        ? updateData.body.metadata.version
-                        : session.metadataVersion,
-                    updatedAt: updateData.createdAt,
-                    seq: updateData.seq
-                }]);
-
-                // Invalidate git status when agent state changes (files may have been modified)
-                if (updateData.body.agentState) {
-                    gitStatusSync.invalidate(updateData.body.id);
-
-                    // Check for new permission requests and notify voice assistant
-                    if (agentState?.requests && Object.keys(agentState.requests).length > 0) {
-                        const requestIds = Object.keys(agentState.requests);
-                        const firstRequest = agentState.requests[requestIds[0]];
-                        const toolName = firstRequest?.tool;
-                        voiceHooks.onPermissionRequested(updateData.body.id, requestIds[0], toolName, firstRequest?.arguments);
-                    }
-
-                    // Re-fetch messages when control returns to mobile (local -> remote mode switch)
-                    // This catches up on any messages that were exchanged while desktop had control
-                    if (didSessionControlReturnToApp(session.agentState, agentState) && this.isSessionVisible(updateData.body.id)) {
-                        log.log(`🔄 Control returned to mobile for session ${updateData.body.id}, re-fetching messages`);
-                        this.getMessagesSync(updateData.body.id).invalidate();
-                    }
-                }
-            }
+            const updateSessionState = updateData as ApiUpdateContainer & { body: ApiUpdateSessionState };
+            await handleRealtimeUpdateSessionState(updateSessionState, {
+                decryptSessions: this.decryptSessions,
+                applySessions: this.applySessions,
+                invalidateSessions: () => this.sessionsSync.invalidate(),
+                getSession: (sessionId) => storage.getState().sessions[sessionId],
+                getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
+                isSessionVisible: this.isSessionVisible,
+                invalidateMessages: (sessionId) => {
+                    log.log(`🔄 Control returned to mobile for session ${sessionId}, re-fetching messages`);
+                    this.getMessagesSync(sessionId).invalidate();
+                },
+                invalidateGitStatus: (sessionId) => gitStatusSync.invalidate(sessionId),
+                rememberDeletedSessionHints: rememberNativeCliHintsForSession,
+                deleteSession: (sessionId) => storage.getState().deleteSession(sessionId),
+                removeSessionEncryption: (sessionId) => this.encryption.removeSessionEncryption(sessionId),
+                removeProjectSession: (sessionId) => projectManager.removeSession(sessionId),
+                clearGitStatus: (sessionId) => gitStatusSync.clearForSession(sessionId),
+                clearSessionCaches: () => {},
+                onPermissionRequested: (sessionId, requestId, toolName, args) => {
+                    voiceHooks.onPermissionRequested(sessionId, requestId, toolName ?? 'unknown', args);
+                },
+                onMissingSessionEncryption: (sessionId) => {
+                    console.error(`Session encryption not found for ${sessionId} - this should never happen`);
+                },
+                didSessionControlReturnToApp,
+            });
         } else if (updateData.body.t === 'update-account') {
             const accountUpdate = updateData.body;
             const currentProfile = storage.getState().profile;
