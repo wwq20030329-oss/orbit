@@ -29,10 +29,8 @@ import {
     normalizeSessionDraft,
 } from './sessionPreferences';
 import { buildLegacySessionListData } from './legacySessionListData';
-
-// Debounce timer for realtimeMode changes
-let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-const REALTIME_MODE_DEBOUNCE_MS = 150;
+import { clearRealtimeModeDebounce, scheduleRealtimeModeUpdate } from './realtimeModeController';
+import { areNativeCliEntriesEqual } from './nativeCliHistoryEntries';
 
 /**
  * Centralized session online state resolver
@@ -47,38 +45,6 @@ function resolveSessionOnlineState(session: { active: boolean; activeAt: number 
  */
 function isSessionActive(session: { active: boolean; activeAt: number }): boolean {
     return isSessionLikelyOnline(session);
-}
-
-function areNativeCliEntriesEqual(
-    left: NativeCliHistoryEntry[] | undefined,
-    right: NativeCliHistoryEntry[],
-): boolean {
-    if (!left || left.length !== right.length) {
-        return false;
-    }
-
-    for (let index = 0; index < left.length; index += 1) {
-        const leftEntry = left[index];
-        const rightEntry = right[index];
-        if (!leftEntry || !rightEntry) {
-            return false;
-        }
-
-        if (
-            leftEntry.id !== rightEntry.id
-            || leftEntry.backendId !== rightEntry.backendId
-            || leftEntry.updatedAt !== rightEntry.updatedAt
-            || leftEntry.isLive !== rightEntry.isLive
-            || leftEntry.title !== rightEntry.title
-            || leftEntry.summary !== rightEntry.summary
-            || leftEntry.workingDirectory !== rightEntry.workingDirectory
-            || leftEntry.projectRoot !== rightEntry.projectRoot
-        ) {
-            return false;
-        }
-    }
-
-    return true;
 }
 
 // Known entitlement IDs
@@ -739,30 +705,15 @@ export const storage = create<StorageState>()((set, get) => {
             realtimeStatus: status
         })),
         setRealtimeMode: (mode: 'idle' | 'agent-speaking' | 'user-speaking', immediate?: boolean) => {
-            if (immediate) {
-                // Clear any pending debounce and set immediately
-                if (realtimeModeDebounceTimer) {
-                    clearTimeout(realtimeModeDebounceTimer);
-                    realtimeModeDebounceTimer = null;
-                }
-                set((state) => ({ ...state, realtimeMode: mode }));
-            } else {
-                // Debounce mode changes to avoid flickering
-                if (realtimeModeDebounceTimer) {
-                    clearTimeout(realtimeModeDebounceTimer);
-                }
-                realtimeModeDebounceTimer = setTimeout(() => {
-                    realtimeModeDebounceTimer = null;
-                    set((state) => ({ ...state, realtimeMode: mode }));
-                }, REALTIME_MODE_DEBOUNCE_MS);
-            }
+            scheduleRealtimeModeUpdate({
+                mode,
+                immediate,
+                applyMode: (nextMode) => {
+                    set((state) => ({ ...state, realtimeMode: nextMode }));
+                },
+            });
         },
-        clearRealtimeModeDebounce: () => {
-            if (realtimeModeDebounceTimer) {
-                clearTimeout(realtimeModeDebounceTimer);
-                realtimeModeDebounceTimer = null;
-            }
-        },
+        clearRealtimeModeDebounce,
         setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => set((state) => {
             const now = Date.now();
             const updates: Partial<StorageState> = {
