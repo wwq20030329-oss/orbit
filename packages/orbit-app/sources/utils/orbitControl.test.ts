@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Session } from '@/sync/storageTypes';
 import type { SessionStatus } from './sessionStatus';
 import { getOrbitControlTiles } from './orbitControl';
+
+vi.mock('@/text', () => ({
+    getCurrentLanguage: () => 'en',
+}));
 
 function createSession(overrides: Partial<Session> = {}): Session {
     return {

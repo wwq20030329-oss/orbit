@@ -25,7 +25,7 @@ import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { copySessionMetadataToClipboard } from '@/utils/copySessionMetadataToClipboard';
 import { OrbitError } from '@/utils/errors';
 import { getSessionCliTool } from '@/utils/nativeCliHistory';
-import { getOrbitControlTiles, type OrbitControlTone } from '@/utils/orbitControl';
+import { getOrbitControlPanelTitle, getOrbitControlTiles, type OrbitControlTone } from '@/utils/orbitControl';
 import { useSessionControlState } from '@/utils/sessionControlState';
 
 // Animated status dot component
@@ -140,7 +140,7 @@ function OrbitControlPanel({ session, sessionStatus }: { session: Session; sessi
     const orbitTiles = React.useMemo(() => getOrbitControlTiles(session, sessionStatus), [session, sessionStatus]);
 
     return (
-        <ItemGroup title="Orbit Control">
+        <ItemGroup title={getOrbitControlPanelTitle()}>
             <View style={{ paddingHorizontal: 16, paddingBottom: 16, paddingTop: 8 }}>
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -6 }}>
                     {orbitTiles.map((tile) => {
