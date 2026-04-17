@@ -30,11 +30,13 @@ export default React.memo(() => {
         getSessionRoutePlaceholder(sessionId)
     ), [sessionId]);
     const [resolvedSessionId, setResolvedSessionId] = React.useState<string | null>(initialRouteResolution.resolvedSessionId);
+    const [displaySessionId, setDisplaySessionId] = React.useState<string | null>(initialRouteResolution.displaySessionId);
     const [isResolving, setIsResolving] = React.useState(initialRouteResolution.resolvedSessionId === null);
 
     React.useEffect(() => {
         const nextInitialRouteResolution = getInitialSessionRouteResolution(sessionId);
         setResolvedSessionId(nextInitialRouteResolution.resolvedSessionId);
+        setDisplaySessionId(nextInitialRouteResolution.displaySessionId);
         setIsResolving(nextInitialRouteResolution.resolvedSessionId === null);
 
         let cancelled = false;
@@ -48,11 +50,19 @@ export default React.memo(() => {
 
                 const nextSessionId = routeResolution.resolvedSessionId;
                 if (!nextSessionId) {
+                    if (routeResolution.displaySessionId) {
+                        setResolvedSessionId(routeResolution.displaySessionId);
+                        setDisplaySessionId(routeResolution.displaySessionId);
+                        setIsResolving(false);
+                        return;
+                    }
+
                     router.replace('/');
                     return;
                 }
 
                 setResolvedSessionId(nextSessionId);
+                setDisplaySessionId(nextSessionId);
                 setIsResolving(false);
 
                 if (routeResolution.shouldReplaceRoute) {
@@ -64,11 +74,19 @@ export default React.memo(() => {
                 }
 
                 if (!nextInitialRouteResolution.resolvedSessionId) {
+                    if (nextInitialRouteResolution.displaySessionId) {
+                        setResolvedSessionId(nextInitialRouteResolution.displaySessionId);
+                        setDisplaySessionId(nextInitialRouteResolution.displaySessionId);
+                        setIsResolving(false);
+                        return;
+                    }
+
                     router.replace('/');
                     return;
                 }
 
                 setResolvedSessionId(nextInitialRouteResolution.resolvedSessionId);
+                setDisplaySessionId(nextInitialRouteResolution.displaySessionId);
                 setIsResolving(false);
             }
         })();
@@ -78,7 +96,8 @@ export default React.memo(() => {
         };
     }, [router, sessionId]);
 
-    if (isResolving || !resolvedSessionId) {
+    const provisionalSessionId = resolvedSessionId ?? displaySessionId;
+    if (!provisionalSessionId) {
         return (
             <>
                 <ChatHeaderView
@@ -106,5 +125,10 @@ export default React.memo(() => {
         );
     }
 
-    return (<SessionView id={resolvedSessionId} />);
+    return (
+        <SessionView
+            id={provisionalSessionId}
+            nativeConnectionPending={isResolving && resolvedSessionId === null}
+        />
+    );
 });

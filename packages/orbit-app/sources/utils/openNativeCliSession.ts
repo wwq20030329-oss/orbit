@@ -109,6 +109,30 @@ export function resolveExistingCanonicalSessionId(identifier: string): string | 
     return findExistingSessionForNativeIdentifier(rememberedIdentifier);
 }
 
+export function resolveExistingDisplaySessionId(identifier: string): string | null {
+    const trimmedIdentifier = identifier.trim();
+    if (!trimmedIdentifier) {
+        return null;
+    }
+
+    const canonicalSessionId = resolveExistingCanonicalSessionId(trimmedIdentifier);
+    if (canonicalSessionId) {
+        return canonicalSessionId;
+    }
+
+    const reusableSessionId = findReusableSessionForIdentifier(trimmedIdentifier);
+    if (reusableSessionId) {
+        return reusableSessionId;
+    }
+
+    const rememberedIdentifier = getRememberedNativeCliIdentifier(trimmedIdentifier);
+    if (!rememberedIdentifier) {
+        return null;
+    }
+
+    return findReusableSessionForIdentifier(rememberedIdentifier);
+}
+
 function getNativeCliErrorMessage(error: unknown): string {
     if (error instanceof Error) {
         return error.message;

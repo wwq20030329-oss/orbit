@@ -57,8 +57,9 @@ import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelec
 import { useShallow } from 'zustand/react/shallow';
 import { findFallbackSessionMessages } from '@/utils/sessionMessageFallback';
 
-export const SessionView = React.memo((props: { id: string }) => {
+export const SessionView = React.memo((props: { id: string; nativeConnectionPending?: boolean }) => {
     const sessionId = props.id;
+    const nativeConnectionPending = props.nativeConnectionPending ?? false;
     const router = useRouter();
     const session = useSession(sessionId);
     const isDataReady = useIsDataReady();
@@ -121,16 +122,20 @@ export const SessionView = React.memo((props: { id: string }) => {
 
         // Normal state - show session info
         const displayPath = session.metadata?.path ?? matchingNativeCliEntry?.workingDirectory;
-        return {
-            title: getSessionDisplayTitle(session, nativeCliHistoryByMachine) || getSessionName(session),
-            subtitle: displayPath ? formatPathRelativeToHome(displayPath, session.metadata?.homeDir) : undefined,
-            avatarId: getSessionAvatarId(session),
-            onAvatarPress: () => router.push(`/session/${sessionId}/info`),
-            isConnected: sessionControlState?.isConnected ?? false,
-            flavor: session.metadata?.flavor || null,
-            tintColor: sessionControlState?.isConnected ? '#000' : '#8E8E93'
-        };
-    }, [session, isDataReady, sessionId, router, matchingNativeCliEntry, nativeCliHistoryByMachine, sessionControlState]);
+            return {
+                title: getSessionDisplayTitle(session, nativeCliHistoryByMachine) || getSessionName(session),
+                subtitle: displayPath ? formatPathRelativeToHome(displayPath, session.metadata?.homeDir) : undefined,
+                avatarId: getSessionAvatarId(session),
+                onAvatarPress: () => router.push(`/session/${sessionId}/info`),
+                isConnected: nativeConnectionPending ? false : (sessionControlState?.isConnected ?? false),
+                flavor: session.metadata?.flavor || null,
+                tintColor: nativeConnectionPending
+                    ? '#8E8E93'
+                    : sessionControlState?.isConnected
+                        ? '#000'
+                        : '#8E8E93'
+            };
+    }, [session, isDataReady, sessionId, router, matchingNativeCliEntry, nativeCliHistoryByMachine, nativeConnectionPending, sessionControlState]);
 
     return (
         <>
@@ -201,7 +206,12 @@ export const SessionView = React.memo((props: { id: string }) => {
                     </View>
                 ) : (
                     // Normal session view
-                    <SessionViewLoaded key={sessionId} sessionId={sessionId} session={session} />
+                    <SessionViewLoaded
+                        key={sessionId}
+                        nativeConnectionPending={nativeConnectionPending}
+                        sessionId={sessionId}
+                        session={session}
+                    />
                 )}
             </View>
             {Platform.OS === 'web' && session && (
@@ -225,7 +235,15 @@ export const SessionView = React.memo((props: { id: string }) => {
 });
 
 
-function SessionViewLoaded({ sessionId, session }: { sessionId: string, session: Session }) {
+function SessionViewLoaded({
+    sessionId,
+    session,
+    nativeConnectionPending = false,
+}: {
+    sessionId: string;
+    session: Session;
+    nativeConnectionPending?: boolean;
+}) {
     const { theme } = useUnistyles();
     const router = useRouter();
     const safeArea = useSafeAreaInsets();
@@ -295,8 +313,21 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const experiments = useSetting('experiments');
     const expResumeSession = useSetting('expResumeSession');
-    const isDisconnected = sessionControlState.isDisconnected;
+    const isDisconnected = nativeConnectionPending || sessionControlState.isDisconnected;
     const isInactiveArchivedSession = sessionControlState.isInactiveArchivedSession;
+    const inputConnectionStatus = nativeConnectionPending
+        ? {
+            text: t('terminal.connecting'),
+            color: theme.colors.textSecondary,
+            dotColor: theme.colors.textSecondary,
+            isPulsing: true,
+        }
+        : {
+            text: sessionStatus.statusText,
+            color: sessionStatus.statusColor,
+            dotColor: sessionStatus.statusDotColor,
+            isPulsing: sessionStatus.isPulsing,
+        };
     const resumeCommandBlock = getResumeCommandBlock(session);
     const {
         canResume,
@@ -418,7 +449,14 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             {isLoaded ? (
                 <EmptyMessages session={session} />
             ) : (
-                <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                <View style={{ alignItems: 'center', gap: 8 }}>
+                    <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                    {nativeConnectionPending && (
+                        <Text style={{ color: theme.colors.textSecondary, fontSize: 14 }}>
+                            {t('terminal.connecting')}
+                        </Text>
+                    )}
+                </View>
             )}
         </>
     ) : null;
@@ -439,12 +477,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             availableEffortLevels={availableEffortLevels}
             onEffortLevelChange={updateEffortLevel}
             metadata={session.metadata}
-            connectionStatus={{
-                text: sessionStatus.statusText,
-                color: sessionStatus.statusColor,
-                dotColor: sessionStatus.statusDotColor,
-                isPulsing: sessionStatus.isPulsing
-            }}
+            connectionStatus={inputConnectionStatus}
             blockSend={isDisconnected}
             isSendDisabled={isDisconnected}
             onSend={async () => {
@@ -470,7 +503,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onMicPress={isDisconnected ? undefined : micButtonState.onMicPress}
             isMicActive={isDisconnected ? false : micButtonState.isMicActive}
             onAbort={isDisconnected ? undefined : () => sessionAbort(sessionId)}
-            showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
+            showAbortButton={!nativeConnectionPending && (sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting')}
             onFileViewerPress={experiments ? () => router.push(`/session/${sessionId}/files`) : undefined}
             autocompletePrefixes={['@', '/']}
             autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
@@ -506,7 +539,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         </>
     ) : (
         <>
-            {isDisconnected && canShowResume && (
+            {isDisconnected && canShowResume && !nativeConnectionPending && (
                 <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
                     <ResumeSessionHint
                         canResume={canResume}
@@ -519,7 +552,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     />
                 </CenteredInputWidth>
             )}
-            {!canShowResume && expResumeSession && isDisconnected && resumeCommandBlock && (
+            {!canShowResume && expResumeSession && isDisconnected && resumeCommandBlock && !nativeConnectionPending && (
                 <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
                     <ResumeCommandHint resumeCommandBlock={resumeCommandBlock} />
                 </CenteredInputWidth>

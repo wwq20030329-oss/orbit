@@ -93,6 +93,7 @@ import {
   resolveExistingCanonicalSessionId,
   openNativeCliSessionFromIdentifier,
   openNativeCliSessionFromSession,
+  resolveExistingDisplaySessionId,
   resetSessionOpenedAsHistoryOnlyForTests,
   rememberNativeCliHintsForSession,
 } from './openNativeCliSession';
@@ -348,6 +349,33 @@ describe('openNativeCliHistoryEntry', () => {
     };
 
     expect(resolveExistingCanonicalSessionId('codex:thread-1')).toBeNull();
+  });
+
+  it('can still return an offline reusable session for display while canonical resolution waits', () => {
+    hoisted.findExistingOrbitSessionIdForNativeEntry.mockImplementation((_entry, _sessions, options) => {
+      if (options?.allowOffline === false) {
+        return null;
+      }
+      return 'wrapper-1';
+    });
+    hoisted.findReusableOrbitSessionIdForNativeEntry.mockReturnValue('wrapper-1');
+    hoisted.state.sessions = {
+      'wrapper-1': createSession('wrapper-1', {
+        active: false,
+        activeAt: 1,
+        presence: 1,
+        metadata: {
+          machineId: 'machine-1',
+          codexThreadId: 'thread-1',
+          path: '/Users/test/project',
+          host: 'wwq-mac',
+          flavor: 'codex',
+          lifecycleState: 'running',
+        },
+      }),
+    };
+
+    expect(resolveExistingDisplaySessionId('codex:thread-1')).toBe('wrapper-1');
   });
 
   it('does not perform an extra pre-refresh before resolving an explicit native identifier', async () => {
