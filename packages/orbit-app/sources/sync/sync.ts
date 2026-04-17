@@ -58,16 +58,11 @@ import { getSessionLifecycleState } from './sessionLifecycle';
 import { invalidateNativeCliHistoryForMachines } from '@/utils/nativeCliHistoryRefresh';
 import { rememberNativeCliHintsForSession } from '@/utils/openNativeCliSession';
 import {
-    getMessageSeqBounds,
     INITIAL_VISIBLE_MESSAGE_LIMIT,
     OLDER_MESSAGES_PAGE_LIMIT,
     shouldBootstrapVisibleSessionMessages,
 } from './sessionMessageBootstrap';
-
-type V3GetSessionMessagesResponse = {
-    messages: ApiMessage[];
-    hasMore: boolean;
-};
+import { fetchSessionMessagesPage } from './sessionMessagesApi';
 
 type V3PostSessionMessagesResponse = {
     messages: Array<{
@@ -354,80 +349,6 @@ class Sync {
             this.messagesSync.set(sessionId, sync);
         }
         return sync;
-    }
-
-    private buildMessagesPath(sessionId: string, options: {
-        afterSeq?: number;
-        beforeSeq?: number;
-        tail?: boolean;
-        limit: number;
-    }): string {
-        const query = new URLSearchParams();
-        query.set('limit', String(options.limit));
-        if (typeof options.afterSeq === 'number') {
-            query.set('after_seq', String(options.afterSeq));
-        }
-        if (typeof options.beforeSeq === 'number') {
-            query.set('before_seq', String(options.beforeSeq));
-        }
-        if (options.tail) {
-            query.set('tail', 'true');
-        }
-        return `/v3/sessions/${sessionId}/messages?${query.toString()}`;
-    }
-
-    private async fetchMessagesPage(
-        sessionId: string,
-        encryption: NonNullable<ReturnType<Encryption['getSessionEncryption']>>,
-        options: {
-            signal?: AbortSignal;
-            afterSeq?: number;
-            beforeSeq?: number;
-            tail?: boolean;
-            limit: number;
-        },
-    ): Promise<{
-        normalizedMessages: NormalizedMessage[];
-        hasMore: boolean;
-        oldestSeq: number | null;
-        newestSeq: number | null;
-    }> {
-        const response = await apiSocket.request(
-            this.buildMessagesPath(sessionId, options),
-            options.signal ? { signal: options.signal } : undefined,
-        );
-        if (!response.ok) {
-            throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
-        }
-
-        const data = await response.json() as V3GetSessionMessagesResponse;
-        const messages = Array.isArray(data.messages) ? data.messages : [];
-        const decryptedMessages = await encryption.decryptMessages(messages);
-        const normalizedMessages: NormalizedMessage[] = [];
-
-        for (let i = 0; i < decryptedMessages.length; i++) {
-            const decrypted = decryptedMessages[i];
-            if (!decrypted) {
-                continue;
-            }
-            const normalized = normalizeRawMessage(
-                decrypted.id,
-                decrypted.localId,
-                decrypted.createdAt,
-                decrypted.content,
-            );
-            if (normalized) {
-                normalizedMessages.push(normalized);
-            }
-        }
-
-        const bounds = getMessageSeqBounds(messages);
-        return {
-            normalizedMessages,
-            hasMore: !!data.hasMore,
-            oldestSeq: bounds?.oldestSeq ?? null,
-            newestSeq: bounds?.newestSeq ?? null,
-        };
     }
 
     private startOlderMessagesBackfill(
@@ -1949,10 +1870,10 @@ class Sync {
 
                         let page;
                         try {
-                            page = await this.fetchMessagesPage(sessionId, encryption, {
-                                signal: abortController.signal,
-                                afterSeq: nextAfterSeq,
-                                limit: 100,
+                        page = await this.fetchMessagesPage(sessionId, encryption, {
+                            signal: abortController.signal,
+                            afterSeq: nextAfterSeq,
+                            limit: 100,
                             });
                         } catch (error) {
                             if (this.isAbortError(error)) {
@@ -2625,6 +2546,20 @@ class Sync {
             storage.getState().sessions[sessionId]
             && this.encryption.getSessionEncryption(sessionId),
         );
+    }
+
+    private fetchMessagesPage = (
+        sessionId: string,
+        encryption: NonNullable<ReturnType<Encryption['getSessionEncryption']>>,
+        options: {
+            signal?: AbortSignal;
+            afterSeq?: number;
+            beforeSeq?: number;
+            tail?: boolean;
+            limit: number;
+        },
+    ) => {
+        return fetchSessionMessagesPage(sessionId, encryption.decryptMessages.bind(encryption), options);
     }
 
     private decryptSessions = async (
