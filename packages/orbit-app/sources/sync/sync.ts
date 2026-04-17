@@ -5,7 +5,7 @@ import { handleUnauthorizedResponse } from '@/auth/authRecovery';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { storage } from './storage';
-import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
+import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema, type ApiUpdateContainer, type ApiUpdateNewMessage } from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
 import { Session, Machine } from './storageTypes';
 import { InvalidateSync } from '@/utils/sync';
@@ -54,7 +54,6 @@ import { resolveMessageModeMeta } from './messageMeta';
 import { didSessionControlReturnToApp, getSessionControlState } from '@/utils/sessionControlState';
 import { VisibleSessionTracker } from './visibleSessionTracker';
 import { shouldRefreshSessionsOnVisible } from './sessionVisibleRefresh';
-import { getSessionLifecycleState } from './sessionLifecycle';
 import { invalidateNativeCliHistoryForMachines } from '@/utils/nativeCliHistoryRefresh';
 import { rememberNativeCliHintsForSession } from '@/utils/openNativeCliSession';
 import {
@@ -63,6 +62,7 @@ import {
     shouldBootstrapVisibleSessionMessages,
 } from './sessionMessageBootstrap';
 import { fetchSessionMessagesPage } from './sessionMessagesApi';
+import { handleRealtimeMessageUpdate } from './sessionRealtimeMessageUpdate';
 
 type V3PostSessionMessagesResponse = {
     messages: Array<{
@@ -1973,71 +1973,36 @@ class Sync {
         console.log(`🔄 Sync: Validated update type: ${updateData.body.t}`);
 
         if (updateData.body.t === 'new-message') {
-            const isVisibleSession = this.isSessionVisible(updateData.body.sid);
-            const sessionId = updateData.body.sid;
-
-            // Get encryption
-            const encryption = this.encryption.getSessionEncryption(sessionId);
-            if (!encryption) {
-                log.log(`🔄 Sync: Session ${sessionId} not ready locally yet, refreshing sessions`);
-                void this.fetchSessions().catch((error) => {
-                    log.log(`🔄 Sync: Failed to refresh sessions for missing session ${sessionId}: ${String(error)}`);
-                });
-                return;
-            }
-
-            // Decrypt message so hidden sessions can still keep lightweight status in sync.
-            let lastMessage: NormalizedMessage | null = null;
-            let isTaskComplete = false;
-            let isTaskStarted = false;
-            if (updateData.body.message) {
-                const decrypted = await encryption.decryptMessage(updateData.body.message);
-                if (decrypted) {
-                    if (isVisibleSession) {
-                        lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-                    }
-
-                    ({ isTaskComplete, isTaskStarted } = getSessionLifecycleState(decrypted.content));
-
-                    if (isTaskComplete || isTaskStarted) {
-                        console.log(`🔄 [Sync] Updating thinking state: isTaskComplete=${isTaskComplete}, isTaskStarted=${isTaskStarted}`);
-                    }
-                }
-            }
-
-            // Update session metadata/list state regardless of visibility, but only process
-            // message bodies for the session the user is actively viewing.
-            const session = storage.getState().sessions[updateData.body.sid];
-            if (session) {
-                this.applySessions([{
-                    ...session,
-                    updatedAt: updateData.createdAt,
-                    seq: updateData.seq,
-                    ...(isTaskComplete ? { thinking: false } : {}),
-                    ...(isTaskStarted ? { thinking: true } : {})
-                }]);
-            } else {
-                this.fetchSessions();
-            }
-
-            if (isVisibleSession && updateData.body.message) {
-                // Fast-path only on consecutive seq values, otherwise fetch from server.
-                const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
-                const incomingSeq = updateData.body.message.seq;
-                if (lastMessage && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1) {
-                    this.enqueueMessages(updateData.body.sid, [lastMessage]);
-                    this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
-                    let hasMutableTool = false;
-                    if (lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
-                        hasMutableTool = storage.getState().isMutableToolCall(updateData.body.sid, lastMessage.content[0].tool_use_id);
-                    }
-                    if (hasMutableTool) {
-                        gitStatusSync.invalidate(updateData.body.sid);
-                    }
-                } else {
-                    this.getMessagesSync(updateData.body.sid).invalidate();
-                }
-            }
+            const messageUpdate = updateData as ApiUpdateContainer & { body: ApiUpdateNewMessage };
+            await handleRealtimeMessageUpdate(messageUpdate, {
+                isSessionVisible: this.isSessionVisible,
+                getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
+                getSession: (sessionId) => storage.getState().sessions[sessionId],
+                applySessions: this.applySessions,
+                fetchSessions: () => {
+                    void this.fetchSessions().catch((error) => {
+                        log.log(`🔄 Sync: Failed to refresh sessions for missing session ${messageUpdate.body.sid}: ${String(error)}`);
+                    });
+                },
+                getLastSeq: (sessionId) => this.sessionLastSeq.get(sessionId),
+                setLastSeq: (sessionId, seq) => {
+                    this.sessionLastSeq.set(sessionId, seq);
+                },
+                enqueueMessages: this.enqueueMessages.bind(this),
+                invalidateMessages: (sessionId) => {
+                    this.getMessagesSync(sessionId).invalidate();
+                },
+                isMutableToolCall: (sessionId, toolUseId) => storage.getState().isMutableToolCall(sessionId, toolUseId),
+                invalidateGitStatus: (sessionId) => {
+                    gitStatusSync.invalidate(sessionId);
+                },
+                onSessionNotReady: (sessionId) => {
+                    log.log(`🔄 Sync: Session ${sessionId} not ready locally yet, refreshing sessions`);
+                },
+                onLifecycleHint: ({ sessionId, isTaskComplete, isTaskStarted }) => {
+                    console.log(`🔄 [Sync] Session ${sessionId} thinking state: isTaskComplete=${isTaskComplete}, isTaskStarted=${isTaskStarted}`);
+                },
+            });
 
         } else if (updateData.body.t === 'new-session') {
             log.log('🆕 New session update received');
