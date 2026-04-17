@@ -9,16 +9,13 @@
 import { render } from 'ink';
 import React from 'react';
 import { randomUUID } from 'node:crypto';
-import os from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
 import { Credentials, readSettings } from '@/persistence';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import { initialMachineMetadata } from '@/daemon/run';
-import { configuration } from '@/configuration';
-import packageJson from '../../package.json';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { projectPath } from '@/projectPath';
@@ -29,6 +26,7 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
+import { withRemoteControl } from '@/utils/agentState';
 import type { ApiSessionClient } from '@/api/apiSession';
 
 import { createGeminiBackend } from '@/agent/factories/gemini';
@@ -37,6 +35,7 @@ import { GeminiDisplay } from '@/ui/ink/GeminiDisplay';
 import { GeminiPermissionHandler } from '@/gemini/utils/permissionHandler';
 import { GeminiReasoningProcessor } from '@/gemini/utils/reasoningProcessor';
 import { GeminiDiffProcessor } from '@/gemini/utils/diffProcessor';
+import type { GeminiConfigSelector } from '@/gemini/configSelectors';
 import type { GeminiMode, CodexMessagePayload } from '@/gemini/types';
 import type { PermissionMode } from '@/api/types';
 import { GEMINI_MODEL_ENV, DEFAULT_GEMINI_MODEL, CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
@@ -51,7 +50,20 @@ import {
   formatOptionsXml,
 } from '@/gemini/utils/optionsParser';
 import { ConversationHistory } from '@/gemini/utils/conversationHistory';
-import { getRequestedNativeCliHistoryReplay, replayNativeCliHistoryIfRequested } from '@/history/nativeCliHistoryReplay';
+import {
+  buildNativeCliResumeSessionTag,
+  getRequestedNativeCliHistoryReplay,
+  markNativeCliHistoryImported,
+  replayNativeCliHistoryIfRequested,
+  shouldReplayNativeCliHistory,
+} from '@/history/nativeCliHistoryReplay';
+import {
+  applyGeminiSessionConfigEvent,
+  switchGeminiThoughtLevelIfRequested,
+  type GeminiThoughtLevelBackend,
+} from '@/gemini/sessionConfigSync';
+
+type ConfigurableGeminiBackend = AgentBackend & GeminiThoughtLevelBackend;
 
 
 /**
@@ -67,7 +79,10 @@ export async function runGemini(opts: {
   //
 
   
-  const sessionTag = randomUUID();
+  const nativeReplayRequest = getRequestedNativeCliHistoryReplay();
+  const sessionTag = nativeReplayRequest
+    ? buildNativeCliResumeSessionTag(nativeReplayRequest)
+    : randomUUID();
 
   // Set backend for offline warnings (before any API calls)
   connectionState.setBackend('Gemini');
@@ -127,15 +142,23 @@ export async function runGemini(opts: {
   // Create session
   //
 
-  const nativeReplayRequest = getRequestedNativeCliHistoryReplay();
   const { state, metadata } = createSessionMetadata({
     flavor: 'gemini',
     machineId,
     startedBy: opts.startedBy,
     sandbox: sandboxConfig,
     summaryText: nativeReplayRequest?.summary ?? nativeReplayRequest?.title ?? null,
+    nativeHistorySource: nativeReplayRequest
+      ? {
+        tool: nativeReplayRequest.tool,
+        backendId: nativeReplayRequest.backendId,
+      }
+      : null,
   });
   const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+  const shouldImportNativeHistory = response
+    ? shouldReplayNativeCliHistory(response.metadata, nativeReplayRequest)
+    : false;
 
   // Handle server unreachable case - create offline stub with hot reconnection
   let session: ApiSessionClient;
@@ -178,6 +201,7 @@ export async function runGemini(opts: {
       } else {
         // Safe to swap immediately
         session = newSession;
+        session.updateAgentState((currentState) => withRemoteControl(currentState));
         if (permissionHandler) {
           permissionHandler.updateSession(newSession);
         }
@@ -185,6 +209,7 @@ export async function runGemini(opts: {
     }
   });
   session = initialSession;
+  session.updateAgentState((currentState) => withRemoteControl(currentState));
 
   // Report to daemon (only if we have a real session)
   if (response) {
@@ -207,7 +232,10 @@ export async function runGemini(opts: {
   }));
   let pendingResumeSessionId = opts.resumeSessionId;
 
-  await replayNativeCliHistoryIfRequested(session, 'gemini', process.cwd());
+  if (nativeReplayRequest && shouldImportNativeHistory) {
+    await replayNativeCliHistoryIfRequested(session, 'gemini', process.cwd());
+    session.updateMetadata((currentMetadata) => markNativeCliHistoryImported(currentMetadata, nativeReplayRequest));
+  }
 
   // Conversation history for context preservation across model changes
   const conversationHistory = new ConversationHistory({ maxMessages: 20, maxCharacters: 50000 });
@@ -215,12 +243,14 @@ export async function runGemini(opts: {
   // Track current overrides to apply per message
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
+  let currentEffortLevel: string | undefined = undefined;
+  let thoughtLevelSelector: GeminiConfigSelector | null = null;
 
   session.onUserMessage((message) => {
     // Resolve permission mode (validate) - same as Codex
-    let messagePermissionMode = currentPermissionMode;
-    if (message.meta?.permissionMode) {
-      const validModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
+      let messagePermissionMode = currentPermissionMode;
+      if (message.meta?.permissionMode) {
+      const validModes: PermissionMode[] = ['default', 'auto_edit', 'plan', 'read-only', 'safe-yolo', 'yolo'];
       if (validModes.includes(message.meta.permissionMode as PermissionMode)) {
         messagePermissionMode = message.meta.permissionMode as PermissionMode;
         currentPermissionMode = messagePermissionMode;
@@ -238,6 +268,13 @@ export async function runGemini(opts: {
     if (currentPermissionMode === undefined) {
       currentPermissionMode = 'default';
       updatePermissionMode('default');
+    }
+
+    let messageEffortLevel = currentEffortLevel;
+    if (typeof message.meta?.effortLevel === 'string' && message.meta.effortLevel.length > 0) {
+      messageEffortLevel = message.meta.effortLevel;
+      currentEffortLevel = messageEffortLevel;
+      logger.debug(`[Gemini] Effort level updated from user message to: ${currentEffortLevel}`);
     }
 
     // Resolve model; explicit null resets to default (undefined)
@@ -284,6 +321,7 @@ export async function runGemini(opts: {
     const mode: GeminiMode = {
       permissionMode: messagePermissionMode || 'default',
       model: messageModel,
+      effortLevel: messageEffortLevel,
       originalUserMessage, // Store original message separately
     };
     messageQueue.push(fullPrompt, mode);
@@ -857,6 +895,17 @@ export async function runGemini(opts: {
         break;
 
       case 'event':
+        const configEventResult = applyGeminiSessionConfigEvent({
+          name: msg.name,
+          payload: msg.payload,
+          session,
+          thoughtLevelSelector,
+        });
+        thoughtLevelSelector = configEventResult.thoughtLevelSelector;
+        if (configEventResult.handled) {
+          break;
+        }
+
         // Handle thinking events - process through ReasoningProcessor like Codex
         if (msg.name === 'thinking') {
           const thinkingPayload = msg.payload as { text?: string } | undefined;
@@ -897,6 +946,18 @@ export async function runGemini(opts: {
   // This allows us to support model changes by recreating the backend
 
   let first = true;
+
+  async function switchThoughtLevelIfRequested(requestedThoughtLevel: string | undefined): Promise<void> {
+    const result = await switchGeminiThoughtLevelIfRequested({
+      requestedThoughtLevel,
+      thoughtLevelSelector,
+      backend: geminiBackend as ConfigurableGeminiBackend | null,
+    });
+    thoughtLevelSelector = result.thoughtLevelSelector;
+    if (result.currentEffortLevel) {
+      currentEffortLevel = result.currentEffortLevel;
+    }
+  }
 
   try {
     let currentModeHash: string | null = null;
@@ -991,6 +1052,7 @@ export async function runGemini(opts: {
         
         // Update permission handler with current permission mode
         updatePermissionMode(message.mode.permissionMode);
+        await switchThoughtLevelIfRequested(message.mode.effortLevel);
         
         wasSessionCreated = true;
         currentModeHash = message.hash;
@@ -1045,6 +1107,7 @@ export async function runGemini(opts: {
             acpSessionId = sessionId;
             pendingResumeSessionId = undefined;
             logger.debug(`[gemini] ACP session started: ${acpSessionId}`);
+            await switchThoughtLevelIfRequested(message.mode.effortLevel);
             wasSessionCreated = true;
             currentModeHash = message.hash;
             
@@ -1090,6 +1153,7 @@ export async function runGemini(opts: {
         
         logger.debug(`[gemini] Sending prompt to Gemini (length: ${promptToSend.length}): ${promptToSend.substring(0, 100)}...`);
         logger.debug(`[gemini] Full prompt: ${promptToSend}`);
+        await switchThoughtLevelIfRequested(message.mode.effortLevel);
         
         // Retry logic for transient Gemini API errors (empty response, internal errors)
         const MAX_RETRIES = 3;
