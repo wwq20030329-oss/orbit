@@ -86,7 +86,13 @@ export function resolveExistingCanonicalSessionId(identifier: string): string | 
         return trimmedIdentifier;
     }
 
-    const existingSessionId = findExistingSessionForNativeIdentifier(trimmedIdentifier);
+    const requiresOnlineExistingSession = Boolean(
+        isExplicitNativeCliIdentifier(trimmedIdentifier)
+        || trimmedIdentifier.match(SESSION_ROUTE_SESSION_PREFIX),
+    );
+    const existingSessionId = requiresOnlineExistingSession
+        ? findOrbitSessionIdForNativeIdentifier(trimmedIdentifier, storage.getState().sessions, { requireOnline: true })
+        : findExistingSessionForNativeIdentifier(trimmedIdentifier);
     if (existingSessionId) {
         return existingSessionId;
     }
@@ -94,6 +100,10 @@ export function resolveExistingCanonicalSessionId(identifier: string): string | 
     const rememberedIdentifier = getRememberedNativeCliIdentifier(trimmedIdentifier);
     if (!rememberedIdentifier) {
         return null;
+    }
+
+    if (requiresOnlineExistingSession) {
+        return findOrbitSessionIdForNativeIdentifier(rememberedIdentifier, storage.getState().sessions, { requireOnline: true });
     }
 
     return findExistingSessionForNativeIdentifier(rememberedIdentifier);

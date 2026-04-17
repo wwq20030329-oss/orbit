@@ -52,4 +52,14 @@ describe('sessionRouteResolution', () => {
       shouldReplaceRoute: true,
     });
   });
+
+  it('keeps explicit native identifier routes unresolved until an interactive session is available', () => {
+    hoisted.resolveExistingCanonicalSessionId.mockReturnValue(null);
+
+    expect(getInitialSessionRouteResolution('codex:thread-1')).toEqual({
+      initialSessionId: null,
+      resolvedSessionId: null,
+      shouldReplaceRoute: false,
+    });
+  });
 });

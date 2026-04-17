@@ -324,6 +324,32 @@ describe('openNativeCliHistoryEntry', () => {
     expect(hoisted.refreshSessions).not.toHaveBeenCalled();
   });
 
+  it('does not eagerly resolve an explicit native identifier to an offline direct session', () => {
+    hoisted.findExistingOrbitSessionIdForNativeEntry.mockImplementation((_entry, _sessions, options) => {
+      if (options?.allowOffline === false) {
+        return null;
+      }
+      return 'wrapper-1';
+    });
+    hoisted.state.sessions = {
+      'wrapper-1': createSession('wrapper-1', {
+        active: false,
+        activeAt: 1,
+        presence: 1,
+        metadata: {
+          machineId: 'machine-1',
+          codexThreadId: 'thread-1',
+          path: '/Users/test/project',
+          host: 'wwq-mac',
+          flavor: 'codex',
+          lifecycleState: 'running',
+        },
+      }),
+    };
+
+    expect(resolveExistingCanonicalSessionId('codex:thread-1')).toBeNull();
+  });
+
   it('does not perform an extra pre-refresh before resolving an explicit native identifier', async () => {
     hoisted.findExistingOrbitSessionIdForNativeEntry.mockReturnValue(null);
     hoisted.state.sessions = {};

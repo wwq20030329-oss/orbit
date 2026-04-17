@@ -1,6 +1,7 @@
 import type { CliThreadListItem } from '@/utils/cliThreadList';
 import { storage } from '@/sync/storage';
 import { findExistingOrbitSessionIdForNativeEntry } from '@/utils/nativeCliHistory';
+import { isImportedNativeHistoryWrapperSession } from '@/utils/nativeCliSessionResolver';
 import { openNativeCliHistoryEntry, prepareNativeCliPlaceholderSession, primeNativeCliHistoryEntryOpen } from '@/utils/openNativeCliSession';
 
 export interface CliThreadNavigationActions {
@@ -39,6 +40,19 @@ export async function openCliThreadItem(
     );
 
     if (placeholderSessionId) {
+        const placeholderSession = storage.getState().sessions[placeholderSessionId];
+        const shouldOpenPlaceholderImmediately = placeholderSession
+            ? isImportedNativeHistoryWrapperSession(placeholderSession)
+            : false;
+
+        if (!shouldOpenPlaceholderImmediately) {
+            void primeNativeCliHistoryEntryOpen(item.entry).catch((error) => {
+                console.warn('Failed to prime native CLI history session from list open', error);
+            });
+            actions.navigateDirectlyToSession(item.entry.id);
+            return;
+        }
+
         prepareNativeCliPlaceholderSession(placeholderSessionId, item.entry);
         actions.navigateDirectlyToSession(placeholderSessionId);
 
