@@ -77,6 +77,12 @@ import {
     handleRealtimeNewSessionUpdate,
     handleRealtimeUpdateSessionState,
 } from './sessionRealtimeSessionUpdate';
+import {
+    handleRealtimeMachineActivityUpdate,
+    handleRealtimeNewMachineUpdate,
+    handleRealtimeUpdateMachineState,
+    type MachineRealtimeUpdateDependencies,
+} from './machineRealtimeUpdate';
 
 type V3PostSessionMessagesResponse = {
     messages: Array<{
@@ -1254,6 +1260,13 @@ class Sync {
         return this.encryption.getMachineEncryption(machineId);
     }
 
+    private getMachineRealtimeUpdateDependencies = (): MachineRealtimeUpdateDependencies => ({
+        ensureMachineEncryption: this.ensureMachineEncryption,
+        getMachine: (machineId) => storage.getState().machines[machineId],
+        applyMachines: (machines) => storage.getState().applyMachines(machines),
+        invalidateMachines: () => this.machinesSync.invalidate(),
+    })
+
     private fetchMachines = async () => {
         if (!this.credentials) return;
 
@@ -2145,102 +2158,15 @@ class Sync {
                 }
             }
         } else if (updateData.body.t === 'new-machine') {
-            const machineUpdate = updateData.body;
-            const machineId = machineUpdate.machineId;
-            const machineEncryption = await this.ensureMachineEncryption(machineId, machineUpdate.dataEncryptionKey);
-
-            if (!machineEncryption) {
-                console.warn(`Machine encryption not ready for ${machineId}, refreshing machine list`);
-                this.machinesSync.invalidate();
-                return;
-            }
-
-            try {
-                const metadata = machineUpdate.metadata
-                    ? await machineEncryption.decryptMetadata(machineUpdate.metadataVersion, machineUpdate.metadata)
-                    : null;
-
-                if (machineUpdate.metadata && !metadata) {
-                    return;
-                }
-
-                const daemonState = machineUpdate.daemonState
-                    ? await machineEncryption.decryptDaemonState(machineUpdate.daemonStateVersion, machineUpdate.daemonState)
-                    : null;
-
-                storage.getState().applyMachines([{
-                    id: machineId,
-                    seq: machineUpdate.seq,
-                    createdAt: machineUpdate.createdAt,
-                    updatedAt: machineUpdate.updatedAt,
-                    active: machineUpdate.active,
-                    activeAt: machineUpdate.activeAt,
-                    metadata,
-                    metadataVersion: machineUpdate.metadataVersion,
-                    daemonState,
-                    daemonStateVersion: machineUpdate.daemonStateVersion
-                }]);
-            } catch (error) {
-                console.warn(`Failed to process new machine ${machineId}:`, error);
-                this.machinesSync.invalidate();
-            }
+            await handleRealtimeNewMachineUpdate(
+                updateData as Parameters<typeof handleRealtimeNewMachineUpdate>[0],
+                this.getMachineRealtimeUpdateDependencies(),
+            );
         } else if (updateData.body.t === 'update-machine') {
-            const machineUpdate = updateData.body;
-            const machineId = machineUpdate.machineId;  // Changed from .id to .machineId
-            const machine = storage.getState().machines[machineId];
-
-            // Create or update machine with all required fields
-            const updatedMachine: Machine = {
-                id: machineId,
-                seq: updateData.seq,
-                createdAt: machine?.createdAt ?? updateData.createdAt,
-                updatedAt: updateData.createdAt,
-                active: machineUpdate.active ?? true,
-                activeAt: machineUpdate.activeAt ?? updateData.createdAt,
-                metadata: machine?.metadata ?? null,
-                metadataVersion: machine?.metadataVersion ?? 0,
-                daemonState: machine?.daemonState ?? null,
-                daemonStateVersion: machine?.daemonStateVersion ?? 0
-            };
-
-            // Get machine-specific encryption (might not exist if machine wasn't initialized)
-            const machineEncryption = await this.ensureMachineEncryption(machineId);
-            if (!machineEncryption) {
-                console.warn(`Machine encryption not ready for ${machineId}, applying activity only`);
-                storage.getState().applyMachines([updatedMachine]);
-                this.machinesSync.invalidate();
-                return;
-            }
-
-            // If metadata is provided, decrypt and update it
-            const metadataUpdate = machineUpdate.metadata;
-            if (metadataUpdate) {
-                try {
-                    const metadata = await machineEncryption.decryptMetadata(metadataUpdate.version, metadataUpdate.value);
-                    if (!metadata) {
-                        return;
-                    }
-                    updatedMachine.metadata = metadata;
-                    updatedMachine.metadataVersion = metadataUpdate.version;
-                } catch (error) {
-                    console.error(`Failed to decrypt machine metadata for ${machineId}:`, error);
-                }
-            }
-
-            // If daemonState is provided, decrypt and update it
-            const daemonStateUpdate = machineUpdate.daemonState;
-            if (daemonStateUpdate) {
-                try {
-                    const daemonState = await machineEncryption.decryptDaemonState(daemonStateUpdate.version, daemonStateUpdate.value);
-                    updatedMachine.daemonState = daemonState;
-                    updatedMachine.daemonStateVersion = daemonStateUpdate.version;
-                } catch (error) {
-                    console.error(`Failed to decrypt machine daemonState for ${machineId}:`, error);
-                }
-            }
-
-            // Update storage using applyMachines which rebuilds sessionListViewData
-            storage.getState().applyMachines([updatedMachine]);
+            await handleRealtimeUpdateMachineState(
+                updateData as Parameters<typeof handleRealtimeUpdateMachineState>[0],
+                this.getMachineRealtimeUpdateDependencies(),
+            );
         } else if (updateData.body.t === 'relationship-updated') {
             log.log('👥 Received relationship-updated update');
             const relationshipUpdate = updateData.body;
@@ -2449,16 +2375,7 @@ class Sync {
 
         // Handle machine activity updates
         if (updateData.type === 'machine-activity') {
-            // Update machine's active status and lastActiveAt
-            const machine = storage.getState().machines[updateData.id];
-            if (machine) {
-                const updatedMachine: Machine = {
-                    ...machine,
-                    active: updateData.active,
-                    activeAt: updateData.activeAt
-                };
-                storage.getState().applyMachines([updatedMachine]);
-            }
+            handleRealtimeMachineActivityUpdate(updateData, this.getMachineRealtimeUpdateDependencies());
         }
 
         // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity

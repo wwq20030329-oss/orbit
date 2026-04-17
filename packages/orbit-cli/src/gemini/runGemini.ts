@@ -62,6 +62,7 @@ import {
   switchGeminiThoughtLevelIfRequested,
   type GeminiThoughtLevelBackend,
 } from '@/gemini/sessionConfigSync';
+import { ensureGeminiBackendSession } from '@/gemini/backendLifecycle';
 
 type ConfigurableGeminiBackend = AgentBackend & GeminiThoughtLevelBackend;
 
@@ -947,11 +948,14 @@ export async function runGemini(opts: {
 
   let first = true;
 
-  async function switchThoughtLevelIfRequested(requestedThoughtLevel: string | undefined): Promise<void> {
+  async function applyThoughtLevelIfRequested(
+    requestedThoughtLevel: string | undefined,
+    backend: ConfigurableGeminiBackend | null,
+  ): Promise<void> {
     const result = await switchGeminiThoughtLevelIfRequested({
       requestedThoughtLevel,
       thoughtLevelSelector,
-      backend: geminiBackend as ConfigurableGeminiBackend | null,
+      backend,
     });
     thoughtLevelSelector = result.thoughtLevelSelector;
     if (result.currentEffortLevel) {
@@ -987,77 +991,60 @@ export async function runGemini(opts: {
         break;
       }
 
-      // Track if we need to inject conversation history (after model change)
-      let injectHistoryContext = false;
-      
-      // Handle mode change (like Codex) - restart session if permission mode or model changed
-      if (wasSessionCreated && currentModeHash && message.hash !== currentModeHash) {
-        logger.debug('[Gemini] Mode changed – restarting Gemini session');
-        messageBuffer.addMessage('═'.repeat(40), 'status');
-        
-        // Check if we have conversation history to preserve
-        if (conversationHistory.hasHistory()) {
-          messageBuffer.addMessage(`Switching model (preserving ${conversationHistory.size()} messages of context)...`, 'status');
-          injectHistoryContext = true;
-          logger.debug(`[Gemini] Will inject conversation history: ${conversationHistory.getSummary()}`);
-        } else {
-          messageBuffer.addMessage('Starting new Gemini session (mode changed)...', 'status');
-        }
-        
-        // Reset permission handler and reasoning processor on mode change (like Codex)
-        permissionHandler.reset();
-        reasoningProcessor.abort();
-        
-        // Dispose old backend and create new one with new model
-        if (geminiBackend) {
-          await geminiBackend.dispose();
-          geminiBackend = null;
-        }
-
-        // Create new backend with new model
-        const modelToUse = message.mode?.model === undefined ? undefined : (message.mode.model || null);
-        const backendResult = createGeminiBackend({
-          cwd: process.cwd(),
-          mcpServers,
-          permissionHandler,
-          cloudToken,
-          currentUserEmail,
-          resumeSessionId: pendingResumeSessionId,
-          // Pass model from message - if undefined, will use local config/env/default
-          // If explicitly null, will skip local config and use env/default
-          model: modelToUse,
-        });
-        geminiBackend = backendResult.backend;
-
-        // Set up message handler again
-        setupGeminiMessageHandler(geminiBackend);
-
-        // Use model from factory result (single source of truth - no duplicate resolution)
-        const actualModel = backendResult.model;
-        logger.debug(`[gemini] Model change - modelToUse=${modelToUse}, actualModel=${actualModel} (from ${backendResult.modelSource})`);
-        
-        // Update conversation history with new model
-        conversationHistory.setCurrentModel(actualModel);
-        
-        logger.debug('[gemini] Starting new ACP session with model:', actualModel);
-        const { sessionId } = await geminiBackend.startSession();
-        acpSessionId = sessionId;
-        pendingResumeSessionId = undefined;
-        logger.debug(`[gemini] New ACP session started: ${acpSessionId}`);
-        
-        // Update displayed model in UI (don't save to config - this is backend initialization)
-        logger.debug(`[gemini] Calling updateDisplayedModel with: ${actualModel}`);
-        updateDisplayedModel(actualModel, false);
-        // Don't add "Using model" message - model is shown in status bar
-        
-        // Update permission handler with current permission mode
-        updatePermissionMode(message.mode.permissionMode);
-        await switchThoughtLevelIfRequested(message.mode.effortLevel);
-        
-        wasSessionCreated = true;
-        currentModeHash = message.hash;
-        first = false; // Not first message anymore
-      }
+      const lifecycleResult = await ensureGeminiBackendSession({
+        state: {
+          backend: geminiBackend,
+          acpSessionId,
+          currentModeHash,
+          pendingResumeSessionId,
+          first,
+          wasSessionCreated,
+        },
+        turn: {
+          hash: message.hash,
+          mode: message.mode,
+        },
+        conversationHistory,
+        deps: {
+          createBackend: (model, resumeSessionId) => createGeminiBackend({
+            cwd: process.cwd(),
+            mcpServers,
+            permissionHandler,
+            cloudToken,
+            currentUserEmail,
+            resumeSessionId,
+            model,
+          }),
+          setupBackend: (backend) => {
+            setupGeminiMessageHandler(backend);
+          },
+          updateDisplayedModel,
+          applyPermissionMode: updatePermissionMode,
+          applyThoughtLevel: applyThoughtLevelIfRequested,
+          notifyModeChange: ({ injectHistoryContext, preservedMessages, historySummary }) => {
+            messageBuffer.addMessage('═'.repeat(40), 'status');
+            if (injectHistoryContext) {
+              messageBuffer.addMessage(`Switching model (preserving ${preservedMessages} messages of context)...`, 'status');
+              logger.debug(`[Gemini] Will inject conversation history: ${historySummary}`);
+            } else {
+              messageBuffer.addMessage('Starting new Gemini session (mode changed)...', 'status');
+            }
+          },
+          resetModeChangeState: () => {
+            permissionHandler.reset();
+            reasoningProcessor.abort();
+          },
+        },
+      });
+      ({
+        backend: geminiBackend,
+        acpSessionId,
+        currentModeHash,
+        pendingResumeSessionId,
+        first,
+        wasSessionCreated,
+      } = lifecycleResult.state);
+      const { injectHistoryContext } = lifecycleResult;
 
       currentModeHash = message.hash;
       // Show only original user message in UI, not the full prompt with system prompt
@@ -1068,54 +1055,6 @@ export async function runGemini(opts: {
       isProcessingMessage = true;
 
       try {
-        if (first || !wasSessionCreated) {
-          // First message or session not created yet - create backend and start session
-          if (!geminiBackend) {
-            const modelToUse = message.mode?.model === undefined ? undefined : (message.mode.model || null);
-            const backendResult = createGeminiBackend({
-              cwd: process.cwd(),
-              mcpServers,
-              permissionHandler,
-              cloudToken,
-              currentUserEmail,
-              resumeSessionId: pendingResumeSessionId,
-              // Pass model from message - if undefined, will use local config/env/default
-              // If explicitly null, will skip local config and use env/default
-              model: modelToUse,
-            });
-            geminiBackend = backendResult.backend;
-
-            // Set up message handler
-            setupGeminiMessageHandler(geminiBackend);
-
-            // Use model from factory result (single source of truth - no duplicate resolution)
-            const actualModel = backendResult.model;
-            logger.debug(`[gemini] Backend created, model will be: ${actualModel} (from ${backendResult.modelSource})`);
-            logger.debug(`[gemini] Calling updateDisplayedModel with: ${actualModel}`);
-            updateDisplayedModel(actualModel, false); // Don't save - this is backend initialization
-            
-            // Track current model in conversation history
-            conversationHistory.setCurrentModel(actualModel);
-          }
-          
-          // Start session if not started
-          if (!acpSessionId) {
-            logger.debug('[gemini] Starting ACP session...');
-            // Update permission handler with current permission mode before starting session
-            updatePermissionMode(message.mode.permissionMode);
-            const { sessionId } = await geminiBackend.startSession();
-            acpSessionId = sessionId;
-            pendingResumeSessionId = undefined;
-            logger.debug(`[gemini] ACP session started: ${acpSessionId}`);
-            await switchThoughtLevelIfRequested(message.mode.effortLevel);
-            wasSessionCreated = true;
-            currentModeHash = message.hash;
-            
-            // Model info is already shown in status bar via updateDisplayedModel
-            logger.debug(`[gemini] Displaying model in UI: ${displayedModel || 'gemini-2.5-pro'}, displayedModel: ${displayedModel}`);
-          }
-        }
-        
         if (!acpSessionId) {
           throw new Error('ACP session not started');
         }
@@ -1153,7 +1092,7 @@ export async function runGemini(opts: {
         
         logger.debug(`[gemini] Sending prompt to Gemini (length: ${promptToSend.length}): ${promptToSend.substring(0, 100)}...`);
         logger.debug(`[gemini] Full prompt: ${promptToSend}`);
-        await switchThoughtLevelIfRequested(message.mode.effortLevel);
+        await applyThoughtLevelIfRequested(message.mode.effortLevel, geminiBackend as ConfigurableGeminiBackend | null);
         
         // Retry logic for transient Gemini API errors (empty response, internal errors)
         const MAX_RETRIES = 3;

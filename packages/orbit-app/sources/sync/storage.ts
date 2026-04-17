@@ -12,7 +12,6 @@ import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
 import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes } from "./persistence";
-import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
 import { sync } from "./sync";
@@ -23,6 +22,12 @@ import { DecryptedArtifact } from "./artifactTypes";
 import { FeedItem } from "./feedTypes";
 import { isSessionLikelyOnline, resolveSessionPresence } from '@/utils/presence';
 import { isCliSessionRelevantForList } from './sessionListFilters';
+import {
+    buildPersistedSessionDrafts,
+    buildPersistedSessionPermissionModes,
+    hydrateSessionPreferences,
+    normalizeSessionDraft,
+} from './sessionPreferences';
 
 // Debounce timer for realtimeMode changes
 let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -73,11 +78,6 @@ function areNativeCliEntriesEqual(
     }
 
     return true;
-}
-
-function isSandboxEnabled(metadata: Session['metadata'] | null | undefined): boolean {
-    const sandbox = metadata?.sandbox;
-    return !!sandbox && typeof sandbox === 'object' && (sandbox as { enabled?: unknown }).enabled === true;
 }
 
 // Known entitlement IDs
@@ -358,23 +358,21 @@ export const storage = create<StorageState>()((set, get) => {
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
-                // Preserve existing draft and permission mode if they exist, or load from saved data
-                const existingDraft = state.sessions[session.id]?.draft;
-                const savedDraft = savedDrafts[session.id];
-                const existingPermissionMode = state.sessions[session.id]?.permissionMode;
-                const savedPermissionMode = savedPermissionModes[session.id];
-                const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
-                const resolvedPermissionMode: PermissionModeKey =
-                    (existingPermissionMode && existingPermissionMode !== 'default' ? existingPermissionMode : undefined) ||
-                    (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ||
-                    (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ||
-                    defaultPermissionMode;
+                const {
+                    draft,
+                    permissionMode,
+                } = hydrateSessionPreferences({
+                    session,
+                    existingSession: state.sessions[session.id],
+                    savedDraft: savedDrafts[session.id],
+                    savedPermissionMode: savedPermissionModes[session.id],
+                });
 
                 mergedSessions[session.id] = {
                     ...session,
                     presence,
-                    draft: existingDraft || savedDraft || session.draft || null,
-                    permissionMode: resolvedPermissionMode
+                    draft,
+                    permissionMode,
                 };
             });
 
@@ -622,14 +620,8 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Persist plan mode change
             if (shouldEnterPlanMode) {
-                const allModes: Record<string, string> = {};
                 const currentState = get();
-                Object.entries(currentState.sessions).forEach(([id, sess]) => {
-                    if (sess.permissionMode && sess.permissionMode !== 'default') {
-                        allModes[id] = sess.permissionMode;
-                    }
-                });
-                saveSessionPermissionModes(allModes);
+                saveSessionPermissionModes(buildPersistedSessionPermissionModes(currentState.sessions));
             }
 
             return { changed: Array.from(changed), hasReadyEvent };
@@ -833,23 +825,7 @@ export const storage = create<StorageState>()((set, get) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
-            // Don't store empty strings, convert to null
-            const normalizedDraft = draft?.trim() ? draft : null;
-
-            // Collect all drafts for persistence
-            const allDrafts: Record<string, string> = {};
-            Object.entries(state.sessions).forEach(([id, sess]) => {
-                if (id === sessionId) {
-                    if (normalizedDraft) {
-                        allDrafts[id] = normalizedDraft;
-                    }
-                } else if (sess.draft) {
-                    allDrafts[id] = sess.draft;
-                }
-            });
-
-            // Persist drafts
-            saveSessionDrafts(allDrafts);
+            const normalizedDraft = normalizeSessionDraft(draft);
 
             const updatedSessions = {
                 ...state.sessions,
@@ -858,6 +834,7 @@ export const storage = create<StorageState>()((set, get) => {
                     draft: normalizedDraft
                 }
             };
+            saveSessionDrafts(buildPersistedSessionDrafts(updatedSessions));
 
             return {
                 ...state,
@@ -877,16 +854,7 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             };
 
-            // Collect all permission modes for persistence
-            const allModes: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
-                if (sess.permissionMode && sess.permissionMode !== 'default') {
-                    allModes[id] = sess.permissionMode;
-                }
-            });
-
-            // Persist permission modes (only non-default values to save space)
-            saveSessionPermissionModes(allModes);
+            saveSessionPermissionModes(buildPersistedSessionPermissionModes(updatedSessions));
 
             // No need to rebuild sessionListViewData since permission mode doesn't affect the list display
             return {
@@ -1036,14 +1004,8 @@ export const storage = create<StorageState>()((set, get) => {
             const { [sessionId]: _gitStatusFiles, ...remainingGitStatusFiles } = state.sessionGitStatusFiles;
             const { [sessionId]: _fileCache, ...remainingFileCache } = state.sessionFileCache;
 
-            // Clear drafts and permission modes from persistent storage
-            const drafts = loadSessionDrafts();
-            delete drafts[sessionId];
-            saveSessionDrafts(drafts);
-            
-            const modes = loadSessionPermissionModes();
-            delete modes[sessionId];
-            saveSessionPermissionModes(modes);
+            saveSessionDrafts(buildPersistedSessionDrafts(remainingSessions));
+            saveSessionPermissionModes(buildPersistedSessionPermissionModes(remainingSessions));
             
             return {
                 ...state,
