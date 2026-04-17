@@ -24,6 +24,8 @@ type MetadataOption = {
     description?: string | null;
 };
 
+type MetadataOptionCategory = 'model' | 'permission' | 'thought';
+
 const GEMINI_MODEL_FALLBACKS: ModelMode[] = [
     { key: 'gemini-3.1-pro-preview', name: 'gemini 3.1 pro', description: 'latest & most capable' },
     { key: 'gemini-3-flash-preview', name: 'gemini 3 flash', description: 'latest & fast' },
@@ -33,16 +35,128 @@ const GEMINI_MODEL_FALLBACKS: ModelMode[] = [
     { key: 'gemini-2.5-flash-lite', name: 'gemini 2.5 flash lite', description: 'fastest' },
 ];
 
-export function mapMetadataOptions(options?: MetadataOption[] | null): ModeOption[] {
+function localizePermissionModeName(
+    flavor: AgentFlavor,
+    code: string,
+    fallbackName: string,
+    translate: Translate,
+): string {
+    switch (flavor) {
+        case 'codex':
+            switch (code) {
+                case 'default':
+                    return translate('agentInput.codexPermissionMode.default');
+                case 'read-only':
+                    return translate('agentInput.codexPermissionMode.readOnly');
+                case 'safe-yolo':
+                    return translate('agentInput.codexPermissionMode.safeYolo');
+                case 'yolo':
+                    return translate('agentInput.codexPermissionMode.yolo');
+                default:
+                    return fallbackName;
+            }
+        case 'gemini':
+            switch (code) {
+                case 'default':
+                    return translate('agentInput.geminiPermissionMode.default');
+                case 'auto_edit':
+                    return translate('agentInput.geminiPermissionMode.autoEdit');
+                case 'plan':
+                    return translate('agentInput.geminiPermissionMode.plan');
+                default:
+                    return fallbackName;
+            }
+        case 'openclaw':
+        case 'claude':
+        default:
+            switch (code) {
+                case 'default':
+                    return translate('agentInput.permissionMode.default');
+                case 'acceptEdits':
+                    return translate('agentInput.permissionMode.acceptEdits');
+                case 'plan':
+                    return translate('agentInput.permissionMode.plan');
+                case 'auto':
+                    return translate('agentInput.permissionMode.auto');
+                case 'dontAsk':
+                    return translate('agentInput.permissionMode.dontAsk');
+                case 'bypassPermissions':
+                    return translate('agentInput.permissionMode.bypassPermissions');
+                default:
+                    return fallbackName;
+            }
+    }
+}
+
+function localizeEffortLevelName(code: string, fallbackName: string, translate: Translate): string {
+    switch (code) {
+        case 'auto':
+            return translate('agentInput.effort.auto');
+        case 'none':
+            return translate('agentInput.effort.none');
+        case 'minimal':
+            return translate('agentInput.effort.minimal');
+        case 'low':
+            return translate('agentInput.effort.low');
+        case 'medium':
+            return translate('agentInput.effort.medium');
+        case 'high':
+            return translate('agentInput.effort.high');
+        case 'xhigh':
+            return translate('agentInput.effort.xhigh');
+        case 'max':
+            return translate('agentInput.effort.max');
+        default:
+            return fallbackName;
+    }
+}
+
+function localizeMetadataOption(
+    category: MetadataOptionCategory,
+    flavor: AgentFlavor,
+    option: MetadataOption,
+    translate: Translate,
+): ModeOption {
+    const fallbackName = option.value;
+    const name = category === 'permission'
+        ? localizePermissionModeName(flavor, option.code, fallbackName, translate)
+        : category === 'thought'
+            ? localizeEffortLevelName(option.code, fallbackName, translate)
+            : fallbackName;
+
+    return {
+        key: option.code,
+        name,
+        description: option.description ?? null,
+    };
+}
+
+export function mapMetadataOptions(
+    options?: MetadataOption[] | null,
+    config?: {
+        category?: MetadataOptionCategory;
+        flavor?: AgentFlavor;
+        translate?: Translate;
+    },
+): ModeOption[] {
     if (!options || options.length === 0) {
         return [];
     }
 
-    return options.map((option) => ({
-        key: option.code,
-        name: option.value,
-        description: option.description ?? null,
-    }));
+    if (!config?.category || !config.translate) {
+        return options.map((option) => ({
+            key: option.code,
+            name: option.value,
+            description: option.description ?? null,
+        }));
+    }
+
+    return options.map((option) => localizeMetadataOption(
+        config.category!,
+        config.flavor,
+        option,
+        config.translate!,
+    ));
 }
 
 export function getClaudePermissionModes(translate: Translate): PermissionMode[] {
@@ -50,6 +164,7 @@ export function getClaudePermissionModes(translate: Translate): PermissionMode[]
         { key: 'default', name: translate('agentInput.permissionMode.default'), description: null },
         { key: 'acceptEdits', name: translate('agentInput.permissionMode.acceptEdits'), description: null },
         { key: 'plan', name: translate('agentInput.permissionMode.plan'), description: null },
+        { key: 'auto', name: translate('agentInput.permissionMode.auto'), description: null },
         { key: 'dontAsk', name: translate('agentInput.permissionMode.dontAsk'), description: null },
         { key: 'bypassPermissions', name: translate('agentInput.permissionMode.bypassPermissions'), description: null },
     ];
@@ -68,7 +183,6 @@ export function getGeminiPermissionModes(translate: Translate): PermissionMode[]
     return [
         { key: 'default', name: translate('agentInput.geminiPermissionMode.default'), description: null },
         { key: 'auto_edit', name: translate('agentInput.geminiPermissionMode.autoEdit'), description: null },
-        { key: 'yolo', name: translate('agentInput.geminiPermissionMode.yolo'), description: null },
         { key: 'plan', name: translate('agentInput.geminiPermissionMode.plan'), description: null },
     ];
 }
@@ -86,6 +200,7 @@ export function getCodexModelModes(): ModelMode[] {
     return [
         { key: 'default', name: 'default model', description: null },
         { key: 'gpt-5.4', name: 'gpt-5.4', description: null },
+        { key: 'gpt-5.4-mini', name: 'gpt-5.4-mini', description: null },
         { key: 'gpt-5.3-codex', name: 'gpt-5.3-codex', description: null },
         { key: 'gpt-5.2-codex', name: 'gpt-5.2-codex', description: null },
         { key: 'gpt-5.1-codex-max', name: 'gpt-5.1-codex-max', description: null },
@@ -157,11 +272,43 @@ export function getAvailablePermissionModes(
     metadata: Metadata | null | undefined,
     translate: Translate,
 ): PermissionMode[] {
-    if (flavor === 'claude' || flavor === 'codex' || flavor === 'openclaw') {
-        return hackModes(getHardcodedPermissionModes(flavor, translate));
+    const metadataModes = mapMetadataOptions(metadata?.operatingModes, {
+        category: 'permission',
+        flavor,
+        translate,
+    });
+    if (metadataModes.length > 0) {
+        return hackModes(metadataModes);
     }
 
-    const metadataModes = mapMetadataOptions(metadata?.operatingModes);
+    return hackModes(getHardcodedPermissionModes(flavor, translate));
+}
+
+export function getAvailableSessionModels(
+    flavor: AgentFlavor,
+    metadata: Metadata | null | undefined,
+    translate: Translate,
+): ModelMode[] {
+    const metadataModels = mapMetadataOptions(metadata?.models);
+    if (metadataModels.length > 0) {
+        if (flavor === 'codex' && !metadataModels.some((model) => model.key === 'default')) {
+            return [{ key: 'default', name: 'default model', description: null }, ...metadataModels];
+        }
+        return metadataModels;
+    }
+    return getHardcodedModelModes(flavor, translate);
+}
+
+export function getAvailableSessionPermissionModes(
+    flavor: AgentFlavor,
+    metadata: Metadata | null | undefined,
+    translate: Translate,
+): PermissionMode[] {
+    const metadataModes = mapMetadataOptions(metadata?.operatingModes, {
+        category: 'permission',
+        flavor,
+        translate,
+    });
     if (metadataModes.length > 0) {
         return hackModes(metadataModes);
     }
@@ -205,12 +352,29 @@ export function getDefaultPermissionModeKey(_flavor: AgentFlavor): string {
 
 // Effort levels per agent type
 
-export function getClaudeEffortLevels(): EffortLevel[] {
-    return [
-        { key: 'low', name: 'low' },
-        { key: 'medium', name: 'medium' },
-        { key: 'high', name: 'high' },
-    ];
+export function getClaudeEffortLevels(modelKey: string): EffortLevel[] {
+    if (modelKey === 'opus') {
+        return [
+            { key: 'auto', name: 'auto' },
+            { key: 'low', name: 'low' },
+            { key: 'medium', name: 'medium' },
+            { key: 'high', name: 'high' },
+            { key: 'xhigh', name: 'xhigh' },
+            { key: 'max', name: 'max' },
+        ];
+    }
+
+    if (modelKey === 'default' || modelKey === 'sonnet') {
+        return [
+            { key: 'auto', name: 'auto' },
+            { key: 'low', name: 'low' },
+            { key: 'medium', name: 'medium' },
+            { key: 'high', name: 'high' },
+            { key: 'max', name: 'max' },
+        ];
+    }
+
+    return [];
 }
 
 export function getCodexEffortLevels(): EffortLevel[] {
@@ -223,7 +387,7 @@ export function getCodexEffortLevels(): EffortLevel[] {
 }
 
 export function getHardcodedEffortLevels(flavor: AgentFlavor): EffortLevel[] {
-    if (flavor === 'claude') return getClaudeEffortLevels();
+    if (flavor === 'claude') return getClaudeEffortLevels('sonnet');
     if (flavor === 'codex') return getCodexEffortLevels();
     return [];
 }
@@ -236,8 +400,7 @@ export function getDefaultEffortKey(flavor: AgentFlavor): string | null {
 // Per-model effort: returns effort levels for a specific model, or empty if the model has no effort
 export function getEffortLevelsForModel(flavor: AgentFlavor, modelKey: string): EffortLevel[] {
     if (flavor === 'claude') {
-        if (modelKey === 'default') return [];
-        return getClaudeEffortLevels();
+        return getClaudeEffortLevels(modelKey);
     }
     if (flavor === 'codex') {
         return getCodexEffortLevels();
@@ -245,8 +408,43 @@ export function getEffortLevelsForModel(flavor: AgentFlavor, modelKey: string): 
     return [];
 }
 
+export function getAvailableEffortLevels(
+    flavor: AgentFlavor,
+    metadata: Metadata | null | undefined,
+    modelKey: string,
+    translate: Translate,
+): EffortLevel[] {
+    const metadataThoughtLevels = mapMetadataOptions(metadata?.thoughtLevels, {
+        category: 'thought',
+        flavor,
+        translate,
+    });
+    if (metadataThoughtLevels.length > 0) {
+        return metadataThoughtLevels;
+    }
+
+    if (flavor !== 'codex' && flavor !== 'claude') {
+        return [];
+    }
+
+    return getEffortLevelsForModel(flavor, modelKey).map((level) => ({
+        ...level,
+        name: localizeEffortLevelName(level.key, level.name, translate),
+    }));
+}
+
 // Default effort for a model — highest the model allows
 export function getDefaultEffortKeyForModel(flavor: AgentFlavor, modelKey: string): string | null {
+    if (flavor === 'claude') {
+        if (modelKey === 'opus') {
+            return 'xhigh';
+        }
+        if (modelKey === 'default' || modelKey === 'sonnet') {
+            return 'high';
+        }
+        return null;
+    }
+
     const levels = getEffortLevelsForModel(flavor, modelKey);
     if (levels.length === 0) return null;
     return levels[levels.length - 1].key;

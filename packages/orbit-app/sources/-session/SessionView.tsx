@@ -1,17 +1,21 @@
 import { AgentContentView } from '@/components/AgentContentView';
 import { AgentInput } from '@/components/AgentInput';
 import { layout } from '@/components/layout';
+import { RoundButton } from '@/components/RoundButton';
+import { Typography } from '@/constants/Typography';
 import {
-    getAvailableModels,
-    getAvailablePermissionModes,
+    getAvailableEffortLevels,
+    getAvailableSessionModels,
+    getAvailableSessionPermissionModes,
+    getDefaultEffortKeyForModel,
     getDefaultModelKey,
     getDefaultPermissionModeKey,
-    getEffortLevelsForModel,
-    getDefaultEffortKeyForModel,
     resolveCurrentOption,
     EffortLevel,
 } from '@/components/modelModeOptions';
 import { getSuggestions } from '@/components/autocomplete/suggestions';
+import { resolveSendTargetSessionId } from './resolveSendTargetSession';
+import { replaceToSession } from '@/hooks/useNavigateToSession';
 import { ChatHeaderView } from '@/components/ChatHeaderView';
 import { ChatList } from '@/components/ChatList';
 import { Deferred } from '@/components/Deferred';
@@ -22,18 +26,24 @@ import { useDraft } from '@/hooks/useDraft';
 import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { getCurrentVoiceConversationId, getCurrentVoiceSessionDurationSeconds, startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
-import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useNativeCliHistoryByMachine, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { t } from '@/text';
 import { tracking } from '@/track';
 import { getVoiceMessageCount, getVoiceOnboardingPromptLoadCount } from '@/sync/persistence';
+import {
+    rememberNativeCliHintsForSession,
+} from '@/utils/openNativeCliSession';
+import { getOrbitActionErrorMessage } from '@/hooks/orbitActionError';
+import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { isRunningOnMac } from '@/utils/platform';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/responsive';
-import { formatPathRelativeToHome, getResumeCommandBlock, getSessionAvatarId, getSessionName, useSessionStatus } from '@/utils/sessionUtils';
+import { findMatchingNativeCliEntryForSession, getSessionDisplayTitle } from '@/utils/nativeCliHistory';
+import { formatPathRelativeToHome, getResumeCommandBlock, getSessionAvatarId, getSessionName } from '@/utils/sessionUtils';
+import { getSessionControlState, useSessionControlState } from '@/utils/sessionControlState';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
@@ -44,6 +54,8 @@ import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
+import { useShallow } from 'zustand/react/shallow';
+import { findFallbackSessionMessages } from '@/utils/sessionMessageFallback';
 
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
@@ -56,8 +68,31 @@ export const SessionView = React.memo((props: { id: string }) => {
     const deviceType = useDeviceType();
     const headerHeight = useHeaderHeight();
     const realtimeStatus = useRealtimeStatus();
+    const nativeCliHistoryByMachine = useNativeCliHistoryByMachine();
     const isTablet = useIsTablet();
+    const sessionControlState = React.useMemo(
+        () => session
+            ? getSessionControlState(session, { sessionId })
+            : null,
+        [session, sessionId],
+    );
     const [sessionActionsAnchor, setSessionActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
+
+    React.useEffect(() => {
+        if (!session) {
+            return;
+        }
+
+        rememberNativeCliHintsForSession(session);
+    }, [session]);
+
+    const matchingNativeCliEntry = React.useMemo(() => {
+        if (!session) {
+            return null;
+        }
+
+        return findMatchingNativeCliEntryForSession(session, nativeCliHistoryByMachine);
+    }, [session, nativeCliHistoryByMachine]);
 
     // Compute header props based on session state
     const headerProps = useMemo(() => {
@@ -74,7 +109,6 @@ export const SessionView = React.memo((props: { id: string }) => {
         }
 
         if (!session) {
-            // Deleted state - show deleted message in header
             return {
                 title: t('errors.sessionDeleted'),
                 subtitle: undefined,
@@ -86,17 +120,17 @@ export const SessionView = React.memo((props: { id: string }) => {
         }
 
         // Normal state - show session info
-        const isConnected = session.presence === 'online';
+        const displayPath = session.metadata?.path ?? matchingNativeCliEntry?.workingDirectory;
         return {
-            title: getSessionName(session),
-            subtitle: session.metadata?.path ? formatPathRelativeToHome(session.metadata.path, session.metadata?.homeDir) : undefined,
+            title: getSessionDisplayTitle(session, nativeCliHistoryByMachine) || getSessionName(session),
+            subtitle: displayPath ? formatPathRelativeToHome(displayPath, session.metadata?.homeDir) : undefined,
             avatarId: getSessionAvatarId(session),
             onAvatarPress: () => router.push(`/session/${sessionId}/info`),
-            isConnected: isConnected,
+            isConnected: sessionControlState?.isConnected ?? false,
             flavor: session.metadata?.flavor || null,
-            tintColor: isConnected ? '#000' : '#8E8E93'
+            tintColor: sessionControlState?.isConnected ? '#000' : '#8E8E93'
         };
-    }, [session, isDataReady, sessionId, router]);
+    }, [session, isDataReady, sessionId, router, matchingNativeCliEntry, nativeCliHistoryByMachine, sessionControlState]);
 
     return (
         <>
@@ -160,7 +194,6 @@ export const SessionView = React.memo((props: { id: string }) => {
                         <ActivityIndicator size="small" color={theme.colors.textSecondary} />
                     </View>
                 ) : !session ? (
-                    // Deleted state
                     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                         <Ionicons name="trash-outline" size={48} color={theme.colors.textSecondary} />
                         <Text style={{ color: theme.colors.text, fontSize: 20, marginTop: 16, fontWeight: '600' }}>{t('errors.sessionDeleted')}</Text>
@@ -202,6 +235,15 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const [message, setMessage] = React.useState('');
     const realtimeStatus = useRealtimeStatus();
     const { messages, isLoaded } = useSessionMessages(sessionId);
+    const fallbackMessages = storage(useShallow((state) => (
+        findFallbackSessionMessages({
+            currentSession: session,
+            currentSessionId: sessionId,
+            sessions: state.sessions,
+            sessionMessages: state.sessionMessages,
+        })
+    )));
+    const displayMessages = messages.length > 0 ? messages : fallbackMessages;
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
     const sessionInputHorizontalPadding = Platform.OS === 'web' || isRunningOnMac() || isTablet ? 12 : 8;
 
@@ -213,10 +255,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const shouldShowCliWarning = isCliOutdated && !isAcknowledged;
     const flavor = session.metadata?.flavor;
     const availableModels = React.useMemo(() => (
-        getAvailableModels(flavor, session.metadata, t)
+        getAvailableSessionModels(flavor, session.metadata, t)
     ), [flavor, session.metadata]);
     const availableModes = React.useMemo(() => (
-        getAvailablePermissionModes(flavor, session.metadata, t)
+        getAvailableSessionPermissionModes(flavor, session.metadata, t)
     ), [flavor, session.metadata]);
 
     const permissionMode = React.useMemo<PermissionMode | null>(() => (
@@ -235,27 +277,34 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         ])
     ), [availableModels, session.modelMode, session.metadata?.currentModelCode, flavor]);
 
-    // Effort level state
-    const modelKey = modelMode?.key ?? 'default';
+    const selectedModelKey = modelMode?.key ?? session.metadata?.currentModelCode ?? getDefaultModelKey(flavor);
     const availableEffortLevels = React.useMemo<EffortLevel[]>(() => (
-        getEffortLevelsForModel(flavor, modelKey)
-    ), [flavor, modelKey]);
+        getAvailableEffortLevels(flavor, session.metadata, selectedModelKey, t)
+    ), [flavor, selectedModelKey, session.metadata]);
     const effortLevel = React.useMemo<EffortLevel | null>(() => (
         resolveCurrentOption(availableEffortLevels, [
             session.effortLevel,
-            getDefaultEffortKeyForModel(flavor, modelKey),
+            session.metadata?.currentThoughtLevelCode,
+            getDefaultEffortKeyForModel(flavor, selectedModelKey),
         ])
-    ), [availableEffortLevels, session.effortLevel, flavor, modelKey]);
+    ), [availableEffortLevels, session.effortLevel, session.metadata?.currentThoughtLevelCode, flavor, selectedModelKey]);
 
-    const sessionStatus = useSessionStatus(session);
+    const sessionControlState = useSessionControlState(session, { sessionId });
+    const sessionStatus = sessionControlState.status;
     const sessionUsage = useSessionUsage(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const experiments = useSetting('experiments');
     const expResumeSession = useSetting('expResumeSession');
-    const isArchivedSession = session.metadata?.lifecycleState === 'archived';
-    const isDisconnected = !sessionStatus.isConnected;
-    const isInactiveArchivedSession = isArchivedSession && isDisconnected;
+    const isDisconnected = sessionControlState.isDisconnected;
+    const isInactiveArchivedSession = sessionControlState.isInactiveArchivedSession;
     const resumeCommandBlock = getResumeCommandBlock(session);
+    const {
+        canResume,
+        canShowResume,
+        resumeSession,
+        resumeSessionSubtitle,
+        resumingSession,
+    } = useSessionQuickActions(session);
 
     // Use draft hook for auto-saving message drafts
     const { clearDraft } = useDraft(sessionId, message, setMessage);
@@ -345,27 +394,26 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         isMicActive: realtimeStatus === 'connected' || realtimeStatus === 'connecting'
     }), [handleMicrophonePress, realtimeStatus]);
 
-    // Trigger session visibility and initialize git status sync
-    React.useLayoutEffect(() => {
+    // Trigger session visibility for message sync and any session-scoped background work.
+    React.useEffect(() => {
 
         // Trigger session sync
         sync.onSessionVisible(sessionId);
+        return () => {
+            sync.onSessionHidden(sessionId);
+        };
+    }, [sessionId]);
 
-
-        // Initialize git status sync for this session
-        gitStatusSync.getSync(sessionId);
-    }, [sessionId, realtimeStatus]);
-
-    let content = (
+    const content = (
         <>
             <Deferred>
-                {messages.length > 0 && (
-                    <ChatList session={session} />
-                )}
+                {displayMessages.length > 0 ? (
+                    <ChatList session={session} messagesOverride={displayMessages} />
+                ) : null}
             </Deferred>
         </>
     );
-    const placeholder = messages.length === 0 ? (
+    const placeholder = displayMessages.length === 0 ? (
         <>
             {isLoaded ? (
                 <EmptyMessages session={session} />
@@ -398,11 +446,25 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 isPulsing: sessionStatus.isPulsing
             }}
             blockSend={isDisconnected}
-            onSend={() => {
+            isSendDisabled={isDisconnected}
+            onSend={async () => {
                 if (message.trim()) {
-                    setMessage('');
-                    clearDraft();
-                    sync.sendMessage(sessionId, message, { source: 'chat' });
+                    const outgoingMessage = message;
+                    try {
+                        const targetSessionId = await resolveSendTargetSessionId(session);
+                        setMessage('');
+                        clearDraft();
+                        if (targetSessionId !== sessionId) {
+                            replaceToSession(router, targetSessionId);
+                        }
+                        sync.sendMessage(targetSessionId, outgoingMessage, { source: 'chat' });
+                    } catch (error) {
+                        console.warn('Failed to resolve send target session', error);
+                        Modal.alert(
+                            t('common.error'),
+                            getOrbitActionErrorMessage(error),
+                        );
+                    }
                 }
             }}
             onMicPress={isDisconnected ? undefined : micButtonState.onMicPress}
@@ -444,7 +506,20 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         </>
     ) : (
         <>
-            {expResumeSession && isDisconnected && resumeCommandBlock && (
+            {isDisconnected && canShowResume && (
+                <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
+                    <ResumeSessionHint
+                        canResume={canResume}
+                        isLoading={resumingSession}
+                        subtitle={resumeSessionSubtitle}
+                        onResume={resumeSession}
+                        resumeCommandBlock={resumeCommandBlock}
+                        showCommandHint={expResumeSession && !!resumeCommandBlock}
+                        machineLabel={session.metadata?.host ?? null}
+                    />
+                </CenteredInputWidth>
+            )}
+            {!canShowResume && expResumeSession && isDisconnected && resumeCommandBlock && (
                 <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
                     <ResumeCommandHint resumeCommandBlock={resumeCommandBlock} />
                 </CenteredInputWidth>
@@ -557,6 +632,65 @@ function ResumeCommandHint({ resumeCommandBlock }: {
             }}>
                 Run this command in your terminal to resume this session
             </Text>
+        </View>
+    );
+}
+
+function ResumeSessionHint(props: {
+    canResume: boolean;
+    isLoading: boolean;
+    subtitle: string;
+    onResume: () => void;
+    resumeCommandBlock: NonNullable<ReturnType<typeof getResumeCommandBlock>> | null;
+    showCommandHint: boolean;
+    machineLabel: string | null;
+}) {
+    const { theme } = useUnistyles();
+
+    return (
+        <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10, gap: 10 }}>
+            <View style={{
+                borderRadius: 16,
+                backgroundColor: theme.colors.surfaceHigh,
+                paddingHorizontal: 14,
+                paddingVertical: 14,
+                gap: 10,
+            }}>
+                <View style={{ gap: 4 }}>
+                    <Text style={{
+                        color: theme.colors.text,
+                        fontSize: 14,
+                        lineHeight: 18,
+                        ...Typography.default('semiBold'),
+                    }}>
+                        {props.machineLabel
+                            ? `${t('common.continue')} on ${props.machineLabel}`
+                            : t('sessionInfo.resumeSession')}
+                    </Text>
+                    <Text style={{
+                        color: theme.colors.textSecondary,
+                        fontSize: 12,
+                        lineHeight: 16,
+                    }}>
+                        {props.subtitle}
+                    </Text>
+                </View>
+                {props.canResume && (
+                    <View style={{ alignItems: 'flex-start' }}>
+                        <RoundButton
+                            size="normal"
+                            title={props.machineLabel
+                                ? `${t('common.continue')} on ${props.machineLabel}`
+                                : t('common.continue')}
+                            onPress={props.onResume}
+                            loading={props.isLoading}
+                        />
+                    </View>
+                )}
+            </View>
+            {props.showCommandHint && props.resumeCommandBlock && (
+                <ResumeCommandHint resumeCommandBlock={props.resumeCommandBlock} />
+            )}
         </View>
     );
 }

@@ -10,6 +10,7 @@ import { ItemList } from '@/components/ItemList';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Item } from '@/components/Item';
 import { t } from '@/text';
+import { buildTerminalAuthUrl } from '@/utils/appUrlScheme';
 
 export default function TerminalConnectScreen() {
     const router = useRouter();
@@ -40,8 +41,7 @@ export default function TerminalConnectScreen() {
 
     const handleConnect = async () => {
         if (publicKey) {
-            // Convert the hash key format to the expected orbit:// URL format
-            const authUrl = `orbit://terminal?${publicKey}`;
+            const authUrl = buildTerminalAuthUrl(publicKey);
             await processAuthUrl(authUrl);
         }
     };

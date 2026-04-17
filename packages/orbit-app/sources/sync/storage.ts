@@ -21,6 +21,8 @@ import { isMutableTool } from "@/components/tools/knownTools";
 import { projectManager } from "./projectManager";
 import { DecryptedArtifact } from "./artifactTypes";
 import { FeedItem } from "./feedTypes";
+import { isSessionLikelyOnline, resolveSessionPresence } from '@/utils/presence';
+import { isCliSessionRelevantForList } from './sessionListFilters';
 
 // Debounce timer for realtimeMode changes
 let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -31,16 +33,46 @@ const REALTIME_MODE_DEBOUNCE_MS = 150;
  * Returns either "online" (string) or a timestamp (number) for last seen
  */
 function resolveSessionOnlineState(session: { active: boolean; activeAt: number }): "online" | number {
-    // Session is online if the active flag is true
-    return session.active ? "online" : session.activeAt;
+    return resolveSessionPresence(session);
 }
 
 /**
  * Checks if a session should be shown in the active sessions group
  */
 function isSessionActive(session: { active: boolean; activeAt: number }): boolean {
-    // Use the active flag directly, no timeout checks
-    return session.active;
+    return isSessionLikelyOnline(session);
+}
+
+function areNativeCliEntriesEqual(
+    left: NativeCliHistoryEntry[] | undefined,
+    right: NativeCliHistoryEntry[],
+): boolean {
+    if (!left || left.length !== right.length) {
+        return false;
+    }
+
+    for (let index = 0; index < left.length; index += 1) {
+        const leftEntry = left[index];
+        const rightEntry = right[index];
+        if (!leftEntry || !rightEntry) {
+            return false;
+        }
+
+        if (
+            leftEntry.id !== rightEntry.id
+            || leftEntry.backendId !== rightEntry.backendId
+            || leftEntry.updatedAt !== rightEntry.updatedAt
+            || leftEntry.isLive !== rightEntry.isLive
+            || leftEntry.title !== rightEntry.title
+            || leftEntry.summary !== rightEntry.summary
+            || leftEntry.workingDirectory !== rightEntry.workingDirectory
+            || leftEntry.projectRoot !== rightEntry.projectRoot
+        ) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 function isSandboxEnabled(metadata: Session['metadata'] | null | undefined): boolean {
@@ -64,10 +96,12 @@ interface SessionMessages {
 export type SessionListViewItem =
     | { type: 'header'; title: string }
     | { type: 'active-sessions'; sessions: Session[] }
+    | { type: 'cli-section'; tool: NativeCliHistoryEntry['tool'] | 'other'; title: string; count: number; projectCount: number; expanded: boolean }
+    | { type: 'cli-project-group'; tool: NativeCliHistoryEntry['tool'] | 'other'; title: string; subtitle: string; groupKey: string; count: number; expanded: boolean }
     | { type: 'project-group'; displayPath: string; machine: Machine }
     | { type: 'native-cli-project-group'; title: string; subtitle: string; machine: Machine; tool: NativeCliHistoryEntry['tool'] }
-    | { type: 'session'; session: Session; variant?: 'default' | 'no-path' }
-    | { type: 'native-cli-session'; entry: NativeCliHistoryEntry };
+    | { type: 'session'; session: Session; variant?: 'default' | 'no-path'; displayTitle?: string; displaySubtitle?: string; badgeLabel?: string; badgeTone?: 'live' | 'history' | 'orbit' }
+    | { type: 'native-cli-session'; entry: NativeCliHistoryEntry; displayTitle?: string; displaySubtitle?: string; badgeLabel?: string; badgeTone?: 'live' | 'history' | 'orbit' };
 
 // Legacy type for backward compatibility - to be removed
 export type SessionListItem = string | Session;
@@ -460,11 +494,6 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             });
 
-            // Build new unified list view data
-            const sessionListViewData = buildSessionListViewData(
-                mergedSessions
-            );
-
             // Update project manager with current sessions and machines
             const machineMetadataMap = new Map<string, any>();
             Object.values(state.machines).forEach(machine => {
@@ -478,7 +507,6 @@ export const storage = create<StorageState>()((set, get) => {
                 ...state,
                 sessions: mergedSessions,
                 sessionsData: listData,  // Legacy - to be removed
-                sessionListViewData,
                 sessionMessages: updatedSessionMessages
             };
         }),
@@ -831,15 +859,9 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             };
 
-            // Rebuild sessionListViewData to update the UI immediately
-            const sessionListViewData = buildSessionListViewData(
-                updatedSessions
-            );
-
             return {
                 ...state,
                 sessions: updatedSessions,
-                sessionListViewData
             };
         }),
         updateSessionPermissionMode: (sessionId: string, mode: string) => set((state) => {
@@ -939,24 +961,25 @@ export const storage = create<StorageState>()((set, get) => {
                 });
             }
 
-            // Rebuild sessionListViewData to reflect machine changes
-            const sessionListViewData = buildSessionListViewData(
-                state.sessions
-            );
-
             return {
                 ...state,
                 machines: mergedMachines,
-                sessionListViewData
             };
         }),
-        applyNativeCliHistory: (machineId: string, entries: NativeCliHistoryEntry[]) => set((state) => ({
-            ...state,
-            nativeCliHistoryByMachine: {
-                ...state.nativeCliHistoryByMachine,
-                [machineId]: entries,
-            },
-        })),
+        applyNativeCliHistory: (machineId: string, entries: NativeCliHistoryEntry[]) => set((state) => {
+            const existingEntries = state.nativeCliHistoryByMachine[machineId];
+            if (areNativeCliEntriesEqual(existingEntries, entries)) {
+                return state;
+            }
+
+            return {
+                ...state,
+                nativeCliHistoryByMachine: {
+                    ...state.nativeCliHistoryByMachine,
+                    [machineId]: entries,
+                },
+            };
+        }),
         // Artifact methods
         applyArtifacts: (artifacts: DecryptedArtifact[]) => set((state) => {
             console.log(`🗂️ Storage.applyArtifacts: Applying ${artifacts.length} artifacts`);
@@ -1022,9 +1045,6 @@ export const storage = create<StorageState>()((set, get) => {
             delete modes[sessionId];
             saveSessionPermissionModes(modes);
             
-            // Rebuild sessionListViewData without the deleted session
-            const sessionListViewData = buildSessionListViewData(remainingSessions);
-            
             return {
                 ...state,
                 sessions: remainingSessions,
@@ -1032,7 +1052,6 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionGitStatus: remainingGitStatus,
                 sessionGitStatusFiles: remainingGitStatusFiles,
                 sessionFileCache: remainingFileCache,
-                sessionListViewData
             };
         }),
         // Friend management methods
@@ -1218,7 +1237,6 @@ export function useLocalSettings(): LocalSettings {
 export function useAllMachines(options?: { includeOffline?: boolean }): Machine[] {
     const includeOffline = options?.includeOffline ?? false;
     return storage(useShallow((state) => {
-        if (!state.isDataReady) return [];
         const machines = Object.values(state.machines).sort((a, b) => b.createdAt - a.createdAt);
         return includeOffline ? machines : machines.filter((v) => v.active);
     }));
@@ -1240,6 +1258,18 @@ export function useAllSessions(): Session[] {
     return storage(useShallow((state) => {
         if (!state.isDataReady) return [];
         return Object.values(state.sessions).sort((a, b) => b.updatedAt - a.updatedAt);
+    }));
+}
+
+export function useCliSessionsForList(): Session[] {
+    return storage(useShallow((state) => {
+        if (!state.isDataReady) {
+            return [];
+        }
+
+        return Object.values(state.sessions)
+            .filter((session) => isCliSessionRelevantForList(session))
+            .sort((left, right) => right.updatedAt - left.updatedAt);
     }));
 }
 

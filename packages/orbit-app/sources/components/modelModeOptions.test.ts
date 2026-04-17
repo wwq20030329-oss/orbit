@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+    getAvailableEffortLevels,
     getAvailableModels,
     getAvailablePermissionModes,
+    getAvailableSessionModels,
+    getAvailableSessionPermissionModes,
     getCodexModelModes,
     getClaudePermissionModes,
     mapMetadataOptions,
@@ -23,8 +26,17 @@ describe('modelModeOptions', () => {
 
     it('builds claude permission fallbacks with translated names', () => {
         const modes = getClaudePermissionModes(translate);
-        expect(modes.map((mode) => mode.key)).toEqual(['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions']);
+        expect(modes.map((mode) => mode.key)).toEqual([
+            'default',
+            'acceptEdits',
+            'plan',
+            'auto',
+            'dontAsk',
+            'bypassPermissions',
+        ]);
         expect(modes[0].name).toBe('tr:agentInput.permissionMode.default');
+        expect(modes[3].name).toBe('tr:agentInput.permissionMode.auto');
+        expect(modes[4].name).toBe('tr:agentInput.permissionMode.dontAsk');
     });
 
     it('builds codex model fallbacks', () => {
@@ -32,6 +44,7 @@ describe('modelModeOptions', () => {
         expect(models.map((model) => model.key)).toEqual([
             'default',
             'gpt-5.4',
+            'gpt-5.4-mini',
             'gpt-5.3-codex',
             'gpt-5.2-codex',
             'gpt-5.1-codex-max',
@@ -67,12 +80,12 @@ describe('modelModeOptions', () => {
         ]);
     });
 
-    it('keeps codex permission modes hardcoded even when metadata modes exist', () => {
+    it('prefers metadata permission modes when available', () => {
         const modes = getAvailablePermissionModes('codex', {
             operatingModes: [{ code: 'metadata-only', value: 'Metadata Mode', description: null }],
         } as any, translate);
 
-        expect(modes.map((mode) => mode.key)).toEqual(['default', 'read-only', 'safe-yolo', 'yolo']);
+        expect(modes.map((mode) => mode.key)).toEqual(['metadata-only']);
     });
 
     it('applies hacks to metadata-provided operating modes', () => {
@@ -85,7 +98,125 @@ describe('modelModeOptions', () => {
 
         expect(modes).toEqual([
             { key: 'build', name: 'Build', description: 'Do build steps' },
-            { key: 'plan', name: 'Plan', description: 'Plan first' },
+            { key: 'plan', name: 'tr:agentInput.geminiPermissionMode.plan', description: 'Plan first' },
+        ]);
+    });
+
+    it('falls back to codex session permission modes when metadata is missing', () => {
+        const modes = getAvailableSessionPermissionModes('codex', undefined, translate);
+        expect(modes.map((mode) => mode.key)).toEqual(['default', 'read-only', 'safe-yolo', 'yolo']);
+        expect(modes.map((mode) => mode.name)).toEqual([
+            'tr:agentInput.codexPermissionMode.default',
+            'tr:agentInput.codexPermissionMode.readOnly',
+            'tr:agentInput.codexPermissionMode.safeYolo',
+            'tr:agentInput.codexPermissionMode.yolo',
+        ]);
+
+        const metadataModes = getAvailableSessionPermissionModes('codex', {
+            operatingModes: [{ code: 'on-request', value: 'Suggest', description: 'Official codex mode' }],
+        } as any, translate);
+        expect(metadataModes).toEqual([
+            { key: 'on-request', name: 'Suggest', description: 'Official codex mode' },
+        ]);
+    });
+
+    it('localizes known metadata permission modes while preserving unknown ones', () => {
+        const modes = getAvailablePermissionModes('codex', {
+            operatingModes: [
+                { code: 'read-only', value: 'Read only mode', description: null },
+                { code: 'safe-yolo', value: 'Auto', description: null },
+                { code: 'custom-mode', value: 'Custom Mode', description: 'Team specific' },
+            ],
+        } as any, translate);
+
+        expect(modes).toEqual([
+            { key: 'read-only', name: 'tr:agentInput.codexPermissionMode.readOnly', description: null },
+            { key: 'safe-yolo', name: 'tr:agentInput.codexPermissionMode.safeYolo', description: null },
+            { key: 'custom-mode', name: 'Custom Mode', description: 'Team specific' },
+        ]);
+    });
+
+    it('falls back to gemini session models when metadata is missing', () => {
+        const models = getAvailableSessionModels('gemini', undefined, translate);
+        expect(models.map((model) => model.key)).toEqual([
+            'gemini-3.1-pro-preview',
+            'gemini-3-flash-preview',
+            'gemini-3.1-flash-lite-preview',
+            'gemini-2.5-pro',
+            'gemini-2.5-flash',
+            'gemini-2.5-flash-lite',
+        ]);
+
+        const metadataModels = getAvailableSessionModels('gemini', {
+            models: [{ code: 'gemini-2.5-pro', value: 'Gemini 2.5 Pro', description: 'Official model' }],
+        } as any, translate);
+        expect(metadataModels).toEqual([
+            { key: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Official model' },
+        ]);
+    });
+
+    it('keeps claude session setting fallbacks when metadata is missing', () => {
+        const modes = getAvailableSessionPermissionModes('claude', undefined, translate);
+        const models = getAvailableSessionModels('claude', undefined, translate);
+
+        expect(modes.map((mode) => mode.key)).toEqual([
+            'default',
+            'acceptEdits',
+            'plan',
+            'auto',
+            'dontAsk',
+            'bypassPermissions',
+        ]);
+        expect(models.map((model) => model.key)).toEqual(['default', 'opus', 'sonnet', 'haiku']);
+    });
+
+    it('uses runtime-supported gemini fallback permission modes', () => {
+        const modes = getAvailableSessionPermissionModes('gemini', undefined, translate);
+
+        expect(modes).toEqual([
+            { key: 'default', name: 'tr:agentInput.geminiPermissionMode.default', description: null },
+            { key: 'auto_edit', name: 'tr:agentInput.geminiPermissionMode.autoEdit', description: null },
+            { key: 'plan', name: 'tr:agentInput.geminiPermissionMode.plan', description: null },
+        ]);
+    });
+
+    it('prefers metadata thought levels and localizes known labels', () => {
+        const levels = getAvailableEffortLevels('codex', {
+            thoughtLevels: [
+                { code: 'low', value: 'Low reasoning', description: null },
+                { code: 'custom', value: 'Deep dive', description: 'Team preset' },
+            ],
+        } as any, 'gpt-5.4', translate);
+
+        expect(levels).toEqual([
+            { key: 'low', name: 'tr:agentInput.effort.low', description: null },
+            { key: 'custom', name: 'Deep dive', description: 'Team preset' },
+        ]);
+    });
+
+    it('falls back to translated hardcoded effort levels when metadata is missing', () => {
+        const levels = getAvailableEffortLevels('codex', undefined, 'gpt-5.4', translate);
+
+        expect(levels.map((level) => level.key)).toEqual(['low', 'medium', 'high', 'xhigh']);
+        expect(levels.map((level) => level.name)).toEqual([
+            'tr:agentInput.effort.low',
+            'tr:agentInput.effort.medium',
+            'tr:agentInput.effort.high',
+            'tr:agentInput.effort.xhigh',
+        ]);
+    });
+
+    it('falls back to localized Claude effort levels for supported models', () => {
+        const levels = getAvailableEffortLevels('claude', undefined, 'opus', translate);
+
+        expect(levels.map((level) => level.key)).toEqual(['auto', 'low', 'medium', 'high', 'xhigh', 'max']);
+        expect(levels.map((level) => level.name)).toEqual([
+            'tr:agentInput.effort.auto',
+            'tr:agentInput.effort.low',
+            'tr:agentInput.effort.medium',
+            'tr:agentInput.effort.high',
+            'tr:agentInput.effort.xhigh',
+            'tr:agentInput.effort.max',
         ]);
     });
 

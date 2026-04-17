@@ -5,7 +5,7 @@ import { Text } from '@/components/StyledText';
 import { useRouter } from 'expo-router';
 import { Session, Machine } from '@/sync/storageTypes';
 import { Ionicons } from '@expo/vector-icons';
-import { getSessionName, useSessionStatus, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
+import { getSessionName, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
@@ -17,10 +17,11 @@ import { storage } from '@/sync/storage';
 import { CompactGitStatus } from './CompactGitStatus';
 import { ProjectGitStatus } from './ProjectGitStatus';
 import { t } from '@/text';
-import { useNavigateToSession } from '@/hooks/useNavigateToSession';
+import { useNavigateDirectlyToSession, useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { useOrbitAction } from '@/hooks/useOrbitAction';
 import { OrbitError } from '@/utils/errors';
 import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPopover';
+import { useSessionControlState } from '@/utils/sessionControlState';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -128,6 +129,18 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         position: 'relative',
         width: 48,
         height: 48,
+    },
+    draftIconContainer: {
+        position: 'absolute',
+        bottom: -2,
+        right: -2,
+        width: 18,
+        height: 18,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    draftIconOverlay: {
+        color: theme.colors.textSecondary,
     },
     newSessionButton: {
         flexDirection: 'row',
@@ -336,9 +349,11 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
 // Compact session row component with status line
 const CompactSessionRow = React.memo(({ session, selected, showBorder }: { session: Session; selected?: boolean; showBorder?: boolean }) => {
     const styles = stylesheet;
-    const sessionStatus = useSessionStatus(session);
+    const sessionControlState = useSessionControlState(session, { sessionId: session.id });
+    const sessionStatus = sessionControlState.status;
     const sessionName = getSessionName(session);
     const navigateToSession = useNavigateToSession();
+    const navigateDirectlyToSession = useNavigateDirectlyToSession();
     const swipeableRef = React.useRef<Swipeable | null>(null);
     const swipeEnabled = Platform.OS !== 'web';
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
@@ -359,9 +374,13 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
         return getSessionAvatarId(session);
     }, [session]);
 
+    const [openingSession, performOpenSession] = useOrbitAction(async () => {
+        await navigateToSession(session.id);
+    });
+
     const handlePress = React.useCallback(() => {
-        navigateToSession(session.id);
-    }, [navigateToSession, session.id]);
+        performOpenSession();
+    }, [performOpenSession]);
 
     const handleContextMenu = React.useCallback((event: any) => {
         event.preventDefault?.();
@@ -388,7 +407,16 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
             {...webMenuProps}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                <Avatar id={avatarId} size={48} monochrome={!sessionControlState.isConnected} flavor={session.metadata?.flavor} />
+                {openingSession && (
+                    <View style={styles.draftIconContainer}>
+                        <Ionicons
+                            name="refresh-outline"
+                            size={12}
+                            style={styles.draftIconOverlay}
+                        />
+                    </View>
+                )}
             </View>
             <View style={styles.sessionContent}>
                 {/* Title line */}
@@ -396,7 +424,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                     <Text
                         style={[
                             styles.sessionTitle,
-                            sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
+                            sessionControlState.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
                         ]}
                         numberOfLines={2}
                     >

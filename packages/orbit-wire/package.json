@@ -30,9 +30,9 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "shx rm -rf dist && tsc --noEmit && pkgroll",
-    "test": "$npm_execpath run build && vitest run",
-    "prepublishOnly": "$npm_execpath run build && $npm_execpath run test",
+    "build": "shx rm -rf dist && tsc --noEmit && node ../../scripts/run-pkgroll.cjs",
+    "test": "$npm_execpath run build && node ../../scripts/run-vitest.cjs run",
+    "prepublishOnly": "$npm_execpath run test",
     "release": "npx --no-install release-it"
   },
   "dependencies": {

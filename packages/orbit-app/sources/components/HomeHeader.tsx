@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Header } from './navigation/Header';
-import { useSocketStatus } from '@/sync/storage';
+import { useAllMachines, useSocketStatus } from '@/sync/storage';
 import { Platform, Pressable, Text, View } from 'react-native';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
@@ -10,6 +10,7 @@ import { getServerInfo } from '@/sync/serverConfig';
 import { Image } from 'expo-image';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { resolveDisplayConnectionStatus } from '@/utils/connectionStatus';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     headerButton: {
@@ -164,11 +165,12 @@ function HeaderLeft() {
 
 function HeaderTitleWithSubtitle({ subtitle }: { subtitle?: string }) {
     const socketStatus = useSocketStatus();
+    const machines = useAllMachines({ includeOffline: true });
     const styles = stylesheet;
 
     // Get connection status styling (matching sessionUtils.ts pattern)
     const getConnectionStatus = () => {
-        const { status } = socketStatus;
+        const status = resolveDisplayConnectionStatus(socketStatus.status, machines);
         switch (status) {
             case 'connected':
                 return {

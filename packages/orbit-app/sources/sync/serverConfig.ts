@@ -2,37 +2,127 @@ import { MMKV } from 'react-native-mmkv';
 import { Platform } from 'react-native';
 import { normalizeServerUrl } from './serverUrlNormalize';
 
-// Separate MMKV instance for server config that persists across logouts
+// Diagnostics storage persists across logouts, but server selection itself is
+// intentionally no longer user-configurable inside the app.
 const serverConfigStorage = new MMKV({ id: 'server-config' });
 
-const SERVER_KEY = 'custom-server-url';
+const LEGACY_SERVER_KEY = 'custom-server-url';
 const LOG_SERVER_KEY = 'log-server-url';
-const DEFAULT_SERVER_URL = 'https://api.cluster-fluster.com';
+const ACTIVE_SERVER_KEY = 'active-server-url';
+const DEFAULT_SERVER_URL = 'https://api.2003383.xyz';
+const FALLBACK_SERVER_URLS = ['http://192.227.228.53:3005'];
+const IS_NATIVE_RUNTIME = Platform.OS !== 'web';
+const SERVER_PROBE_TIMEOUT_MS = 4000;
 
-export function getServerUrl(): string {
-    const runtimeServerUrl =
-        process.env.EXPO_PUBLIC_SERVER_URL ||
+function clearLegacyServerOverride(): void {
+    const legacyUrl = serverConfigStorage.getString(LEGACY_SERVER_KEY);
+    if (legacyUrl) {
+        console.log(`[serverConfig] Clearing legacy persisted server override: ${legacyUrl}`);
+        serverConfigStorage.delete(LEGACY_SERVER_KEY);
+    }
+}
+
+clearLegacyServerOverride();
+
+function getRuntimeServerUrl(): string | null {
+    return process.env.EXPO_PUBLIC_SERVER_URL ||
         process.env.EXPO_PUBLIC_ORBIT_SERVER_URL ||
-        process.env.EXPO_PUBLIC_HAPPY_SERVER_URL;
+        null;
+}
 
-    if (__DEV__ && runtimeServerUrl) {
-        return normalizeServerUrl(runtimeServerUrl, true);
+function normalizeCandidate(url: string): string {
+    return normalizeServerUrl(url, IS_NATIVE_RUNTIME).replace(/\/$/, '');
+}
+
+function getConfiguredServerUrls(): string[] {
+    const urls = [
+        getRuntimeServerUrl() || DEFAULT_SERVER_URL,
+        ...FALLBACK_SERVER_URLS,
+    ];
+
+    const deduped = new Set<string>();
+    for (const url of urls) {
+        if (!url?.trim()) {
+            continue;
+        }
+        deduped.add(normalizeCandidate(url));
     }
 
-    return normalizeServerUrl(
-        serverConfigStorage.getString(SERVER_KEY) ||
-        runtimeServerUrl ||
-        DEFAULT_SERVER_URL,
-        Platform.OS !== 'web'
-    );
+    return Array.from(deduped);
+}
+
+export function getServerUrlCandidates(): string[] {
+    const candidates = getConfiguredServerUrls();
+    const active = serverConfigStorage.getString(ACTIVE_SERVER_KEY);
+    if (!active) {
+        return candidates;
+    }
+
+    const normalizedActive = normalizeCandidate(active);
+    return [
+        normalizedActive,
+        ...candidates.filter(candidate => candidate !== normalizedActive),
+    ];
+}
+
+function setActiveServerUrl(url: string | null): void {
+    if (!url?.trim()) {
+        serverConfigStorage.delete(ACTIVE_SERVER_KEY);
+        return;
+    }
+
+    serverConfigStorage.set(ACTIVE_SERVER_KEY, normalizeCandidate(url));
+}
+
+export function getServerUrl(): string {
+    return getServerUrlCandidates()[0] || normalizeCandidate(DEFAULT_SERVER_URL);
 }
 
 export function setServerUrl(url: string | null): void {
-    if (url && url.trim()) {
-        serverConfigStorage.set(SERVER_KEY, url.trim());
-    } else {
-        serverConfigStorage.delete(SERVER_KEY);
+    if (url?.trim()) {
+        console.warn('[serverConfig] Ignoring manual server override. Rebuild the app or set EXPO_PUBLIC_SERVER_URL before bundling.');
     }
+
+    serverConfigStorage.delete(LEGACY_SERVER_KEY);
+}
+
+async function probeServerUrl(serverUrl: string): Promise<boolean> {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller
+        ? setTimeout(() => controller.abort(), SERVER_PROBE_TIMEOUT_MS)
+        : null;
+
+    try {
+        const healthUrl = new URL('/health', serverUrl).toString();
+        const response = await fetch(healthUrl, {
+            method: 'GET',
+            signal: controller?.signal,
+        });
+
+        return response.ok;
+    } catch (error) {
+        console.warn(`[serverConfig] Failed probing ${serverUrl}:`, error);
+        return false;
+    } finally {
+        if (timer) {
+            clearTimeout(timer);
+        }
+    }
+}
+
+export async function ensureReachableServerUrl(): Promise<string> {
+    const candidates = getServerUrlCandidates();
+
+    for (const candidate of candidates) {
+        if (await probeServerUrl(candidate)) {
+            setActiveServerUrl(candidate);
+            return candidate;
+        }
+    }
+
+    const fallback = candidates[0] || normalizeCandidate(DEFAULT_SERVER_URL);
+    setActiveServerUrl(fallback);
+    return fallback;
 }
 
 export function getLogServerUrl(): string | null {

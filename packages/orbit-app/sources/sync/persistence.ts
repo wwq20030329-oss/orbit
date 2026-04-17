@@ -4,6 +4,7 @@ import { LocalSettings, localSettingsDefaults, localSettingsParse } from './loca
 import { Purchases, purchasesDefaults, purchasesParse } from './purchases';
 import { Profile, profileDefaults, profileParse } from './profile';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
+import type { NativeCliTool } from './storageTypes';
 
 const mmkv = new MMKV();
 const NEW_SESSION_DRAFT_KEY = 'new-session-draft-v1';
@@ -11,6 +12,8 @@ const REGISTERED_PUSH_TOKEN_KEY = 'registered-push-token-v1';
 const VOICE_SOFT_PAYWALL_SHOWN_KEY = 'voice-soft-paywall-shown';
 const VOICE_ONBOARDING_PROMPT_LOAD_COUNT_KEY = 'voice-onboarding-prompt-load-count';
 const VOICE_MESSAGE_COUNT_KEY = 'voice-message-count';
+const NATIVE_CLI_RECOVERY_IDENTIFIERS_KEY = 'native-cli-recovery-identifiers-v1';
+const NATIVE_CLI_RECOVERY_RESUME_REQUESTS_KEY = 'native-cli-recovery-resume-requests-v1';
 
 export type NewSessionAgentType = 'claude' | 'codex' | 'gemini' | 'openclaw';
 export type NewSessionSessionType = 'simple' | 'worktree';
@@ -23,6 +26,16 @@ export interface NewSessionDraft {
     permissionMode: PermissionModeKey;
     modelMode: string;
     sessionType: NewSessionSessionType;
+    updatedAt: number;
+}
+
+export interface PersistedNativeCliResumeRequest {
+    machineId: string;
+    tool: NativeCliTool;
+    backendId: string;
+    workingDirectory: string;
+    title: string;
+    summary: string | null;
     updatedAt: number;
 }
 
@@ -205,6 +218,77 @@ export function loadSessionPermissionModes(): Record<string, string> {
 
 export function saveSessionPermissionModes(modes: Record<string, string>) {
     mmkv.set('session-permission-modes', JSON.stringify(modes));
+}
+
+export function loadNativeCliRecoveryIdentifiers(): Record<string, string> {
+    const raw = mmkv.getString(NATIVE_CLI_RECOVERY_IDENTIFIERS_KEY);
+    if (!raw) {
+        return {};
+    }
+
+    try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') {
+            return {};
+        }
+
+        return Object.fromEntries(
+            Object.entries(parsed).filter((entry): entry is [string, string] => (
+                typeof entry[0] === 'string' && typeof entry[1] === 'string'
+            )),
+        );
+    } catch (e) {
+        console.error('Failed to parse native CLI recovery identifiers', e);
+        return {};
+    }
+}
+
+export function saveNativeCliRecoveryIdentifiers(identifiers: Record<string, string>) {
+    mmkv.set(NATIVE_CLI_RECOVERY_IDENTIFIERS_KEY, JSON.stringify(identifiers));
+}
+
+function isPersistedNativeCliResumeRequest(value: unknown): value is PersistedNativeCliResumeRequest {
+    if (!value || typeof value !== 'object') {
+        return false;
+    }
+
+    const candidate = value as Partial<PersistedNativeCliResumeRequest>;
+    return typeof candidate.machineId === 'string'
+        && (candidate.tool === 'claude' || candidate.tool === 'codex' || candidate.tool === 'gemini')
+        && typeof candidate.backendId === 'string'
+        && typeof candidate.workingDirectory === 'string'
+        && typeof candidate.title === 'string'
+        && (typeof candidate.summary === 'string' || candidate.summary === null)
+        && typeof candidate.updatedAt === 'number';
+}
+
+export function loadNativeCliRecoveryResumeRequests(): Record<string, PersistedNativeCliResumeRequest> {
+    const raw = mmkv.getString(NATIVE_CLI_RECOVERY_RESUME_REQUESTS_KEY);
+    if (!raw) {
+        return {};
+    }
+
+    try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') {
+            return {};
+        }
+
+        return Object.fromEntries(
+            Object.entries(parsed).filter((entry): entry is [string, PersistedNativeCliResumeRequest] => (
+                typeof entry[0] === 'string' && isPersistedNativeCliResumeRequest(entry[1])
+            )),
+        );
+    } catch (e) {
+        console.error('Failed to parse native CLI recovery resume requests', e);
+        return {};
+    }
+}
+
+export function saveNativeCliRecoveryResumeRequests(
+    requests: Record<string, PersistedNativeCliResumeRequest>,
+) {
+    mmkv.set(NATIVE_CLI_RECOVERY_RESUME_REQUESTS_KEY, JSON.stringify(requests));
 }
 
 export function loadProfile(): Profile {

@@ -2,7 +2,7 @@ import { getRandomBytes } from 'expo-crypto';
 import sodium from '@/encryption/libsodium.lib';
 import axios from 'axios';
 import { encodeBase64 } from '../encryption/base64';
-import { getServerUrl } from '@/sync/serverConfig';
+import { ensureReachableServerUrl } from '@/sync/serverConfig';
 
 export interface QRAuthKeyPair {
     publicKey: Uint8Array;
@@ -20,7 +20,7 @@ export function generateAuthKeyPair(): QRAuthKeyPair {
 
 export async function authQRStart(keypair: QRAuthKeyPair): Promise<boolean> {
     try {
-        const serverUrl = getServerUrl();
+        const serverUrl = await ensureReachableServerUrl();
         if (process.env.EXPO_PUBLIC_DEBUG) {
             console.log(`[AUTH DEBUG] Sending auth request to: ${serverUrl}/v1/auth/account/request`);
             console.log(`[AUTH DEBUG] Public key: ${encodeBase64(keypair.publicKey).substring(0, 20)}...`);

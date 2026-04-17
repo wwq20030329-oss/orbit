@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Session } from '@/sync/storageTypes';
-import type { SessionStatus } from './sessionUtils';
+import type { SessionStatus } from './sessionStatus';
 import { getOrbitControlTiles } from './orbitControl';
 
 function createSession(overrides: Partial<Session> = {}): Session {

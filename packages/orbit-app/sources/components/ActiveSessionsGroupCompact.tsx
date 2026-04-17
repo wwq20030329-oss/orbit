@@ -4,14 +4,14 @@ import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { Session, Machine } from '@/sync/storageTypes';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { getSessionName, useSessionStatus, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
+import { getSessionName, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
 import { useAllMachines, useSessionProjectGitStatus, useSessionGitStatus } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
-import { useNavigateToSession } from '@/hooks/useNavigateToSession';
+import { useNavigateDirectlyToSession, useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { useOrbitAction } from '@/hooks/useOrbitAction';
 import { OrbitError } from '@/utils/errors';
 import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPopover';
@@ -19,6 +19,7 @@ import { sessionKill } from '@/sync/ops';
 import { isWorktreePath, getRepoPath, getWorktreeName } from '@/utils/worktree';
 import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
 import { useRouter } from 'expo-router';
+import { useSessionControlState } from '@/utils/sessionControlState';
 
 interface ActiveSessionsGroupProps {
     sessions: Session[];
@@ -260,9 +261,11 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
 const CompactSessionRow = React.memo(({ session, selected, showBorder }: { session: Session; selected?: boolean; showBorder?: boolean }) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
-    const sessionStatus = useSessionStatus(session);
+    const sessionControlState = useSessionControlState(session, { sessionId: session.id });
+    const sessionStatus = sessionControlState.status;
     const sessionName = getSessionName(session);
     const navigateToSession = useNavigateToSession();
+    const navigateDirectlyToSession = useNavigateDirectlyToSession();
     const swipeableRef = React.useRef<Swipeable | null>(null);
     const swipeEnabled = Platform.OS !== 'web';
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
@@ -279,9 +282,13 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
         performArchive();
     }, [performArchive]);
 
+    const [openingSession, performOpenSession] = useOrbitAction(async () => {
+        await navigateToSession(session.id);
+    });
+
     const handlePress = React.useCallback(() => {
-        navigateToSession(session.id);
-    }, [navigateToSession, session.id]);
+        performOpenSession();
+    }, [performOpenSession]);
 
     const handleContextMenu = React.useCallback((event: any) => {
         event.preventDefault?.();
@@ -344,10 +351,19 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                         return null;
                     })()}
 
+                    {openingSession && (
+                        <Ionicons
+                            name="refresh-outline"
+                            size={14}
+                            color={theme.colors.textSecondary}
+                            style={{ marginRight: 8 }}
+                        />
+                    )}
+
                     <Text
                         style={[
                             styles.sessionTitle,
-                            sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
+                            sessionControlState.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
                         ]}
                         numberOfLines={2}
                     >

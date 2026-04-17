@@ -14,7 +14,7 @@ interface SessionPermissionRequest {
     id: string;
     approved: boolean;
     reason?: string;
-    mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+    mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'auto' | 'dontAsk';
     allowTools?: string[];
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
 }
@@ -153,6 +153,43 @@ export interface ResumeNativeCliHistoryOptions {
     workingDirectory: string;
     title: string;
     summary?: string | null;
+    updatedAt?: number | null;
+}
+
+export interface DeleteNativeCliHistoryOptions {
+    machineId: string;
+    tool: NativeCliTool;
+    backendId: string;
+    workingDirectory?: string;
+}
+
+function getRpcErrorMessage(error: unknown): string {
+    if (error instanceof Error) {
+        return error.message;
+    }
+
+    if (typeof error === 'string') {
+        return error;
+    }
+
+    if (error && typeof error === 'object' && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
+        return (error as { message: string }).message;
+    }
+
+    return '';
+}
+
+function isSocketDisconnectedRpcError(error: unknown): boolean {
+    const normalizedMessage = getRpcErrorMessage(error).trim().toLowerCase();
+    return normalizedMessage.includes('socket has been disconnected')
+        || normalizedMessage.includes('socket not connected');
+}
+
+function warnIgnoredSessionRpcAfterDisconnect(action: 'abort' | 'allow' | 'deny', sessionId: string, error: unknown): void {
+    console.warn(`Ignoring session ${action} RPC after socket disconnect`, {
+        sessionId,
+        error,
+    });
 }
 
 // Exported session operation functions
@@ -204,12 +241,31 @@ export async function machineResumeSession(options: ResumeSessionOptions): Promi
     }
 }
 
-export async function machineListNativeCliHistory(machineId: string, limit: number = 50): Promise<NativeCliHistoryEntry[]> {
-    return await apiSocket.machineRPC<NativeCliHistoryEntry[], { limit: number }>(
-        machineId,
-        'list-native-cli-history',
-        { limit },
-    );
+const DEFAULT_NATIVE_CLI_HISTORY_PER_TOOL_LIMIT = 200;
+
+export async function machineListNativeCliHistory(
+    machineId: string,
+    limit: number = DEFAULT_NATIVE_CLI_HISTORY_PER_TOOL_LIMIT,
+): Promise<NativeCliHistoryEntry[]> {
+    try {
+        return await apiSocket.machineRPC<NativeCliHistoryEntry[], { limit: number }>(
+            machineId,
+            'list-native-cli-history',
+            { limit },
+        );
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Failed to list native CLI history';
+        const normalizedErrorMessage = errorMessage.toLowerCase();
+        if (
+            normalizedErrorMessage.includes('rpcmethodnotavailable')
+            || normalizedErrorMessage.includes('rpc method not available')
+            || normalizedErrorMessage.includes('method not available')
+        ) {
+            throw new Error('Native CLI history is unavailable on this machine');
+        }
+
+        throw error instanceof Error ? error : new Error(errorMessage);
+    }
 }
 
 export async function machineResumeNativeCliHistory(options: ResumeNativeCliHistoryOptions): Promise<SpawnSessionResult> {
@@ -220,6 +276,7 @@ export async function machineResumeNativeCliHistory(options: ResumeNativeCliHist
             workingDirectory: string;
             title: string;
             summary?: string | null;
+            updatedAt?: number | null;
         }>(
             options.machineId,
             'resume-native-cli-session',
@@ -229,12 +286,69 @@ export async function machineResumeNativeCliHistory(options: ResumeNativeCliHist
                 workingDirectory: options.workingDirectory,
                 title: options.title,
                 summary: options.summary ?? null,
+                updatedAt: options.updatedAt ?? null,
             },
         );
     } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Failed to resume native CLI history session';
+        const normalizedErrorMessage = errorMessage.toLowerCase();
+        if (
+            normalizedErrorMessage.includes('rpcmethodnotavailable')
+            || normalizedErrorMessage.includes('rpc method not available')
+            || normalizedErrorMessage.includes('method not available')
+        ) {
+            return {
+                type: 'error',
+                errorMessage: 'Native CLI resume is unavailable on this machine. Restart Orbit CLI on the computer and try again.',
+            };
+        }
+
+        if (normalizedErrorMessage.includes('this session no longer exists on the connected machine')) {
+            return {
+                type: 'error',
+                errorMessage: 'Native CLI session is no longer available on this machine',
+            };
+        }
+
         return {
             type: 'error',
-            errorMessage: error instanceof Error ? error.message : 'Failed to resume native CLI history session',
+            errorMessage,
+        };
+    }
+}
+
+export async function machineDeleteNativeCliHistory(options: DeleteNativeCliHistoryOptions): Promise<{
+    success: boolean;
+    deletedCount: number;
+    deletedPaths: string[];
+    message?: string;
+}> {
+    try {
+        const result = await apiSocket.machineRPC<{ deletedCount: number; deletedPaths: string[] }, {
+            tool: NativeCliTool;
+            backendId: string;
+            workingDirectory?: string;
+        }>(
+            options.machineId,
+            'delete-native-cli-history',
+            {
+                tool: options.tool,
+                backendId: options.backendId,
+                ...(options.workingDirectory ? { workingDirectory: options.workingDirectory } : {}),
+            },
+        );
+
+        return {
+            success: true,
+            deletedCount: result.deletedCount,
+            deletedPaths: result.deletedPaths,
+        };
+    } catch (error) {
+        return {
+            success: false,
+            deletedCount: 0,
+            deletedPaths: [],
+            message: error instanceof Error ? error.message : 'Failed to delete native CLI history',
         };
     }
 }
@@ -358,25 +472,52 @@ export async function machineUpdateMetadata(
  * Abort the current session operation
  */
 export async function sessionAbort(sessionId: string): Promise<void> {
-    await apiSocket.sessionRPC(sessionId, 'abort', {
-        reason: `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.`
-    });
+    try {
+        await apiSocket.sessionRPC(sessionId, 'abort', {
+            reason: `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.`
+        });
+    } catch (error) {
+        if (isSocketDisconnectedRpcError(error)) {
+            warnIgnoredSessionRpcAfterDisconnect('abort', sessionId, error);
+            return;
+        }
+
+        throw error;
+    }
 }
 
 /**
  * Allow a permission request
  */
-export async function sessionAllow(sessionId: string, id: string, mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan', allowedTools?: string[], decision?: 'approved' | 'approved_for_session'): Promise<void> {
+export async function sessionAllow(sessionId: string, id: string, mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'auto' | 'dontAsk', allowedTools?: string[], decision?: 'approved' | 'approved_for_session'): Promise<void> {
     const request: SessionPermissionRequest = { id, approved: true, mode, allowTools: allowedTools, decision };
-    await apiSocket.sessionRPC(sessionId, 'permission', request);
+    try {
+        await apiSocket.sessionRPC(sessionId, 'permission', request);
+    } catch (error) {
+        if (isSocketDisconnectedRpcError(error)) {
+            warnIgnoredSessionRpcAfterDisconnect('allow', sessionId, error);
+            return;
+        }
+
+        throw error;
+    }
 }
 
 /**
  * Deny a permission request
  */
-export async function sessionDeny(sessionId: string, id: string, mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan', allowedTools?: string[], decision?: 'denied' | 'abort'): Promise<void> {
+export async function sessionDeny(sessionId: string, id: string, mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'auto' | 'dontAsk', allowedTools?: string[], decision?: 'denied' | 'abort'): Promise<void> {
     const request: SessionPermissionRequest = { id, approved: false, mode, allowTools: allowedTools, decision };
-    await apiSocket.sessionRPC(sessionId, 'permission', request);
+    try {
+        await apiSocket.sessionRPC(sessionId, 'permission', request);
+    } catch (error) {
+        if (isSocketDisconnectedRpcError(error)) {
+            warnIgnoredSessionRpcAfterDisconnect('deny', sessionId, error);
+            return;
+        }
+
+        throw error;
+    }
 }
 
 /**

@@ -9,13 +9,14 @@ import { Metadata, Session } from '@/sync/storageTypes';
 import { ChatFooter } from './ChatFooter';
 import { Message } from '@/sync/typesMessage';
 
-export const ChatList = React.memo((props: { session: Session }) => {
+export const ChatList = React.memo((props: { session: Session; messagesOverride?: Message[] }) => {
     const { messages } = useSessionMessages(props.session.id);
+    const displayMessages = props.messagesOverride ?? messages;
     return (
         <ChatListInternal
             metadata={props.session.metadata}
             sessionId={props.session.id}
-            messages={messages}
+            messages={displayMessages}
         />
     )
 });

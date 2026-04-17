@@ -1,7 +1,9 @@
 import { io, Socket } from 'socket.io-client';
 import { TokenStorage } from '@/auth/tokenStorage';
+import { handleUnauthorizedResponse } from '@/auth/authRecovery';
 import { Encryption } from './encryption/encryption';
 import { storage } from './storage';
+import { Platform } from 'react-native';
 
 //
 // Types
@@ -62,11 +64,14 @@ class ApiSocket {
                 token: this.config.token,
                 clientType: 'user-scoped' as const
             },
-            transports: ['websocket'],
+            // Native clients are more stable with direct WebSocket transport.
+            transports: Platform.OS === 'web' ? ['websocket', 'polling'] : ['websocket'],
+            tryAllTransports: Platform.OS === 'web',
             reconnection: true,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
-            reconnectionAttempts: Infinity
+            reconnectionAttempts: Infinity,
+            timeout: 20000
         });
 
         this.setupEventHandlers();
@@ -189,10 +194,16 @@ class ApiSocket {
             ...options?.headers
         };
 
-        return fetch(url, {
+        const response = await fetch(url, {
             ...options,
             headers
         });
+
+        if (await handleUnauthorizedResponse(response, path)) {
+            throw new Error('Unauthorized');
+        }
+
+        return response;
     }
 
     //

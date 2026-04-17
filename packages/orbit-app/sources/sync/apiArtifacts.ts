@@ -1,4 +1,5 @@
 import { AuthCredentials } from '@/auth/tokenStorage';
+import { handleUnauthorizedResponse } from '@/auth/authRecovery';
 import { backoff } from '@/utils/time';
 import { getServerUrl } from './serverConfig';
 import { Artifact, ArtifactCreateRequest, ArtifactUpdateRequest, ArtifactUpdateResponse } from './artifactTypes';
@@ -16,6 +17,10 @@ export async function fetchArtifacts(credentials: AuthCredentials): Promise<Arti
                 'Content-Type': 'application/json'
             }
         });
+
+        if (await handleUnauthorizedResponse(response, '/v1/artifacts')) {
+            throw new Error('Unauthorized');
+        }
 
         if (!response.ok) {
             throw new Error(`Failed to fetch artifacts: ${response.status}`);
@@ -39,6 +44,10 @@ export async function fetchArtifact(credentials: AuthCredentials, artifactId: st
                 'Content-Type': 'application/json'
             }
         });
+
+        if (await handleUnauthorizedResponse(response, `/v1/artifacts/${artifactId}`)) {
+            throw new Error('Unauthorized');
+        }
 
         if (!response.ok) {
             if (response.status === 404) {
@@ -70,6 +79,10 @@ export async function createArtifact(
             },
             body: JSON.stringify(request)
         });
+
+        if (await handleUnauthorizedResponse(response, '/v1/artifacts')) {
+            throw new Error('Unauthorized');
+        }
 
         if (!response.ok) {
             if (response.status === 409) {
@@ -103,6 +116,10 @@ export async function updateArtifact(
             body: JSON.stringify(request)
         });
 
+        if (await handleUnauthorizedResponse(response, `/v1/artifacts/${artifactId}`)) {
+            throw new Error('Unauthorized');
+        }
+
         if (!response.ok) {
             if (response.status === 404) {
                 throw new Error('Artifact not found');
@@ -131,6 +148,10 @@ export async function deleteArtifact(
                 'Authorization': `Bearer ${credentials.token}`
             }
         });
+
+        if (await handleUnauthorizedResponse(response, `/v1/artifacts/${artifactId}`)) {
+            throw new Error('Unauthorized');
+        }
 
         if (!response.ok) {
             if (response.status === 404) {

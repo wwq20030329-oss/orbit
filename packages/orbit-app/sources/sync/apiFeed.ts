@@ -1,4 +1,5 @@
 import { AuthCredentials } from '@/auth/tokenStorage';
+import { handleUnauthorizedResponse } from '@/auth/authRecovery';
 import { backoff } from '@/utils/time';
 import { getServerUrl } from './serverConfig';
 import { FeedResponse, FeedResponseSchema, FeedItem } from './feedTypes';
@@ -32,6 +33,10 @@ export async function fetchFeed(
                 'Authorization': `Bearer ${credentials.token}`
             }
         });
+
+        if (await handleUnauthorizedResponse(response, '/v1/feed')) {
+            throw new Error('Unauthorized');
+        }
 
         if (!response.ok) {
             throw new Error(`Failed to fetch feed: ${response.status}`);

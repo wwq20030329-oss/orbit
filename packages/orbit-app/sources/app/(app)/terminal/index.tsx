@@ -11,6 +11,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { Item } from '@/components/Item';
 import { useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { buildTerminalAuthUrl } from '@/utils/appUrlScheme';
 
 export default function TerminalScreen() {
     const router = useRouter();
@@ -36,8 +37,7 @@ export default function TerminalScreen() {
 
     const handleConnect = async () => {
         if (publicKey) {
-            // Use the full orbit:// URL format expected by the hook
-            const authUrl = `orbit://terminal?${publicKey}`;
+            const authUrl = buildTerminalAuthUrl(publicKey);
             await processAuthUrl(authUrl);
         }
     };

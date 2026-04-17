@@ -4,6 +4,9 @@ export type ResumeCommandMetadata = {
     flavor?: string | null;
     claudeSessionId?: string | null;
     codexThreadId?: string | null;
+    geminiSessionId?: string | null;
+    nativeHistorySourceTool?: 'claude' | 'codex' | 'gemini' | null;
+    nativeHistorySourceBackendId?: string | null;
 };
 
 export type ResumeCommandBlock = {
@@ -29,6 +32,18 @@ function buildResumeInvocation(metadata: ResumeCommandMetadata): string | null {
     }
     if (metadata.claudeSessionId) {
         return `orbit claude --resume ${metadata.claudeSessionId}`;
+    }
+    if (metadata.geminiSessionId) {
+        return `orbit gemini --resume ${metadata.geminiSessionId}`;
+    }
+    if (metadata.nativeHistorySourceTool === 'codex' && metadata.nativeHistorySourceBackendId) {
+        return `orbit codex --resume ${metadata.nativeHistorySourceBackendId}`;
+    }
+    if (metadata.nativeHistorySourceTool === 'claude' && metadata.nativeHistorySourceBackendId) {
+        return `orbit claude --resume ${metadata.nativeHistorySourceBackendId}`;
+    }
+    if (metadata.nativeHistorySourceTool === 'gemini' && metadata.nativeHistorySourceBackendId) {
+        return `orbit gemini --resume ${metadata.nativeHistorySourceBackendId}`;
     }
     return null;
 }

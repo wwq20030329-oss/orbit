@@ -147,7 +147,7 @@ const rawToolResultContentSchema = z.object({
     permissions: z.object({
         date: z.number(),
         result: z.enum(['approved', 'denied']),
-        mode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo']).optional(),
+        mode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto', 'dontAsk', 'auto_edit', 'read-only', 'safe-yolo', 'yolo']).optional(),
         allowedTools: z.array(z.string()).optional(),
         decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).optional(),
     }).optional(),
@@ -352,9 +352,9 @@ const rawAgentRecordSchema = z.discriminatedUnion('type', [z.object({
             callId: z.string()
         }),
         // Task lifecycle events
-        z.object({ type: z.literal('task_started'), id: z.string() }),
-        z.object({ type: z.literal('task_complete'), id: z.string() }),
-        z.object({ type: z.literal('turn_aborted'), id: z.string() }),
+        z.object({ type: z.literal('task_started'), id: z.string() }).passthrough(),
+        z.object({ type: z.literal('task_complete'), id: z.string() }).passthrough(),
+        z.object({ type: z.literal('turn_aborted'), id: z.string() }).passthrough(),
         // Permissions
         z.object({
             type: z.literal('permission-request'),
@@ -549,6 +549,9 @@ function normalizeSessionEnvelope(
     }
 
     if (envelope.ev.t === 'turn-end') {
+        if (envelope.ev.status !== 'completed') {
+            return null;
+        }
         return {
             id: messageId,
             localId,
@@ -694,6 +697,30 @@ function normalizeSessionEnvelope(
             }],
             meta
         } satisfies NormalizedMessage;
+    }
+
+    return null;
+}
+
+function extractLifecycleErrorMessage(value: unknown): string | null {
+    if (typeof value === 'string') {
+        const text = value.trim();
+        return text.length > 0 ? text : null;
+    }
+
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    const record = value as Record<string, unknown>;
+    const directMessage = typeof record.message === 'string' ? record.message.trim() : '';
+    if (directMessage.length > 0) {
+        return directMessage;
+    }
+
+    const nestedError = extractLifecycleErrorMessage(record.error);
+    if (nestedError) {
+        return nestedError;
     }
 
     return null;
@@ -1121,8 +1148,63 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                     meta: raw.meta
                 } satisfies NormalizedMessage;
             }
-            // Task lifecycle events (task_started, task_complete, turn_aborted) and token_count
-            // are status/metrics - skip normalization, they don't need UI rendering
+            if (raw.content.data.type === 'task_complete') {
+                const errorMessage = extractLifecycleErrorMessage((raw.content.data as Record<string, unknown>).error);
+                const status = (raw.content.data as Record<string, unknown>).status;
+
+                if (errorMessage) {
+                    return {
+                        id,
+                        localId,
+                        createdAt,
+                        role: 'event',
+                        isSidechain: false,
+                        content: {
+                            type: 'message',
+                            message: errorMessage,
+                        },
+                        meta: raw.meta,
+                    } satisfies NormalizedMessage;
+                }
+
+                if (status === 'failed') {
+                    return {
+                        id,
+                        localId,
+                        createdAt,
+                        role: 'event',
+                        isSidechain: false,
+                        content: {
+                            type: 'message',
+                            message: 'Task failed',
+                        },
+                        meta: raw.meta,
+                    } satisfies NormalizedMessage;
+                }
+
+                return null;
+            }
+
+            if (raw.content.data.type === 'turn_aborted') {
+                const reasonMessage = extractLifecycleErrorMessage((raw.content.data as Record<string, unknown>).reason)
+                    ?? extractLifecycleErrorMessage((raw.content.data as Record<string, unknown>).error)
+                    ?? 'Task cancelled';
+
+                return {
+                    id,
+                    localId,
+                    createdAt,
+                    role: 'event',
+                    isSidechain: false,
+                    content: {
+                        type: 'message',
+                        message: reasonMessage,
+                    },
+                    meta: raw.meta,
+                } satisfies NormalizedMessage;
+            }
+
+            // task_started and token_count are lifecycle/metrics only.
         }
     }
     return null;

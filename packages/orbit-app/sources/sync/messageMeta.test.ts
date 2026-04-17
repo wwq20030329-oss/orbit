@@ -6,12 +6,14 @@ describe('resolveMessageModeMeta', () => {
         const meta = resolveMessageModeMeta({
             permissionMode: 'read-only',
             modelMode: 'gpt-5-high',
+            effortLevel: 'high',
             metadata: null,
         } as any);
 
         expect(meta).toEqual({
             permissionMode: 'read-only',
             model: 'gpt-5-high',
+            effortLevel: 'high',
         });
     });
 
@@ -26,6 +28,20 @@ describe('resolveMessageModeMeta', () => {
 
         expect(meta).toEqual({
             permissionMode: 'bypassPermissions',
+            model: null,
+        });
+    });
+
+    it('omits effort level when none is selected', () => {
+        const meta = resolveMessageModeMeta({
+            permissionMode: 'default',
+            modelMode: 'default',
+            effortLevel: null,
+            metadata: null,
+        } as any);
+
+        expect(meta).toEqual({
+            permissionMode: 'default',
             model: null,
         });
     });
@@ -49,24 +65,43 @@ describe('resolveMessageModeMeta', () => {
         const meta = resolveMessageModeMeta({
             permissionMode: 'dontAsk',
             modelMode: 'default',
-            metadata: null,
+            metadata: {
+                flavor: 'claude',
+            },
         } as any);
 
         expect(meta).toEqual({
-            permissionMode: 'bypassPermissions',
+            permissionMode: 'dontAsk',
             model: null,
         });
     });
 
-    it('maps auto_edit mode to acceptEdits', () => {
+    it('keeps claude auto mode when the session flavor is claude', () => {
         const meta = resolveMessageModeMeta({
-            permissionMode: 'auto_edit',
+            permissionMode: 'auto',
             modelMode: 'default',
-            metadata: null,
+            metadata: {
+                flavor: 'claude',
+            },
         } as any);
 
         expect(meta).toEqual({
-            permissionMode: 'acceptEdits',
+            permissionMode: 'auto',
+            model: null,
+        });
+    });
+
+    it('keeps gemini auto_edit mode when the session flavor is gemini', () => {
+        const meta = resolveMessageModeMeta({
+            permissionMode: 'auto_edit',
+            modelMode: 'default',
+            metadata: {
+                flavor: 'gemini',
+            },
+        } as any);
+
+        expect(meta).toEqual({
+            permissionMode: 'auto_edit',
             model: null,
         });
     });

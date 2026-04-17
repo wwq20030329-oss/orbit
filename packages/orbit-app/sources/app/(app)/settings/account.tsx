@@ -32,6 +32,7 @@ import {
     syncCurrentPushToken,
     type PushPermissionInfo,
 } from '@/sync/pushRegistration';
+import { deleteUserAccount } from '@/sync/apiFriends';
 
 function formatPushPermissionLabel(permission: PushPermissionInfo | null): string {
     if (!permission) {
@@ -222,6 +223,22 @@ export default React.memo(() => {
             auth.logout();
         }
     };
+
+    // Account deletion
+    const [deleting, handleDeleteAccount] = useOrbitAction(async () => {
+        if (!auth.credentials) return;
+
+        const confirmed = await Modal.confirm(
+            t('settingsAccount.deleteAccount'),
+            t('settingsAccount.deleteAccountConfirm'),
+            { confirmText: t('common.delete'), destructive: true }
+        );
+
+        if (confirmed) {
+            await deleteUserAccount(auth.credentials);
+            auth.logout();
+        }
+    });
 
     const handlePushPermissionRequest = useCallback(async () => {
         if (!auth.credentials) {
@@ -592,6 +609,13 @@ export default React.memo(() => {
                         icon={<Ionicons name="log-out-outline" size={29} color="#FF3B30" />}
                         destructive
                         onPress={handleLogout}
+                    />
+                    <Item
+                        title={t('settingsAccount.deleteAccount')}
+                        subtitle={t('settingsAccount.deleteAccountSubtitle')}
+                        icon={<Ionicons name="trash-outline" size={29} color="#FF3B30" />}
+                        destructive
+                        onPress={handleDeleteAccount}
                     />
                 </ItemGroup>
             </ItemList>

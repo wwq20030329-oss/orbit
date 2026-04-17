@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { View, ActivityIndicator, Text, Pressable } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useFriendRequests, useSocketStatus, useRealtimeStatus } from '@/sync/storage';
+import { useAllMachines, useFriendRequests, useSocketStatus, useRealtimeStatus } from '@/sync/storage';
 import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
 import { useIsTablet } from '@/utils/responsive';
 import { useRouter } from 'expo-router';
@@ -21,6 +21,7 @@ import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { isUsingCustomServer } from '@/sync/serverConfig';
 import { trackFriendsSearch } from '@/track';
+import { resolveDisplayConnectionStatus } from '@/utils/connectionStatus';
 
 interface MainViewProps {
     variant: 'phone' | 'sidebar';
@@ -112,9 +113,10 @@ type ActiveTabType = 'sessions' | 'inbox' | 'settings';
 const HeaderTitle = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => {
     const { theme } = useUnistyles();
     const socketStatus = useSocketStatus();
+    const machines = useAllMachines({ includeOffline: true });
 
     const connectionStatus = React.useMemo(() => {
-        const { status } = socketStatus;
+        const status = resolveDisplayConnectionStatus(socketStatus.status, machines);
         switch (status) {
             case 'connected':
                 return {
@@ -147,7 +149,7 @@ const HeaderTitle = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
                     text: '',
                 };
         }
-    }, [socketStatus, theme]);
+    }, [machines, socketStatus.status, theme]);
 
     return (
         <View style={styles.titleContainer}>
@@ -252,9 +254,9 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
                 return <SettingsViewWrapper />;
             case 'sessions':
             default:
-                return <SessionsListWrapper />;
+                return <SessionsListWrapper data={sessionListViewData} />;
         }
-    }, [activeTab]);
+    }, [activeTab, sessionListViewData]);
 
     // Sidebar variant
     if (variant === 'sidebar') {
@@ -283,7 +285,7 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
         // Sessions list
         return (
             <View style={styles.sidebarContentContainer}>
-                <SessionsList />
+                <SessionsList data={sessionListViewData} />
             </View>
         );
     }

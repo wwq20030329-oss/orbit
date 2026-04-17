@@ -40,6 +40,8 @@ export function WebPromptModal({ config, onClose, onConfirm }: WebPromptModalPro
                 return 'email-address';
             case 'numeric':
                 return 'numeric';
+            case 'url':
+                return 'url';
             default:
                 return 'default';
         }

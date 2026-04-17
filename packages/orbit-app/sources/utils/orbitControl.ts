@@ -1,5 +1,5 @@
 import type { Session } from '@/sync/storageTypes';
-import type { SessionStatus } from './sessionUtils';
+import type { SessionStatus } from './sessionStatus';
 import { buildResumeCommandBlock } from './resumeCommand';
 
 export type OrbitControlTone = 'green' | 'blue' | 'orange' | 'red' | 'gray';

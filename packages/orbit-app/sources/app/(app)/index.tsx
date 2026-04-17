@@ -64,14 +64,14 @@ function NotAuthenticated() {
             <Text style={styles.subtitle}>
                 {t('welcome.subtitle')}
             </Text>
-            {Platform.OS !== 'android' && Platform.OS !== 'ios' ? (
+                                    {Platform.OS !== 'android' && Platform.OS !== 'ios' ? (
                 <>
                     <View style={styles.buttonContainer}>
                         <RoundButton
                             title={t('welcome.loginWithMobileApp')}
                             onPress={() => {
                                 trackAccountRestored();
-                                router.push('/restore/manual');
+                                router.push('/restore');
                             }}
                         />
                     </View>
@@ -98,7 +98,7 @@ function NotAuthenticated() {
                             title={t('welcome.linkOrRestoreAccount')}
                             onPress={() => {
                                 trackAccountRestored();
-                                router.push('/restore/manual');
+                                router.push('/restore');
                             }}
                             display="inverted"
                         />
@@ -128,7 +128,7 @@ function NotAuthenticated() {
                                     title={t('welcome.loginWithMobileApp')}
                                     onPress={() => {
                                         trackAccountRestored();
-                                        router.push('/restore/manual');
+                                        router.push('/restore');
                                     }}
                                 />
                             </View>
@@ -154,7 +154,7 @@ function NotAuthenticated() {
                                     title={t('welcome.linkOrRestoreAccount')}
                                     onPress={() => {
                                         trackAccountRestored();
-                                        router.push('/restore/manual');
+                                        router.push('/restore');
                                     }}
                                     display="inverted"
                                 />

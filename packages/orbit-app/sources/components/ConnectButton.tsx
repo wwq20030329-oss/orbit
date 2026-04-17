@@ -5,6 +5,7 @@ import { useConnectTerminal } from '@/hooks/useConnectTerminal';
 import { trackConnectAttempt } from '@/track';
 import { Ionicons } from '@expo/vector-icons';
 import { t } from '@/text';
+import { getTerminalAuthPlaceholder } from '@/utils/appUrlScheme';
 
 export const ConnectButton = React.memo(() => {
     const { connectTerminal, connectWithUrl, isLoading } = useConnectTerminal();
@@ -88,7 +89,7 @@ export const ConnectButton = React.memo(() => {
                             }}
                             value={manualUrl}
                             onChangeText={setManualUrl}
-                            placeholder="orbit://terminal?..."
+                            placeholder={getTerminalAuthPlaceholder()}
                             placeholderTextColor="#999"
                             autoCapitalize="none"
                             autoCorrect={false}

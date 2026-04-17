@@ -149,7 +149,7 @@ class ModalManagerClass implements IModal {
             defaultValue?: string;
             cancelText?: string;
             confirmText?: string;
-            inputType?: 'default' | 'secure-text' | 'email-address' | 'numeric';
+            inputType?: 'default' | 'secure-text' | 'email-address' | 'numeric' | 'url';
         }
     ): Promise<string | null> {
         if (Platform.OS === 'ios' && !options?.inputType) {

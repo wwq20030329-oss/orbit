@@ -35,6 +35,7 @@ export const MetadataSchema = z.object({
     machineId: z.string().optional(),
     claudeSessionId: z.string().optional(), // Claude Code session ID
     codexThreadId: z.string().optional(), // Codex app-server thread ID
+    geminiSessionId: z.string().optional(), // Gemini local session ID
     tools: z.array(z.string()).optional(),
     slashCommands: z.array(z.string()).optional(),
     homeDir: z.string().optional(), // User's home directory on the machine
@@ -42,7 +43,12 @@ export const MetadataSchema = z.object({
     startedFromDaemon: z.boolean().optional(),
     hostPid: z.number().optional(), // Process ID of the session
     startedBy: z.enum(['daemon', 'terminal']).optional(),
+    sessionRole: z.enum(['user', 'native-live-mirror']).optional(),
     flavor: z.string().nullish(), // Session flavor/variant identifier
+    projectRoot: z.string().optional(),
+    nativeHistorySourceTool: z.enum(['claude', 'codex', 'gemini']).optional(),
+    nativeHistorySourceBackendId: z.string().optional(),
+    nativeHistoryImportedAt: z.number().optional(),
     sandbox: z.any().nullish(), // Sandbox config metadata from CLI (or null when disabled)
     dangerouslySkipPermissions: z.boolean().nullish(), // Claude --dangerously-skip-permissions mode (or null when unknown)
     lifecycleState: z.string().optional(),
@@ -184,9 +190,11 @@ export interface NativeCliHistoryEntry {
     backendId: string;
     machineId: string;
     workingDirectory: string;
+    projectRoot?: string;
     title: string;
     summary: string | null;
     updatedAt: number;
+    isLive?: boolean;
 }
 
 //

@@ -8,6 +8,7 @@ describe('MetadataSchema', () => {
             host: 'local-machine',
             startedBy: 'daemon',
             startedFromDaemon: true,
+            sessionRole: 'native-live-mirror',
             lifecycleState: 'archived',
             lifecycleStateSince: 123,
             archivedBy: 'cli',
@@ -16,6 +17,7 @@ describe('MetadataSchema', () => {
 
         expect(metadata.startedBy).toBe('daemon');
         expect(metadata.startedFromDaemon).toBe(true);
+        expect(metadata.sessionRole).toBe('native-live-mirror');
         expect(metadata.lifecycleState).toBe('archived');
         expect(metadata.lifecycleStateSince).toBe(123);
         expect(metadata.archivedBy).toBe('cli');

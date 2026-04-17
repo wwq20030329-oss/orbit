@@ -7,11 +7,12 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useSession, useIsDataReady } from '@/sync/storage';
-import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId, getResumeCommand } from '@/utils/sessionUtils';
+import { storage, useSession, useIsDataReady } from '@/sync/storage';
+import { getSessionName, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId, getResumeCommand } from '@/utils/sessionUtils';
+import type { SessionStatus } from '@/utils/sessionStatus';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
-import { sessionKill, sessionDelete } from '@/sync/ops';
+import { machineDeleteNativeCliHistory, sessionKill, sessionDelete } from '@/sync/ops';
 import { maybeCleanupWorktree } from '@/hooks/useWorktreeCleanup';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -23,7 +24,9 @@ import { useOrbitAction } from '@/hooks/useOrbitAction';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { copySessionMetadataToClipboard } from '@/utils/copySessionMetadataToClipboard';
 import { OrbitError } from '@/utils/errors';
+import { getSessionCliTool } from '@/utils/nativeCliHistory';
 import { getOrbitControlTiles, type OrbitControlTone } from '@/utils/orbitControl';
+import { useSessionControlState } from '@/utils/sessionControlState';
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -132,7 +135,7 @@ function getToneColor(tone: OrbitControlTone): string {
     return '#8E8E93';
 }
 
-function OrbitControlPanel({ session, sessionStatus }: { session: Session; sessionStatus: ReturnType<typeof useSessionStatus> }) {
+function OrbitControlPanel({ session, sessionStatus }: { session: Session; sessionStatus: SessionStatus }) {
     const { theme } = useUnistyles();
     const orbitTiles = React.useMemo(() => getOrbitControlTiles(session, sessionStatus), [session, sessionStatus]);
 
@@ -212,7 +215,8 @@ function SessionInfoContent({ session }: { session: Session }) {
     const router = useRouter();
     const devModeEnabled = __DEV__;
     const sessionName = getSessionName(session);
-    const sessionStatus = useSessionStatus(session);
+    const sessionControlState = useSessionControlState(session, { sessionId: session.id });
+    const sessionStatus = sessionControlState.status;
     const {
         canShowResume,
         resumeSession,
@@ -245,9 +249,8 @@ function SessionInfoContent({ session }: { session: Session }) {
         if (!result.success) {
             throw new OrbitError(result.message || t('sessionInfo.failedToArchiveSession'), false);
         }
-        // Success - navigate back
-        router.back();
-        router.back();
+
+        router.replace('/');
     });
 
     const handleArchiveSession = useCallback(() => {
@@ -259,19 +262,44 @@ function SessionInfoContent({ session }: { session: Session }) {
         // Prompt for worktree cleanup before killing (needs an active machine connection)
         await maybeCleanupWorktree(session.id, session.metadata?.path, session.metadata?.machineId);
 
-        // Navigate back optimistically
-        router.back();
-        router.back();
-
         // Kill session first if it's still active (best-effort)
-        if (sessionStatus.isConnected || session.active) {
+        if (sessionControlState.isConnected || session.active) {
             await sessionKill(session.id).catch(() => {});
+        }
+
+        const nativeCliTool = getSessionCliTool(session);
+        const nativeCliBackendId = session.metadata?.claudeSessionId
+            ?? session.metadata?.codexThreadId
+            ?? session.metadata?.geminiSessionId
+            ?? session.metadata?.nativeHistorySourceBackendId
+            ?? null;
+        const nativeCliMachineId = session.metadata?.machineId ?? null;
+
+        if (nativeCliTool !== 'other' && nativeCliBackendId && nativeCliMachineId) {
+            const nativeDeleteResult = await machineDeleteNativeCliHistory({
+                machineId: nativeCliMachineId,
+                tool: nativeCliTool,
+                backendId: nativeCliBackendId,
+                workingDirectory: session.metadata?.path ?? session.metadata?.projectRoot ?? undefined,
+            });
+
+            if (!nativeDeleteResult.success) {
+                throw new OrbitError(nativeDeleteResult.message || t('sessionInfo.failedToDeleteSession'), false);
+            }
+
+            const existingEntries = storage.getState().nativeCliHistoryByMachine[nativeCliMachineId] ?? [];
+            storage.getState().applyNativeCliHistory(
+                nativeCliMachineId,
+                existingEntries.filter((entry) => !(entry.tool === nativeCliTool && entry.backendId === nativeCliBackendId)),
+            );
         }
 
         const result = await sessionDelete(session.id);
         if (!result.success) {
             throw new OrbitError(result.message || t('sessionInfo.failedToDeleteSession'), false);
         }
+
+        router.replace('/');
     });
 
     const handleDeleteSession = useCallback(() => {
@@ -292,6 +320,36 @@ function SessionInfoContent({ session }: { session: Session }) {
     const formatDate = useCallback((timestamp: number) => {
         return new Date(timestamp).toLocaleString();
     }, []);
+
+    const nativeCliBackendId = session.metadata?.claudeSessionId
+        ?? session.metadata?.codexThreadId
+        ?? session.metadata?.geminiSessionId
+        ?? session.metadata?.nativeHistorySourceBackendId
+        ?? null;
+
+    const nativeCliBackendTitle = session.metadata?.claudeSessionId
+        ? t('sessionInfo.claudeCodeSessionId')
+        : session.metadata?.codexThreadId
+            ? t('sessionInfo.codexThreadId')
+            : t('sessionInfo.nativeCliSessionId');
+
+    const nativeCliBackendCopiedMessage = session.metadata?.claudeSessionId
+        ? t('sessionInfo.claudeCodeSessionIdCopied')
+        : session.metadata?.codexThreadId
+            ? t('sessionInfo.codexThreadIdCopied')
+            : t('sessionInfo.nativeCliSessionIdCopied');
+
+    const nativeCliBackendCopyErrorMessage = session.metadata?.claudeSessionId
+        ? t('sessionInfo.failedToCopyClaudeCodeSessionId')
+        : session.metadata?.codexThreadId
+            ? t('sessionInfo.failedToCopyCodexThreadId')
+            : t('sessionInfo.failedToCopyNativeCliSessionId');
+
+    const nativeCliBackendIcon = session.metadata?.claudeSessionId
+        ? <Ionicons name="code-outline" size={29} color="#9C27B0" />
+        : session.metadata?.codexThreadId
+            ? <Ionicons name="terminal-outline" size={29} color="#10A37F" />
+            : <Ionicons name="terminal-outline" size={29} color="#6C63FF" />;
 
     const handleCopyUpdateCommand = useCallback(async () => {
         const updateCommand = 'npm install -g orbit@latest';
@@ -357,32 +415,17 @@ function SessionInfoContent({ session }: { session: Session }) {
                         icon={<Ionicons name="finger-print-outline" size={29} color="#007AFF" />}
                         onPress={handleCopySessionId}
                     />
-                    {session.metadata?.claudeSessionId && (
+                    {nativeCliBackendId && (
                         <Item
-                            title={t('sessionInfo.claudeCodeSessionId')}
-                            subtitle={`${session.metadata.claudeSessionId.substring(0, 8)}...${session.metadata.claudeSessionId.substring(session.metadata.claudeSessionId.length - 8)}`}
-                            icon={<Ionicons name="code-outline" size={29} color="#9C27B0" />}
+                            title={nativeCliBackendTitle}
+                            subtitle={`${nativeCliBackendId.substring(0, 8)}...${nativeCliBackendId.substring(nativeCliBackendId.length - 8)}`}
+                            icon={nativeCliBackendIcon}
                             onPress={async () => {
                                 try {
-                                    await Clipboard.setStringAsync(session.metadata!.claudeSessionId!);
-                                    Modal.alert(t('common.success'), t('sessionInfo.claudeCodeSessionIdCopied'));
+                                    await Clipboard.setStringAsync(nativeCliBackendId);
+                                    Modal.alert(t('common.success'), nativeCliBackendCopiedMessage);
                                 } catch (error) {
-                                    Modal.alert(t('common.error'), t('sessionInfo.failedToCopyClaudeCodeSessionId'));
-                                }
-                            }}
-                        />
-                    )}
-                    {session.metadata?.codexThreadId && (
-                        <Item
-                            title={t('sessionInfo.codexThreadId')}
-                            subtitle={`${session.metadata.codexThreadId.substring(0, 8)}...${session.metadata.codexThreadId.substring(session.metadata.codexThreadId.length - 8)}`}
-                            icon={<Ionicons name="terminal-outline" size={29} color="#10A37F" />}
-                            onPress={async () => {
-                                try {
-                                    await Clipboard.setStringAsync(session.metadata!.codexThreadId!);
-                                    Modal.alert(t('common.success'), t('sessionInfo.codexThreadIdCopied'));
-                                } catch (error) {
-                                    Modal.alert(t('common.error'), t('sessionInfo.failedToCopyCodexThreadId'));
+                                    Modal.alert(t('common.error'), nativeCliBackendCopyErrorMessage);
                                 }
                             }}
                         />

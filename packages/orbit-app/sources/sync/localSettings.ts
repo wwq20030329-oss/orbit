@@ -16,6 +16,11 @@ export const LocalSettingsSchema = z.object({
     verboseLogging: z.boolean().describe('Log all network requests and responses'),
     // CLI version acknowledgments - keyed by machineId
     acknowledgedCliVersions: z.record(z.string(), z.string()).describe('Acknowledged CLI versions per machine'),
+    preferredCliToolTab: z.enum(['claude', 'codex', 'gemini']).nullable().describe('Preferred CLI tool tab on the sessions screen'),
+    cliThreadScopeByTool: z.record(z.string(), z.enum(['current-project', 'all-projects'])).describe('Visible scope per CLI tool on the sessions screen'),
+    collapsedCliSections: z.record(z.string(), z.boolean()).describe('Collapsed state for CLI session sections'),
+    collapsedCliProjectGroups: z.record(z.string(), z.boolean()).describe('Collapsed state for CLI project groups'),
+    hiddenNativeCliEntries: z.record(z.string(), z.number()).describe('Locally hidden native CLI entries keyed by machine/tool/backend'),
 });
 
 //
@@ -41,6 +46,11 @@ export const localSettingsDefaults: LocalSettings = {
     consoleLoggingEnabled: false,
     verboseLogging: false,
     acknowledgedCliVersions: {},
+    preferredCliToolTab: null,
+    cliThreadScopeByTool: {},
+    collapsedCliSections: {},
+    collapsedCliProjectGroups: {},
+    hiddenNativeCliEntries: {},
 };
 Object.freeze(localSettingsDefaults);
 

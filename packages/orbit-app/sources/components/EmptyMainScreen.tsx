@@ -6,6 +6,7 @@ import { useConnectTerminal } from '@/hooks/useConnectTerminal';
 import { useRouter } from 'expo-router';
 import { Modal } from '@/modal';
 import { t } from '@/text';
+import { getTerminalAuthPlaceholder } from '@/utils/appUrlScheme';
 import { StyleSheet } from 'react-native-unistyles';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -169,9 +170,10 @@ export function EmptyMainScreen() {
                                             t('modals.authenticateTerminal'),
                                             t('modals.pasteUrlFromTerminal'),
                                             {
-                                                placeholder: 'orbit://terminal?...',
+                                                placeholder: getTerminalAuthPlaceholder(),
                                                 cancelText: t('common.cancel'),
-                                                confirmText: t('common.authenticate')
+                                                confirmText: t('common.authenticate'),
+                                                inputType: 'url',
                                             }
                                         );
 

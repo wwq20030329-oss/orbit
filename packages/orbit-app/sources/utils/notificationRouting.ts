@@ -20,7 +20,7 @@ function normalizeNotificationData(data: unknown): unknown {
     return data;
 }
 
-function getSessionRouteFromUrl(url: string): `/session/${string}` | null {
+function getSessionIdentifierFromUrl(url: string): string | null {
     const trimmedUrl = url.trim();
     if (!trimmedUrl) {
         return null;
@@ -41,14 +41,10 @@ function getSessionRouteFromUrl(url: string): `/session/${string}` | null {
     })();
 
     const trimmedSessionId = sessionId.trim();
-    if (!trimmedSessionId) {
-        return null;
-    }
-
-    return `/session/${encodeURIComponent(trimmedSessionId)}`;
+    return trimmedSessionId || null;
 }
 
-export function getSessionRouteFromNotificationData(data: unknown): `/session/${string}` | null {
+export function getSessionIdentifierFromNotificationData(data: unknown): string | null {
     const normalizedData = normalizeNotificationData(data);
     if (!normalizedData || typeof normalizedData !== 'object' || Array.isArray(normalizedData)) {
         return null;
@@ -56,9 +52,9 @@ export function getSessionRouteFromNotificationData(data: unknown): `/session/${
 
     const url = getObjectValue(normalizedData, 'url');
     if (typeof url === 'string') {
-        const routeFromUrl = getSessionRouteFromUrl(url);
-        if (routeFromUrl) {
-            return routeFromUrl;
+        const identifierFromUrl = getSessionIdentifierFromUrl(url);
+        if (identifierFromUrl) {
+            return identifierFromUrl;
         }
     }
 
@@ -68,14 +64,10 @@ export function getSessionRouteFromNotificationData(data: unknown): `/session/${
     }
 
     const trimmedSessionId = sessionId.trim();
-    if (!trimmedSessionId) {
-        return null;
-    }
-
-    return `/session/${encodeURIComponent(trimmedSessionId)}`;
+    return trimmedSessionId || null;
 }
 
-export function getSessionRouteFromNotificationResponse(response: unknown): `/session/${string}` | null {
+export function getSessionIdentifierFromNotificationResponse(response: unknown): string | null {
     const contentData = getObjectValue(getObjectValue(getObjectValue(response, 'notification'), 'request'), 'content');
-    return getSessionRouteFromNotificationData(getObjectValue(contentData, 'data'));
+    return getSessionIdentifierFromNotificationData(getObjectValue(contentData, 'data'));
 }

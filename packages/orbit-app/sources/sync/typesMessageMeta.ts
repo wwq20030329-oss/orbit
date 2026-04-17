@@ -5,6 +5,7 @@ export const MessageMetaSchema = z.object({
     sentFrom: z.string().optional(), // Source identifier
     permissionMode: z.string().optional(), // Permission mode key for this message
     model: z.string().nullable().optional(), // Model name for this message (null = reset)
+    effortLevel: z.string().optional(), // Thought/effort level key for this message
     fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
     customSystemPrompt: z.string().nullable().optional(), // Custom system prompt for this message (null = reset)
     appendSystemPrompt: z.string().nullable().optional(), // Append to system prompt for this message (null = reset)

@@ -1,92 +1,20 @@
-import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
-
-export type SessionState = 'disconnected' | 'thinking' | 'waiting' | 'permission_required';
-
-export interface SessionStatus {
-    state: SessionState;
-    isConnected: boolean;
-    statusText: string;
-    shouldShowStatus: boolean;
-    statusColor: string;
-    statusDotColor: string;
-    isPulsing?: boolean;
-}
-
-/**
- * Get the current state of a session based on presence and thinking status.
- * Uses centralized session state from storage.ts
- */
-export function useSessionStatus(session: Session): SessionStatus {
-    const isOnline = session.presence === "online";
-    const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
-
-    const vibingMessage = React.useMemo(() => {
-        return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
-    }, [isOnline, hasPermissions, session.thinking]);
-
-    if (!isOnline) {
-        return {
-            state: 'disconnected',
-            isConnected: false,
-            statusText: t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }),
-            shouldShowStatus: true,
-            statusColor: '#999',
-            statusDotColor: '#999'
-        };
-    }
-
-    // Check if permission is required
-    if (hasPermissions) {
-        return {
-            state: 'permission_required',
-            isConnected: true,
-            statusText: t('status.permissionRequired'),
-            shouldShowStatus: true,
-            statusColor: '#FF9500',
-            statusDotColor: '#FF9500',
-            isPulsing: true
-        };
-    }
-
-    if (session.thinking === true) {
-        return {
-            state: 'thinking',
-            isConnected: true,
-            statusText: vibingMessage,
-            shouldShowStatus: true,
-            statusColor: '#007AFF',
-            statusDotColor: '#007AFF',
-            isPulsing: true
-        };
-    }
-
-    return {
-        state: 'waiting',
-        isConnected: true,
-        statusText: t('status.online'),
-        shouldShowStatus: false,
-        statusColor: '#34C759',
-        statusDotColor: '#34C759'
-    };
-}
+import { isSessionLikelyOnline } from './presence';
+import { getSessionDisplayTitle } from './nativeCliHistory';
+export { isSessionInteractionBlocked } from './sessionInteraction';
+export type { SessionState, SessionStatus, SessionStatusOptions } from './sessionStatus';
+export { getSessionStatus, useSessionStatus } from './sessionStatus';
 
 /**
  * Extracts a display name from a session's metadata path.
  * Returns the last segment of the path, or 'unknown' if no path is available.
  */
 export function getSessionName(session: Session): string {
-    if (session.metadata?.summary) {
-        return session.metadata.summary.text;
-    } else if (session.metadata) {
-        const segments = session.metadata.path.split('/').filter(Boolean);
-        const lastSegment = segments.pop();
-        if (!lastSegment) {
-            return t('status.unknown');
-        }
-        return lastSegment;
+    const displayTitle = getSessionDisplayTitle(session);
+    if (displayTitle?.trim()) {
+        return displayTitle;
     }
     return t('status.unknown');
 }
@@ -160,7 +88,7 @@ export function getSessionSubtitle(session: Session): string {
  * A session is considered online if the active flag is true.
  */
 export function isSessionOnline(session: Session): boolean {
-    return session.active;
+    return isSessionLikelyOnline(session);
 }
 
 /**
@@ -168,7 +96,7 @@ export function isSessionOnline(session: Session): boolean {
  * Uses the active flag directly.
  */
 export function isSessionActive(session: Session): boolean {
-    return session.active;
+    return isSessionLikelyOnline(session);
 }
 
 /**
@@ -229,5 +157,3 @@ export function formatLastSeen(activeAt: number, isActive: boolean = false): str
         return date.toLocaleDateString(undefined, options);
     }
 }
-
-const vibingMessages = ["Accomplishing", "Actioning", "Actualizing", "Baking", "Booping", "Brewing", "Calculating", "Cerebrating", "Channelling", "Churning", "Clauding", "Coalescing", "Cogitating", "Computing", "Combobulating", "Concocting", "Conjuring", "Considering", "Contemplating", "Cooking", "Crafting", "Creating", "Crunching", "Deciphering", "Deliberating", "Determining", "Discombobulating", "Divining", "Doing", "Effecting", "Elucidating", "Enchanting", "Envisioning", "Finagling", "Flibbertigibbeting", "Forging", "Forming", "Frolicking", "Generating", "Germinating", "Hatching", "Herding", "Honking", "Ideating", "Imagining", "Incubating", "Inferring", "Manifesting", "Marinating", "Meandering", "Moseying", "Mulling", "Mustering", "Musing", "Noodling", "Percolating", "Perusing", "Philosophising", "Pontificating", "Pondering", "Processing", "Puttering", "Puzzling", "Reticulating", "Ruminating", "Scheming", "Schlepping", "Shimmying", "Simmering", "Smooshing", "Spelunking", "Spinning", "Stewing", "Sussing", "Synthesizing", "Thinking", "Tinkering", "Transmuting", "Unfurling", "Unravelling", "Vibing", "Wandering", "Whirring", "Wibbling", "Wizarding", "Working", "Wrangling"];

@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { decodeBase64, encodeBase64 } from '../encryption/base64';
-import { getServerUrl } from '@/sync/serverConfig';
+import { ensureReachableServerUrl } from '@/sync/serverConfig';
 import { QRAuthKeyPair } from './authQRStart';
 import { decryptBox } from '@/encryption/libsodium';
 
@@ -11,7 +11,7 @@ export interface AuthCredentials {
 
 export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: number) => void, shouldCancel?: () => boolean): Promise<AuthCredentials | null> {
     let dots = 0;
-    const serverUrl = getServerUrl();
+    const serverUrl = await ensureReachableServerUrl();
 
     while (true) {
         if (shouldCancel && shouldCancel()) {

@@ -13,7 +13,7 @@ import { initialWindowMetrics, SafeAreaProvider, useSafeAreaInsets } from 'react
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SidebarNavigator } from '@/components/SidebarNavigator';
 import sodium from '@/encryption/libsodium.lib';
-import { View, Platform } from 'react-native';
+import { View, Platform, Linking } from 'react-native';
 import { ModalProvider } from '@/modal';
 import { PostHogProvider } from 'posthog-react-native';
 import { tracking } from '@/track/tracking';
@@ -28,9 +28,13 @@ import { initConsoleLogging, setConsoleOutputEnabled } from '@/utils/consoleLogg
 import { useLocalSetting } from '@/sync/storage';
 import { useUnistyles } from 'react-native-unistyles';
 import { AsyncLock } from '@/utils/lock';
-import { getSessionRouteFromNotificationResponse } from '@/utils/notificationRouting';
+import { getSessionIdentifierFromNotificationResponse } from '@/utils/notificationRouting';
 import { navigateToSession } from '@/hooks/useNavigateToSession';
 import { applyVoiceUpsellOverride } from '@/realtime/voiceExperiment';
+import { useAuth } from '@/auth/AuthContext';
+import { approveAccountLinkUrl, isAccountLinkUrl } from '@/auth/accountLinkUrl';
+import { Modal } from '@/modal';
+import { t } from '@/text';
 
 // Configure notification handler for foreground notifications
 Notifications.setNotificationHandler({
@@ -190,6 +194,55 @@ function getDevWebQueryCredentials(): AuthCredentials | null {
     return { token, secret };
 }
 
+function AccountLinkHandler() {
+    const auth = useAuth();
+    const handledUrls = React.useRef<Set<string>>(new Set());
+
+    const handleUrl = React.useCallback(async (url: string | null) => {
+        if (!url || !isAccountLinkUrl(url) || handledUrls.current.has(url)) {
+            return;
+        }
+
+        handledUrls.current.add(url);
+
+        if (!auth.credentials?.token || !auth.credentials.secret) {
+            Modal.alert(t('common.error'), t('errors.authenticationFailed'));
+            return;
+        }
+
+        try {
+            await approveAccountLinkUrl(auth.credentials, url);
+            Modal.alert(t('common.success'), t('modals.deviceLinkedSuccessfully'));
+        } catch (error) {
+            console.error('Failed to approve account link from deep link:', error);
+            Modal.alert(t('common.error'), t('modals.failedToLinkDevice'));
+        }
+    }, [auth.credentials]);
+
+    React.useEffect(() => {
+        let active = true;
+
+        void Linking.getInitialURL().then((url) => {
+            if (active) {
+                void handleUrl(url);
+            }
+        }).catch((error) => {
+            console.log('Failed to read initial URL:', error);
+        });
+
+        const subscription = Linking.addEventListener('url', (event) => {
+            void handleUrl(event.url);
+        });
+
+        return () => {
+            active = false;
+            subscription.remove();
+        };
+    }, [handleUrl]);
+
+    return null;
+}
+
 export default function RootLayout() {
     const router = useRouter();
     const { theme } = useUnistyles();
@@ -304,23 +357,15 @@ export default function RootLayout() {
                 '[PUSH ROUTING] notification.request.content.data:\n' +
                 stringifyNotificationPayload(response.notification.request.content.data)
             );
-            const route = getSessionRouteFromNotificationResponse(response);
-            console.log(`[PUSH ROUTING] Computed route: ${route ?? 'null'}`);
-            if (!route) {
-                console.log('[PUSH ROUTING] No session route found in notification.request.content.data');
+            const sessionIdentifier = getSessionIdentifierFromNotificationResponse(response);
+            console.log(`[PUSH ROUTING] Computed session identifier: ${sessionIdentifier ?? 'null'}`);
+            if (!sessionIdentifier) {
+                console.log('[PUSH ROUTING] No session identifier found in notification.request.content.data');
                 return;
             }
 
-            const encodedSessionId = route.replace(/^\/session\//, '');
-            const sessionId = (() => {
-                try {
-                    return decodeURIComponent(encodedSessionId);
-                } catch {
-                    return encodedSessionId;
-                }
-            })();
-            console.log(`[PUSH ROUTING] Navigating to session: ${sessionId}`);
-            navigateToSession(router, sessionId);
+            console.log(`[PUSH ROUTING] Navigating to session: ${sessionIdentifier}`);
+            navigateToSession(router, sessionIdentifier);
         } finally {
             try {
                 await Notifications.clearLastNotificationResponseAsync();
@@ -396,6 +441,7 @@ export default function RootLayout() {
                         <ThemeProvider value={navigationTheme}>
                             <StatusBarProvider />
                             <ModalProvider>
+                                <AccountLinkHandler />
                                 <CommandPaletteProvider>
                                     <RealtimeProvider>
                                         <HorizontalSafeAreaWrapper>

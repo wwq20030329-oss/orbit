@@ -1,34 +1,38 @@
 import { describe, expect, it } from 'vitest';
 import {
-    getSessionRouteFromNotificationData,
-    getSessionRouteFromNotificationResponse,
+    getSessionIdentifierFromNotificationData,
+    getSessionIdentifierFromNotificationResponse,
 } from './notificationRouting';
 
-describe('getSessionRouteFromNotificationData', () => {
-    it('returns a session route when sessionId exists', () => {
-        expect(getSessionRouteFromNotificationData({ sessionId: 'session-123' })).toBe('/session/session-123');
+describe('getSessionIdentifierFromNotificationData', () => {
+    it('returns a session identifier when sessionId exists', () => {
+        expect(getSessionIdentifierFromNotificationData({ sessionId: 'session-123' })).toBe('session-123');
     });
 
-    it('encodes session ids that contain spaces', () => {
-        expect(getSessionRouteFromNotificationData({ sessionId: 'session 123' })).toBe('/session/session%20123');
+    it('preserves session ids that contain spaces', () => {
+        expect(getSessionIdentifierFromNotificationData({ sessionId: 'session 123' })).toBe('session 123');
     });
 
     it('returns null when sessionId is missing', () => {
-        expect(getSessionRouteFromNotificationData({ kind: 'done' })).toBeNull();
+        expect(getSessionIdentifierFromNotificationData({ kind: 'done' })).toBeNull();
     });
 
     it('returns null for empty session ids', () => {
-        expect(getSessionRouteFromNotificationData({ sessionId: '   ' })).toBeNull();
+        expect(getSessionIdentifierFromNotificationData({ sessionId: '   ' })).toBeNull();
     });
 
     it('uses a session url when present', () => {
-        expect(getSessionRouteFromNotificationData({ url: '/session/session-123' })).toBe('/session/session-123');
+        expect(getSessionIdentifierFromNotificationData({ url: '/session/session-123' })).toBe('session-123');
+    });
+
+    it('decodes encoded session ids from urls', () => {
+        expect(getSessionIdentifierFromNotificationData({ url: '/session/session%20123' })).toBe('session 123');
     });
 });
 
-describe('getSessionRouteFromNotificationResponse', () => {
-    it('reads the route from content data', () => {
-        expect(getSessionRouteFromNotificationResponse({
+describe('getSessionIdentifierFromNotificationResponse', () => {
+    it('reads the identifier from content data', () => {
+        expect(getSessionIdentifierFromNotificationResponse({
             notification: {
                 request: {
                     content: {
@@ -36,11 +40,11 @@ describe('getSessionRouteFromNotificationResponse', () => {
                     }
                 }
             }
-        })).toBe('/session/session-123');
+        })).toBe('session-123');
     });
 
     it('returns null when content data is missing', () => {
-        expect(getSessionRouteFromNotificationResponse({
+        expect(getSessionIdentifierFromNotificationResponse({
             notification: {
                 request: {
                     content: {}

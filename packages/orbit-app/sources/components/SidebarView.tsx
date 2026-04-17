@@ -1,4 +1,4 @@
-import { useSocketStatus, useFriendRequests, useSettings } from '@/sync/storage';
+import { useAllMachines, useSocketStatus, useFriendRequests, useSettings } from '@/sync/storage';
 import * as React from 'react';
 import { Text, View, Pressable, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,6 +15,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useInboxHasContent } from '@/hooks/useInboxHasContent';
 import { Ionicons } from '@expo/vector-icons';
+import { resolveDisplayConnectionStatus } from '@/utils/connectionStatus';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -136,6 +137,7 @@ export const SidebarView = React.memo(() => {
     const router = useRouter();
     const headerHeight = useHeaderHeight();
     const socketStatus = useSocketStatus();
+    const machines = useAllMachines({ includeOffline: true });
     const realtimeStatus = useRealtimeStatus();
     const friendRequests = useFriendRequests();
     const inboxHasContent = useInboxHasContent();
@@ -143,7 +145,7 @@ export const SidebarView = React.memo(() => {
 
     // Compute connection status once per render (theme-reactive, no stale memoization)
     const connectionStatus = (() => {
-        const { status } = socketStatus;
+        const status = resolveDisplayConnectionStatus(socketStatus.status, machines);
         switch (status) {
             case 'connected':
                 return {

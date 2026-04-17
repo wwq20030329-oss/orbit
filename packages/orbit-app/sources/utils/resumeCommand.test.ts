@@ -33,6 +33,16 @@ describe('buildResumeCommand', () => {
             flavor: 'claude',
         })).toBeNull();
     });
+
+    it('builds a Claude resume command from imported native history metadata', () => {
+        expect(buildResumeCommand({
+            path: '/tmp/project',
+            os: 'darwin',
+            flavor: 'claude',
+            nativeHistorySourceTool: 'claude',
+            nativeHistorySourceBackendId: '93a9705e-bc6a-406d-8dce-8acc014dedbd',
+        })).toBe(`cd '/tmp/project' && orbit claude --resume 93a9705e-bc6a-406d-8dce-8acc014dedbd`);
+    });
 });
 
 describe('buildResumeCommandBlock', () => {

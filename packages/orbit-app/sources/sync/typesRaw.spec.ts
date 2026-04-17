@@ -1742,6 +1742,39 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             });
         });
 
+        it('drops failed and cancelled turn-end events instead of showing fake ready', () => {
+            const failedTurnEnd = normalizeRawMessage('db-6-failed', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-6-failed',
+                        time: 1,
+                        role: 'agent',
+                        turn: 'turn-5',
+                        ev: { t: 'turn-end', status: 'failed' }
+                    }
+                }
+            } as any);
+
+            const cancelledTurnEnd = normalizeRawMessage('db-6-cancelled', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-6-cancelled',
+                        time: 1,
+                        role: 'agent',
+                        turn: 'turn-5',
+                        ev: { t: 'turn-end', status: 'cancelled' }
+                    }
+                }
+            } as any);
+
+            expect(failedTurnEnd).toBeNull();
+            expect(cancelledTurnEnd).toBeNull();
+        });
+
         it('normalizes file events with required size and optional image metadata', () => {
             const fileOnly = normalizeRawMessage('db-file-1', null, 1, {
                 ...base,
@@ -1993,6 +2026,83 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             } as any);
 
             expect(normalized).toBeNull();
+        });
+    });
+
+    describe('ACP lifecycle normalization', () => {
+        it('shows task_complete error messages as visible events', () => {
+            const normalized = normalizeRawMessage('db-acp-1', null, 1, {
+                role: 'agent',
+                content: {
+                    type: 'acp',
+                    provider: 'codex',
+                    data: {
+                        type: 'task_complete',
+                        id: 'task-complete-1',
+                        status: 'failed',
+                        error: {
+                            message: 'You have hit your usage limit'
+                        }
+                    }
+                }
+            } as any);
+
+            expect(normalized).toMatchObject({
+                id: 'db-acp-1',
+                role: 'event',
+                content: {
+                    type: 'message',
+                    message: 'You have hit your usage limit'
+                }
+            });
+        });
+
+        it('falls back to a generic task failure event when no explicit error exists', () => {
+            const normalized = normalizeRawMessage('db-acp-2', null, 1, {
+                role: 'agent',
+                content: {
+                    type: 'acp',
+                    provider: 'codex',
+                    data: {
+                        type: 'task_complete',
+                        id: 'task-complete-2',
+                        status: 'failed'
+                    }
+                }
+            } as any);
+
+            expect(normalized).toMatchObject({
+                id: 'db-acp-2',
+                role: 'event',
+                content: {
+                    type: 'message',
+                    message: 'Task failed'
+                }
+            });
+        });
+
+        it('shows turn_aborted reasons as visible events', () => {
+            const normalized = normalizeRawMessage('db-acp-3', null, 1, {
+                role: 'agent',
+                content: {
+                    type: 'acp',
+                    provider: 'codex',
+                    data: {
+                        type: 'turn_aborted',
+                        id: 'turn-aborted-1',
+                        reason: 'Permission denied by user'
+                    }
+                }
+            } as any);
+
+            expect(normalized).toMatchObject({
+                id: 'db-acp-3',
+                role: 'event',
+                content: {
+                    type: 'message',
+                    message: 'Permission denied by user'
+                }
+            });
         });
     });
 });

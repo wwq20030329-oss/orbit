@@ -35,6 +35,8 @@ interface QRCodeProps {
     backgroundColor?: string;
 }
 
+const QUIET_ZONE_MODULES = 4;
+
 export const QRCode = React.memo((props: QRCodeProps) => {
     const {
         data,
@@ -50,7 +52,7 @@ export const QRCode = React.memo((props: QRCodeProps) => {
     }, [data, errorCorrectionLevel]);
 
     // Calculate module size
-    const moduleSize = size / (qrMatrix.size + 4/* space around */);
+    const moduleSize = size / (qrMatrix.size + QUIET_ZONE_MODULES * 2);
 
     // Generate modules with rounded corners
     const modules = React.useMemo(() => {
@@ -124,7 +126,7 @@ export const QRCode = React.memo((props: QRCodeProps) => {
                 r={moduleSize * baseRadius * 3}
             />
 
-            <Group transform={[{ translateX: moduleSize * 2 }, { translateY: moduleSize * 2 }]}>
+            <Group transform={[{ translateX: moduleSize * QUIET_ZONE_MODULES }, { translateY: moduleSize * QUIET_ZONE_MODULES }]}>
                 {/* QR modules with rounded corners */}
                 {modules}
 

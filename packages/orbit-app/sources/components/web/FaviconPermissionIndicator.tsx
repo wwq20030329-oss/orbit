@@ -2,6 +2,7 @@ import React from 'react';
 import { Platform } from 'react-native';
 import { storage } from '@/sync/storage';
 import { updateFaviconWithNotification, resetFavicon } from '@/utils/web/faviconGenerator';
+import { isSessionLikelyOnline } from '@/utils/presence';
 
 /**
  * Component that monitors all sessions and updates the favicon
@@ -15,7 +16,7 @@ export const FaviconPermissionIndicator = React.memo(() => {
     const hasOnlineSessionWithPermissions = storage((state) => {
         return Object.values(state.sessions).some(session => {
             // Use centralized presence logic - only "online" sessions matter
-            const isOnline = session.presence === 'online';
+            const isOnline = isSessionLikelyOnline(session);
 
             const hasPermissions = session.agentState?.requests && 
                 Object.keys(session.agentState.requests).length > 0;

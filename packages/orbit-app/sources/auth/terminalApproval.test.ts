@@ -53,6 +53,25 @@ describe('buildTerminalApprovalPayloads', () => {
     expect(payloads.responseV2).toEqual(new Uint8Array([42, 0, ...derivedContentDataKey]));
   });
 
+  it('falls back to the legacy terminal approval payload when V2 derivation fails', async () => {
+    const terminalPublicKey = new Uint8Array([5, 4, 3]);
+    const deviceSecret = new Uint8Array(Array.from({ length: 32 }, (_, index) => index + 10));
+
+    mocks.createEncryption.mockRejectedValue(new Error('content data key unavailable'));
+
+    const payloads = await buildTerminalApprovalPayloads(
+      encodeBase64(deviceSecret, 'base64url'),
+      terminalPublicKey,
+    );
+
+    expect(mocks.createEncryption).toHaveBeenCalledTimes(1);
+    expect(mocks.encryptBox).toHaveBeenCalledTimes(1);
+    expect(mocks.encryptBox).toHaveBeenCalledWith(deviceSecret, terminalPublicKey);
+    expect(payloads.responseV1).toEqual(new Uint8Array([42, ...deviceSecret]));
+    expect(payloads.responseV2).toBeNull();
+    expect(payloads.contentDataKey).toBeNull();
+  });
+
   it('reuses the existing sync content data key when it is already available', async () => {
     const terminalPublicKey = new Uint8Array([1, 2, 3]);
     const deviceSecret = decodeBase64('AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA', 'base64url');

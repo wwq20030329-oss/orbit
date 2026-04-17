@@ -1,6 +1,7 @@
 import Constants from 'expo-constants';
 import { apiSocket } from '@/sync/apiSocket';
 import { AuthCredentials } from '@/auth/tokenStorage';
+import { handleUnauthorizedResponse } from '@/auth/authRecovery';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { storage } from './storage';
@@ -32,7 +33,7 @@ import {
 import type { MessageSentSource } from '@/track';
 import { parseToken } from '@/utils/parseToken';
 import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
-import { getServerUrl } from './serverConfig';
+import { ensureReachableServerUrl, getServerUrl } from './serverConfig';
 import { config } from '@/config';
 import { log } from '@/log';
 import { gitStatusSync } from './gitStatusSync';
@@ -50,6 +51,18 @@ import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
+import { didSessionControlReturnToApp, getSessionControlState } from '@/utils/sessionControlState';
+import { VisibleSessionTracker } from './visibleSessionTracker';
+import { shouldRefreshSessionsOnVisible } from './sessionVisibleRefresh';
+import { getSessionLifecycleState } from './sessionLifecycle';
+import { invalidateNativeCliHistoryForMachines } from '@/utils/nativeCliHistoryRefresh';
+import { rememberNativeCliHintsForSession } from '@/utils/openNativeCliSession';
+import {
+    getMessageSeqBounds,
+    INITIAL_VISIBLE_MESSAGE_LIMIT,
+    OLDER_MESSAGES_PAGE_LIMIT,
+    shouldBootstrapVisibleSessionMessages,
+} from './sessionMessageBootstrap';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -65,6 +78,37 @@ type V3PostSessionMessagesResponse = {
         updatedAt: number;
     }>;
 };
+
+type EncryptedSessionRecord = {
+    id: string;
+    seq: number;
+    metadata: string;
+    metadataVersion: number;
+    agentState: string | null;
+    agentStateVersion: number;
+    dataEncryptionKey: string | null;
+    active: boolean;
+    activeAt: number;
+    createdAt: number;
+    updatedAt: number;
+};
+
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function didMachineHistoryRelevantStateChange(previous: Machine | undefined, next: Machine): boolean {
+    if (!previous) {
+        return true;
+    }
+
+    return previous.seq !== next.seq
+        || previous.updatedAt !== next.updatedAt
+        || previous.active !== next.active
+        || previous.activeAt !== next.activeAt
+        || previous.metadataVersion !== next.metadataVersion
+        || previous.daemonStateVersion !== next.daemonStateVersion;
+}
 
 type OutboxMessage = {
     localId: string;
@@ -92,6 +136,9 @@ class Sync {
     private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
     private sessionQueueProcessing = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
+    private visibleSessions = new VisibleSessionTracker();
+    private messageFetchAbortControllers = new Map<string, AbortController>();
+    private messageBackfillPromises = new Map<string, Promise<void>>();
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
@@ -152,6 +199,7 @@ class Sync {
                     this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
                 }
                 log.log('📱 App became active');
+                invalidateNativeCliHistoryForMachines();
                 this.purchasesSync.invalidate();
                 this.profileSync.invalidate();
                 this.machinesSync.invalidate();
@@ -163,6 +211,9 @@ class Sync {
                 this.friendsSync.invalidate();
                 this.friendRequestsSync.invalidate();
                 this.feedSync.invalidate();
+                for (const sessionId of this.visibleSessions.listVisible()) {
+                    this.getMessagesSync(sessionId).invalidate();
+                }
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
                 this.maybeStartBackgroundSendWatchdog();
@@ -240,16 +291,60 @@ class Sync {
 
 
     onSessionVisible = (sessionId: string) => {
-        this.getMessagesSync(sessionId).invalidate();
+        const becameVisible = this.visibleSessions.markVisible(sessionId);
+        if (becameVisible) {
+            this.getMessagesSync(sessionId).invalidate();
+        }
 
-        // Also invalidate git status sync for this session
-        gitStatusSync.getSync(sessionId).invalidate();
+        const session = storage.getState().sessions[sessionId];
+        const sessionControlState = session
+            ? getSessionControlState(session, { sessionId })
+            : null;
+        if (becameVisible && shouldRefreshSessionsOnVisible(session, sessionControlState)) {
+            this.sessionsSync.invalidate();
+        }
+        if (
+            session
+            && session.metadata?.path
+            && sessionControlState?.isConnected
+        ) {
+            gitStatusSync.getSync(sessionId).invalidate();
+        } else {
+            gitStatusSync.clearForSession(sessionId);
+        }
 
         // Notify voice assistant about session visibility
-        const session = storage.getState().sessions[sessionId];
         if (session) {
             voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
         }
+    }
+
+    onSessionHidden = (sessionId: string) => {
+        this.visibleSessions.markHidden(sessionId);
+        if (!this.isSessionVisible(sessionId)) {
+            this.messageFetchAbortControllers.get(sessionId)?.abort();
+        }
+    }
+
+    private isSessionVisible = (sessionId: string) => {
+        return this.visibleSessions.isVisible(sessionId);
+    }
+
+    private getSessionVisibilityVersion = (sessionId: string) => {
+        return this.visibleSessions.getVersion(sessionId);
+    }
+
+    private shouldContinueVisibleSync = (sessionId: string, expectedVersion: number) => {
+        return this.isSessionVisible(sessionId) && this.getSessionVisibilityVersion(sessionId) === expectedVersion;
+    }
+
+    private isAbortError = (error: unknown) => {
+        if (!(error instanceof Error)) {
+            return false;
+        }
+
+        const message = error.message.toLowerCase();
+        return error.name === 'AbortError' || message.includes('abort');
     }
 
     private getMessagesSync(sessionId: string): InvalidateSync {
@@ -259,6 +354,130 @@ class Sync {
             this.messagesSync.set(sessionId, sync);
         }
         return sync;
+    }
+
+    private buildMessagesPath(sessionId: string, options: {
+        afterSeq?: number;
+        beforeSeq?: number;
+        tail?: boolean;
+        limit: number;
+    }): string {
+        const query = new URLSearchParams();
+        query.set('limit', String(options.limit));
+        if (typeof options.afterSeq === 'number') {
+            query.set('after_seq', String(options.afterSeq));
+        }
+        if (typeof options.beforeSeq === 'number') {
+            query.set('before_seq', String(options.beforeSeq));
+        }
+        if (options.tail) {
+            query.set('tail', 'true');
+        }
+        return `/v3/sessions/${sessionId}/messages?${query.toString()}`;
+    }
+
+    private async fetchMessagesPage(
+        sessionId: string,
+        encryption: NonNullable<ReturnType<Encryption['getSessionEncryption']>>,
+        options: {
+            signal?: AbortSignal;
+            afterSeq?: number;
+            beforeSeq?: number;
+            tail?: boolean;
+            limit: number;
+        },
+    ): Promise<{
+        normalizedMessages: NormalizedMessage[];
+        hasMore: boolean;
+        oldestSeq: number | null;
+        newestSeq: number | null;
+    }> {
+        const response = await apiSocket.request(
+            this.buildMessagesPath(sessionId, options),
+            options.signal ? { signal: options.signal } : undefined,
+        );
+        if (!response.ok) {
+            throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
+        }
+
+        const data = await response.json() as V3GetSessionMessagesResponse;
+        const messages = Array.isArray(data.messages) ? data.messages : [];
+        const decryptedMessages = await encryption.decryptMessages(messages);
+        const normalizedMessages: NormalizedMessage[] = [];
+
+        for (let i = 0; i < decryptedMessages.length; i++) {
+            const decrypted = decryptedMessages[i];
+            if (!decrypted) {
+                continue;
+            }
+            const normalized = normalizeRawMessage(
+                decrypted.id,
+                decrypted.localId,
+                decrypted.createdAt,
+                decrypted.content,
+            );
+            if (normalized) {
+                normalizedMessages.push(normalized);
+            }
+        }
+
+        const bounds = getMessageSeqBounds(messages);
+        return {
+            normalizedMessages,
+            hasMore: !!data.hasMore,
+            oldestSeq: bounds?.oldestSeq ?? null,
+            newestSeq: bounds?.newestSeq ?? null,
+        };
+    }
+
+    private startOlderMessagesBackfill(
+        sessionId: string,
+        beforeSeq: number,
+        visibilityVersion: number,
+    ) {
+        if (beforeSeq <= 1 || this.messageBackfillPromises.has(sessionId)) {
+            return;
+        }
+
+        const promise = (async () => {
+            let cursor = beforeSeq;
+
+            while (cursor > 1 && this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                const encryption = this.encryption.getSessionEncryption(sessionId);
+                if (!encryption) {
+                    return;
+                }
+
+                const page = await this.fetchMessagesPage(sessionId, encryption, {
+                    beforeSeq: cursor,
+                    limit: OLDER_MESSAGES_PAGE_LIMIT,
+                });
+
+                if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                    return;
+                }
+
+                if (page.normalizedMessages.length > 0) {
+                    this.enqueueMessages(sessionId, page.normalizedMessages);
+                }
+
+                if (!page.hasMore || page.oldestSeq === null || page.oldestSeq >= cursor) {
+                    return;
+                }
+
+                cursor = page.oldestSeq;
+            }
+        })()
+            .catch((error) => {
+                console.warn('Failed to backfill older session messages', error);
+            })
+            .finally(() => {
+                if (this.messageBackfillPromises.get(sessionId) === promise) {
+                    this.messageBackfillPromises.delete(sessionId);
+                }
+            });
+
+        this.messageBackfillPromises.set(sessionId, promise);
     }
 
     private getSendSync(sessionId: string): InvalidateSync {
@@ -469,7 +688,7 @@ class Sync {
             return;
         }
 
-        const { permissionMode, model } = resolveMessageModeMeta(session);
+        const { permissionMode, model, effortLevel } = resolveMessageModeMeta(session);
         const { displayText, source = 'chat' } = options ?? {};
 
         // Generate local ID
@@ -505,6 +724,7 @@ class Sync {
                 sentFrom,
                 permissionMode,
                 model,
+                ...(effortLevel ? { effortLevel } : {}),
                 fallbackModel,
                 appendSystemPrompt: systemPrompt,
                 ...(displayText && { displayText }) // Add displayText if provided
@@ -715,6 +935,10 @@ class Sync {
             }
         });
 
+        if (await handleUnauthorizedResponse(response, '/v1/sessions')) {
+            return;
+        }
+
         if (!response.ok) {
             throw new Error(`Failed to fetch sessions: ${response.status}`);
         }
@@ -736,48 +960,7 @@ class Sync {
             lastMessage: ApiMessage | null;
         }>;
 
-        // Initialize all session encryptions first
-        const sessionKeys = new Map<string, Uint8Array | null>();
-        for (const session of sessions) {
-            if (session.dataEncryptionKey) {
-                let decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
-                if (!decrypted) {
-                    console.error(`Failed to decrypt data encryption key for session ${session.id}`);
-                    continue;
-                }
-                sessionKeys.set(session.id, decrypted);
-            } else {
-                sessionKeys.set(session.id, null);
-            }
-        }
-        await this.encryption.initializeSessions(sessionKeys);
-
-        // Decrypt sessions
-        let decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
-        for (const session of sessions) {
-            // Get session encryption (should always exist after initialization)
-            const sessionEncryption = this.encryption.getSessionEncryption(session.id);
-            if (!sessionEncryption) {
-                console.error(`Session encryption not found for ${session.id} - this should never happen`);
-                continue;
-            }
-
-            // Decrypt metadata using session-specific encryption
-            let metadata = await sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata);
-
-            // Decrypt agent state using session-specific encryption
-            let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
-
-            // Put it all together
-            const processedSession = {
-                ...session,
-                thinking: false,
-                thinkingAt: 0,
-                metadata,
-                agentState
-            };
-            decryptedSessions.push(processedSession);
-        }
+        const decryptedSessions = await this.decryptSessions(sessions);
 
         // Apply to storage
         this.applySessions(decryptedSessions);
@@ -791,6 +974,43 @@ class Sync {
 
     public refreshSessions = async () => {
         return this.sessionsSync.invalidateAndAwait();
+    }
+
+    public waitForSessionReady = async (
+        sessionId: string,
+        options: {
+            timeoutMs?: number;
+            pollMs?: number;
+            allowFallbackRefresh?: boolean;
+        } = {},
+    ): Promise<boolean> => {
+        const timeoutMs = options.timeoutMs ?? 2_500;
+        const pollMs = options.pollMs ?? 50;
+        const allowFallbackRefresh = options.allowFallbackRefresh ?? true;
+
+        if (this.isSessionReadyLocally(sessionId)) {
+            return true;
+        }
+
+        const startedAt = Date.now();
+        while ((Date.now() - startedAt) < timeoutMs) {
+            await delay(pollMs);
+            if (this.isSessionReadyLocally(sessionId)) {
+                return true;
+            }
+        }
+
+        if (!allowFallbackRefresh) {
+            return this.isSessionReadyLocally(sessionId);
+        }
+
+        try {
+            await this.refreshSessions();
+        } catch {
+            // Fall back to the current local state on refresh failures.
+        }
+
+        return this.isSessionReadyLocally(sessionId);
     }
 
     public refreshSessionMessages = async (sessionId: string) => {
@@ -1102,6 +1322,8 @@ class Sync {
     private fetchMachines = async () => {
         if (!this.credentials) return;
 
+        const previousMachines = storage.getState().machines;
+
         console.log('📊 Sync: Fetching machines...');
         const API_ENDPOINT = getServerUrl();
         const response = await fetch(`${API_ENDPOINT}/v1/machines`, {
@@ -1110,6 +1332,10 @@ class Sync {
                 'Content-Type': 'application/json'
             }
         });
+
+        if (await handleUnauthorizedResponse(response, '/v1/machines')) {
+            return;
+        }
 
         if (!response.ok) {
             console.error(`Failed to fetch machines: ${response.status}`);
@@ -1169,9 +1395,8 @@ class Sync {
                     ? await machineEncryption.decryptMetadata(machine.metadataVersion, machine.metadata)
                     : null;
 
-                // Old or malformed machine records should not pollute the new Orbit UI.
                 if (machine.metadata && !metadata) {
-                    continue;
+                    console.warn(`Failed to decrypt metadata for machine ${machine.id}; showing fallback machine entry.`);
                 }
 
                 const daemonState = machine.daemonState
@@ -1210,6 +1435,12 @@ class Sync {
 
         // Replace entire machine state with fetched machines
         storage.getState().applyMachines(decryptedMachines, true);
+        const changedMachineIds = decryptedMachines
+            .filter((machine) => didMachineHistoryRelevantStateChange(previousMachines[machine.id], machine))
+            .map((machine) => machine.id);
+        if (changedMachineIds.length > 0) {
+            invalidateNativeCliHistoryForMachines(changedMachineIds);
+        }
         log.log(`🖥️ fetchMachines completed - processed ${decryptedMachines.length} machines`);
     }
 
@@ -1341,6 +1572,9 @@ class Sync {
                         'Content-Type': 'application/json'
                     }
                 });
+                if (await handleUnauthorizedResponse(response, '/v1/account/settings')) {
+                    return;
+                }
                 const data = await response.json() as {
                     success: false,
                     error: string,
@@ -1397,6 +1631,9 @@ class Sync {
                 'Content-Type': 'application/json'
             }
         });
+        if (await handleUnauthorizedResponse(response, '/v1/account/settings')) {
+            return;
+        }
         if (!response.ok) {
             throw new Error(`Failed to fetch settings: ${response.status}`);
         }
@@ -1442,6 +1679,10 @@ class Sync {
                 'Content-Type': 'application/json'
             }
         });
+
+        if (await handleUnauthorizedResponse(response, '/v1/account/profile')) {
+            return;
+        }
 
         if (!response.ok) {
             throw new Error(`Failed to fetch profile: ${response.status}`);
@@ -1639,60 +1880,123 @@ class Sync {
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
         const lock = this.getSessionMessageLock(sessionId);
         await lock.inLock(async () => {
+            const visibilityVersion = this.getSessionVisibilityVersion(sessionId);
+            if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                log.log(`💬 fetchMessages skipped for hidden session ${sessionId}`);
+                return;
+            }
+
             const encryption = this.encryption.getSessionEncryption(sessionId);
             if (!encryption) {
                 log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
                 throw new Error(`Session encryption not ready for ${sessionId}`);
             }
 
-            let afterSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+            const abortController = new AbortController();
+            this.messageFetchAbortControllers.set(sessionId, abortController);
+            const existingSessionMessages = storage.getState().sessionMessages[sessionId]?.messages ?? [];
+            const trackedLastSeq = this.sessionLastSeq.get(sessionId);
+            const afterSeq = trackedLastSeq ?? 0;
+            const shouldBootstrap = shouldBootstrapVisibleSessionMessages({
+                loadedCount: existingSessionMessages.length,
+                lastSeq: afterSeq,
+            });
+            let nextAfterSeq = afterSeq;
             let hasMore = true;
             let totalNormalized = 0;
+            let completed = false;
+            let backgroundBackfillBeforeSeq: number | null = null;
 
-            while (hasMore) {
-                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
-                }
-                const data = await response.json() as V3GetSessionMessagesResponse;
-                const messages = Array.isArray(data.messages) ? data.messages : [];
-
-                let maxSeq = afterSeq;
-                for (const message of messages) {
-                    if (message.seq > maxSeq) {
-                        maxSeq = message.seq;
+            try {
+                if (shouldBootstrap) {
+                    let page;
+                    try {
+                        page = await this.fetchMessagesPage(sessionId, encryption, {
+                            signal: abortController.signal,
+                            tail: true,
+                            limit: INITIAL_VISIBLE_MESSAGE_LIMIT,
+                        });
+                    } catch (error) {
+                        if (this.isAbortError(error)) {
+                            log.log(`💬 fetchMessages aborted for session ${sessionId}`);
+                            return;
+                        }
+                        throw error;
                     }
-                }
 
-                const decryptedMessages = await encryption.decryptMessages(messages);
-                const normalizedMessages: NormalizedMessage[] = [];
-                for (let i = 0; i < decryptedMessages.length; i++) {
-                    const decrypted = decryptedMessages[i];
-                    if (!decrypted) {
-                        continue;
+                    if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                        log.log(`💬 fetchMessages discarded recent bootstrap for hidden session ${sessionId}`);
+                        return;
                     }
-                    const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-                    if (normalized) {
-                        normalizedMessages.push(normalized);
+
+                    if (page.normalizedMessages.length > 0) {
+                        totalNormalized += page.normalizedMessages.length;
+                        this.enqueueMessages(sessionId, page.normalizedMessages);
                     }
-                }
 
-                if (normalizedMessages.length > 0) {
-                    totalNormalized += normalizedMessages.length;
-                    this.enqueueMessages(sessionId, normalizedMessages);
-                }
+                    if (page.newestSeq !== null) {
+                        this.sessionLastSeq.set(sessionId, page.newestSeq);
+                        nextAfterSeq = page.newestSeq;
+                    }
+                    backgroundBackfillBeforeSeq = page.hasMore ? page.oldestSeq : null;
+                    completed = true;
+                } else {
+                    while (hasMore) {
+                        if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                            log.log(`💬 fetchMessages stopped for hidden session ${sessionId}`);
+                            return;
+                        }
 
-                this.sessionLastSeq.set(sessionId, maxSeq);
-                hasMore = !!data.hasMore;
-                if (hasMore && maxSeq === afterSeq) {
-                    log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
-                    break;
+                        let page;
+                        try {
+                            page = await this.fetchMessagesPage(sessionId, encryption, {
+                                signal: abortController.signal,
+                                afterSeq: nextAfterSeq,
+                                limit: 100,
+                            });
+                        } catch (error) {
+                            if (this.isAbortError(error)) {
+                                log.log(`💬 fetchMessages aborted for session ${sessionId}`);
+                                return;
+                            }
+                            throw error;
+                        }
+
+                        if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                            log.log(`💬 fetchMessages discarded page for hidden session ${sessionId}`);
+                            return;
+                        }
+
+                        if (page.normalizedMessages.length > 0) {
+                            totalNormalized += page.normalizedMessages.length;
+                            this.enqueueMessages(sessionId, page.normalizedMessages);
+                        }
+
+                        const maxSeq = page.newestSeq ?? nextAfterSeq;
+                        this.sessionLastSeq.set(sessionId, maxSeq);
+                        hasMore = page.hasMore;
+                        if (hasMore && maxSeq === nextAfterSeq) {
+                            log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
+                            break;
+                        }
+                        nextAfterSeq = maxSeq;
+                    }
+
+                    completed = true;
                 }
-                afterSeq = maxSeq;
+            } finally {
+                if (this.messageFetchAbortControllers.get(sessionId) === abortController) {
+                    this.messageFetchAbortControllers.delete(sessionId);
+                }
             }
 
-            storage.getState().applyMessagesLoaded(sessionId);
-            log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);
+            if (completed && this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                storage.getState().applyMessagesLoaded(sessionId);
+                log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);
+                if (backgroundBackfillBeforeSeq !== null && backgroundBackfillBeforeSeq > 1) {
+                    this.startOlderMessagesBackfill(sessionId, backgroundBackfillBeforeSeq, visibilityVersion);
+                }
+            }
         });
     }
 
@@ -1728,9 +2032,9 @@ class Sync {
             this.friendsSync.invalidate();
             this.friendRequestsSync.invalidate();
             this.feedSync.invalidate();
-            // Messages are fetched lazily per-session via onSessionVisible (called by SessionView
-            // when realtimeStatus changes). Session metadata + agentState (including permission
-            // requests) are already refreshed by sessionsSync.invalidate() above.
+            for (const sessionId of this.visibleSessions.listVisible()) {
+                this.getMessagesSync(sessionId).invalidate();
+            }
             for (const sync of this.sendSync.values()) {
                 sync.invalidate();
             }
@@ -1748,100 +2052,93 @@ class Sync {
         console.log(`🔄 Sync: Validated update type: ${updateData.body.t}`);
 
         if (updateData.body.t === 'new-message') {
+            const isVisibleSession = this.isSessionVisible(updateData.body.sid);
+            const sessionId = updateData.body.sid;
 
             // Get encryption
-            const encryption = this.encryption.getSessionEncryption(updateData.body.sid);
-            if (!encryption) { // Should never happen
-                console.error(`Session ${updateData.body.sid} not found`);
-                this.fetchSessions(); // Just fetch sessions again
+            const encryption = this.encryption.getSessionEncryption(sessionId);
+            if (!encryption) {
+                log.log(`🔄 Sync: Session ${sessionId} not ready locally yet, refreshing sessions`);
+                void this.fetchSessions().catch((error) => {
+                    log.log(`🔄 Sync: Failed to refresh sessions for missing session ${sessionId}: ${String(error)}`);
+                });
                 return;
             }
 
-            // Decrypt message
+            // Decrypt message so hidden sessions can still keep lightweight status in sync.
             let lastMessage: NormalizedMessage | null = null;
+            let isTaskComplete = false;
+            let isTaskStarted = false;
             if (updateData.body.message) {
                 const decrypted = await encryption.decryptMessage(updateData.body.message);
                 if (decrypted) {
-                    lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-
-                    // Check for task lifecycle events to update thinking state
-                    // This ensures UI updates even if volatile activity updates are lost
-                    const rawContent = decrypted.content as {
-                        role?: string;
-                        content?: {
-                            type?: string;
-                            data?: {
-                                type?: string;
-                                ev?: { t?: string };
-                            }
-                        }
-                    } | null;
-                    const contentType = rawContent?.content?.type;
-                    const dataType = rawContent?.content?.data?.type;
-                    const sessionEventType = rawContent?.content?.data?.ev?.t;
-                    
-                    // Debug logging to trace lifecycle events
-                    if (dataType === 'task_complete' || dataType === 'turn_aborted' || dataType === 'task_started' || sessionEventType === 'turn-start' || sessionEventType === 'turn-end') {
-                        console.log(`🔄 [Sync] Lifecycle event detected: contentType=${contentType}, dataType=${dataType}, sessionEventType=${sessionEventType}`);
+                    if (isVisibleSession) {
+                        lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
                     }
-                    
-                    const isTaskComplete = 
-                        ((contentType === 'acp' || contentType === 'codex') && 
-                            (dataType === 'task_complete' || dataType === 'turn_aborted')) ||
-                        (contentType === 'session' && sessionEventType === 'turn-end');
-                    
-                    const isTaskStarted = 
-                        ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
-                        (contentType === 'session' && sessionEventType === 'turn-start');
-                    
+
+                    ({ isTaskComplete, isTaskStarted } = getSessionLifecycleState(decrypted.content));
+
                     if (isTaskComplete || isTaskStarted) {
                         console.log(`🔄 [Sync] Updating thinking state: isTaskComplete=${isTaskComplete}, isTaskStarted=${isTaskStarted}`);
-                    }
-
-                    // Update session
-                    const session = storage.getState().sessions[updateData.body.sid];
-                    if (session) {
-                        this.applySessions([{
-                            ...session,
-                            updatedAt: updateData.createdAt,
-                            seq: updateData.seq,
-                            // Update thinking state based on task lifecycle events
-                            ...(isTaskComplete ? { thinking: false } : {}),
-                            ...(isTaskStarted ? { thinking: true } : {})
-                        }])
-                    } else {
-                        // Fetch sessions again if we don't have this session
-                        this.fetchSessions();
-                    }
-
-                    // Fast-path only on consecutive seq values, otherwise fetch from server.
-                    const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
-                    const incomingSeq = updateData.body.message.seq;
-                    if (lastMessage && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1) {
-                        this.enqueueMessages(updateData.body.sid, [lastMessage]);
-                        this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
-                        let hasMutableTool = false;
-                        if (lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
-                            hasMutableTool = storage.getState().isMutableToolCall(updateData.body.sid, lastMessage.content[0].tool_use_id);
-                        }
-                        if (hasMutableTool) {
-                            gitStatusSync.invalidate(updateData.body.sid);
-                        }
-                    } else {
-                        this.getMessagesSync(updateData.body.sid).invalidate();
                     }
                 }
             }
 
-            // Ping session
-            this.onSessionVisible(updateData.body.sid);
+            // Update session metadata/list state regardless of visibility, but only process
+            // message bodies for the session the user is actively viewing.
+            const session = storage.getState().sessions[updateData.body.sid];
+            if (session) {
+                this.applySessions([{
+                    ...session,
+                    updatedAt: updateData.createdAt,
+                    seq: updateData.seq,
+                    ...(isTaskComplete ? { thinking: false } : {}),
+                    ...(isTaskStarted ? { thinking: true } : {})
+                }]);
+            } else {
+                this.fetchSessions();
+            }
+
+            if (isVisibleSession && updateData.body.message) {
+                // Fast-path only on consecutive seq values, otherwise fetch from server.
+                const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
+                const incomingSeq = updateData.body.message.seq;
+                if (lastMessage && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1) {
+                    this.enqueueMessages(updateData.body.sid, [lastMessage]);
+                    this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
+                    let hasMutableTool = false;
+                    if (lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
+                        hasMutableTool = storage.getState().isMutableToolCall(updateData.body.sid, lastMessage.content[0].tool_use_id);
+                    }
+                    if (hasMutableTool) {
+                        gitStatusSync.invalidate(updateData.body.sid);
+                    }
+                } else {
+                    this.getMessagesSync(updateData.body.sid).invalidate();
+                }
+            }
 
         } else if (updateData.body.t === 'new-session') {
             log.log('🆕 New session update received');
-            this.sessionsSync.invalidate();
+            try {
+                const decryptedSessions = await this.decryptSessions([updateData.body]);
+                if (decryptedSessions.length > 0) {
+                    this.applySessions(decryptedSessions);
+                } else {
+                    this.sessionsSync.invalidate();
+                }
+            } catch (error) {
+                log.log(`🆕 Failed to hydrate new session ${updateData.body.id}, refreshing sessions`);
+                this.sessionsSync.invalidate();
+            }
         } else if (updateData.body.t === 'delete-session') {
             log.log('🗑️ Delete session update received');
             const sessionId = updateData.body.sid;
+            const deletedSession = storage.getState().sessions[sessionId];
+
+            if (deletedSession) {
+                rememberNativeCliHintsForSession(deletedSession);
+            }
 
             // Remove session from storage
             storage.getState().deleteSession(sessionId);
@@ -1908,11 +2205,9 @@ class Sync {
 
                     // Re-fetch messages when control returns to mobile (local -> remote mode switch)
                     // This catches up on any messages that were exchanged while desktop had control
-                    const wasControlledByUser = session.agentState?.controlledByUser;
-                    const isNowControlledByUser = agentState?.controlledByUser;
-                    if (!wasControlledByUser && isNowControlledByUser) {
+                    if (didSessionControlReturnToApp(session.agentState, agentState) && this.isSessionVisible(updateData.body.id)) {
                         log.log(`🔄 Control returned to mobile for session ${updateData.body.id}, re-fetching messages`);
-                        this.onSessionVisible(updateData.body.id);
+                        this.getMessagesSync(updateData.body.id).invalidate();
                     }
                 }
             }
@@ -2325,6 +2620,62 @@ class Sync {
         }
     }
 
+    private isSessionReadyLocally = (sessionId: string): boolean => {
+        return Boolean(
+            storage.getState().sessions[sessionId]
+            && this.encryption.getSessionEncryption(sessionId),
+        );
+    }
+
+    private decryptSessions = async (
+        sessions: EncryptedSessionRecord[],
+    ): Promise<(Omit<Session, 'presence'> & { presence?: "online" | number })[]> => {
+        const sessionKeys = new Map<string, Uint8Array | null>();
+        for (const session of sessions) {
+            if (session.dataEncryptionKey) {
+                const decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
+                if (!decrypted) {
+                    console.error(`Failed to decrypt data encryption key for session ${session.id}`);
+                    continue;
+                }
+                sessionKeys.set(session.id, decrypted);
+            } else {
+                sessionKeys.set(session.id, null);
+            }
+        }
+
+        await this.encryption.initializeSessions(sessionKeys);
+
+        const decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
+        for (const session of sessions) {
+            const sessionEncryption = this.encryption.getSessionEncryption(session.id);
+            if (!sessionEncryption) {
+                console.error(`Session encryption not found for ${session.id} - this should never happen`);
+                continue;
+            }
+
+            const metadata = await sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata);
+            const agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
+
+            decryptedSessions.push({
+                id: session.id,
+                seq: session.seq,
+                createdAt: session.createdAt,
+                updatedAt: session.updatedAt,
+                active: session.active,
+                activeAt: session.activeAt,
+                metadata,
+                metadataVersion: session.metadataVersion,
+                agentState,
+                agentStateVersion: session.agentStateVersion,
+                thinking: false,
+                thinkingAt: 0,
+            });
+        }
+
+        return decryptedSessions;
+    }
+
 }
 
 // Global singleton instance
@@ -2374,7 +2725,7 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
     initializeTracking(encryption.anonID);
 
     // Initialize socket connection
-    const API_ENDPOINT = getServerUrl();
+    const API_ENDPOINT = await ensureReachableServerUrl();
     apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
 
     // Wire socket status to storage

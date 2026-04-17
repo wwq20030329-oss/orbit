@@ -9,6 +9,7 @@ import sodium from '@/encryption/libsodium.lib';
 import type { KeyPair } from '@/encryption/libsodiumCompat';
 import { decryptBox, encryptBox } from "@/encryption/libsodium";
 import { randomUUID } from 'expo-crypto';
+import { refreshSessionEncryptionCache } from './refreshSessionEncryption';
 
 export class Encryption {
 
@@ -66,10 +67,9 @@ export class Encryption {
      */
     async initializeSessions(sessions: Map<string, Uint8Array | null>): Promise<void> {
         for (const [sessionId, dataKey] of sessions) {
-            // Skip if already initialized
-            if (this.sessionEncryptions.has(sessionId)) {
-                continue;
-            }
+            // Rebuild session encryption on every refresh so reused Orbit session IDs
+            // pick up the latest server-provided data key instead of holding a stale key.
+            refreshSessionEncryptionCache(this.sessionEncryptions, this.cache, sessionId);
 
             // Create appropriate encryptor based on data key
             const encryptor = await this.openEncryption(dataKey);

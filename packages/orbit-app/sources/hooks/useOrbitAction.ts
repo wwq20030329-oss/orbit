@@ -1,7 +1,7 @@
 import * as React from 'react';
 
 import { Modal } from '@/modal';
-import { OrbitError } from '@/utils/errors';
+import { getOrbitActionErrorMessage } from './orbitActionError';
 
 export function useOrbitAction(action: () => Promise<void>) {
     const [loading, setLoading] = React.useState(false);
@@ -22,12 +22,8 @@ export function useOrbitAction(action: () => Promise<void>) {
                         await action();
                         break;
                     } catch (error) {
-                        if (error instanceof OrbitError) {
-                            Modal.alert('Error', error.message, [{ text: 'OK', style: 'cancel' }]);
-                            break;
-                        }
-
-                        Modal.alert('Error', 'Unknown error', [{ text: 'OK', style: 'cancel' }]);
+                        console.error('[useOrbitAction] action failed', error);
+                        Modal.alert('Error', getOrbitActionErrorMessage(error), [{ text: 'OK', style: 'cancel' }]);
                         break;
                     }
                 }

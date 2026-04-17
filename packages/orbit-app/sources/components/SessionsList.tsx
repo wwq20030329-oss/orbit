@@ -1,30 +1,84 @@
 import React from 'react';
-import { View, Pressable, FlatList, Platform } from 'react-native';
+import { View, Pressable, FlatList, ActivityIndicator, ActionSheetIOS, Platform, useWindowDimensions, type NativeSyntheticEvent, type NativeScrollEvent } from 'react-native';
 import { Text } from '@/components/StyledText';
-import { usePathname } from 'expo-router';
-import { SessionListViewItem, storage, useMachine } from '@/sync/storage';
+import { SessionListViewItem, useLocalSettingMutable } from '@/sync/storage';
+import type { NativeCliTool } from '@/sync/storageTypes';
 import { Ionicons } from '@expo/vector-icons';
-import { formatPathRelativeToHome, getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId } from '@/utils/sessionUtils';
-import { Avatar } from './Avatar';
-import { ActiveSessionsGroup } from './ActiveSessionsGroup';
-import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useSetting } from '@/sync/storage';
-import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
 import { Typography } from '@/constants/Typography';
-import { NativeCliHistoryEntry, Session } from '@/sync/storageTypes';
-import { StatusDot } from './StatusDot';
 import { StyleSheet } from 'react-native-unistyles';
-import { useIsTablet } from '@/utils/responsive';
 import { requestReview } from '@/utils/requestReview';
 import { UpdateBanner } from './UpdateBanner';
 import { layout } from './layout';
-import { useNavigateToSession } from '@/hooks/useNavigateToSession';
-import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPopover';
+import { useNavigateDirectlyToSession, useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { useOrbitAction } from '@/hooks/useOrbitAction';
-import { machineResumeNativeCliHistory } from '@/sync/ops';
-import { sync } from '@/sync/sync';
-import { OrbitError } from '@/utils/errors';
+import { getCliSectionTitle } from '@/utils/nativeCliHistory';
+import { deleteCliProjectGroup, deleteCliThreadItem } from '@/utils/cliThreadDelete';
+import {
+    buildCliThreadToolSections,
+    CLI_THREAD_TOOL_ORDER,
+    formatCliThreadUpdatedAt,
+    getCliThreadScopedProjects,
+    pickPreferredCliThreadTool,
+    type CliThreadScope,
+    type CliThreadProjectGroup,
+    type CliThreadToolSection,
+    type CliThreadListItem,
+} from '@/utils/cliThreadList';
+import { openCliThreadItem } from '@/utils/openCliThreadItem';
+import { Modal } from '@/modal';
+import { t } from '@/text';
+
+const DEFAULT_VISIBLE_PROJECTS = 6;
+
+function showDeleteActionSheet(
+    title: string,
+    destructiveLabel: string,
+    onSelectDelete: () => void,
+): void {
+    if (Platform.OS !== 'ios') {
+        onSelectDelete();
+        return;
+    }
+
+    ActionSheetIOS.showActionSheetWithOptions(
+        {
+            title,
+            options: [t('common.cancel'), destructiveLabel],
+            cancelButtonIndex: 0,
+            destructiveButtonIndex: 1,
+            userInterfaceStyle: 'light',
+        },
+        (buttonIndex) => {
+            if (buttonIndex === 1) {
+                onSelectDelete();
+            }
+        },
+    );
+}
+
+function getCliSectionSummary(section: CliThreadToolSection): string {
+    if (section.projectCount === 0) {
+        return `No ${section.title} work yet`;
+    }
+
+    return section.projectCount === 1 ? '1 project' : `${section.projectCount} projects`;
+}
+
+function getCliSectionScopedSummary(
+    section: CliThreadToolSection,
+    scope: CliThreadScope,
+): string {
+    if (section.projectCount === 0) {
+        return `No ${section.title} work yet`;
+    }
+
+    if (scope === 'current-project') {
+        return 'Current project';
+    }
+
+    return getCliSectionSummary(section);
+}
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -38,521 +92,614 @@ const stylesheet = StyleSheet.create((theme) => ({
         flex: 1,
         maxWidth: layout.maxWidth,
     },
-    headerSection: {
-        backgroundColor: theme.colors.groupped.background,
-        paddingHorizontal: 24,
-        paddingTop: 20,
-        paddingBottom: 8,
+    headerBlock: {
+        paddingHorizontal: 18,
+        paddingTop: 18,
+        paddingBottom: 10,
+        gap: 14,
     },
-    headerText: {
+    pager: {
+        flex: 1,
+    },
+    pageContainer: {
+        flex: 1,
+    },
+    pageContent: {
+        flexGrow: 1,
+        paddingBottom: 128,
+    },
+    summaryRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        paddingHorizontal: 2,
+    },
+    summaryTitle: {
         fontSize: 14,
-        fontWeight: '600',
         color: theme.colors.groupped.sectionTitle,
-        letterSpacing: 0.1,
+        textTransform: 'uppercase',
+        letterSpacing: 0.3,
         ...Typography.default('semiBold'),
     },
-    projectGroup: {
-        paddingHorizontal: 16,
-        paddingVertical: 10,
-        backgroundColor: theme.colors.surface,
+    summaryMeta: {
+        fontSize: 14,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
     },
-    projectGroupTitle: {
-        fontSize: 13,
-        fontWeight: '600',
+    summaryButton: {
+        paddingVertical: 6,
+        paddingHorizontal: 4,
+    },
+    summaryButtonText: {
+        fontSize: 14,
         color: theme.colors.text,
         ...Typography.default('semiBold'),
     },
-    projectGroupSubtitle: {
-        fontSize: 11,
-        color: theme.colors.textSecondary,
-        marginTop: 2,
-        ...Typography.default(),
-    },
-    sessionItem: {
-        height: 88,
+    pageDots: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: 16,
-        backgroundColor: theme.colors.surface,
+        gap: 6,
     },
-    sessionItemContainer: {
+    scopeRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+    scopeChip: {
+        minHeight: 36,
+        borderRadius: 999,
+        paddingHorizontal: 14,
+        paddingVertical: 8,
+        backgroundColor: theme.colors.surface,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    scopeChipActive: {
+        backgroundColor: theme.colors.text,
+    },
+    scopeChipText: {
+        fontSize: 14,
+        color: theme.colors.textSecondary,
+        ...Typography.default('semiBold'),
+    },
+    scopeChipTextActive: {
+        color: theme.colors.groupped.background,
+    },
+    pageDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 999,
+        backgroundColor: theme.colors.surfaceHigh,
+    },
+    pageDotActive: {
+        width: 22,
+        backgroundColor: theme.colors.text,
+    },
+    projectCard: {
         marginHorizontal: 16,
-        marginBottom: 1,
+        marginBottom: 12,
+        borderRadius: 18,
+        backgroundColor: theme.colors.surface,
         overflow: 'hidden',
     },
-    sessionItemFirst: {
-        borderTopLeftRadius: 12,
-        borderTopRightRadius: 12,
-    },
-    sessionItemLast: {
-        borderBottomLeftRadius: 12,
-        borderBottomRightRadius: 12,
-    },
-    sessionItemSingle: {
-        borderRadius: 12,
-    },
-    sessionItemContainerFirst: {
-        borderTopLeftRadius: 12,
-        borderTopRightRadius: 12,
-    },
-    sessionItemContainerLast: {
-        borderBottomLeftRadius: 12,
-        borderBottomRightRadius: 12,
-        marginBottom: 12,
-    },
-    sessionItemContainerSingle: {
-        borderRadius: 12,
-        marginBottom: 12,
-    },
-    sessionItemSelected: {
-        backgroundColor: theme.colors.surfaceSelected,
-    },
-    sessionContent: {
-        flex: 1,
-        marginLeft: 16,
-        justifyContent: 'center',
-    },
-    sessionTitleRow: {
+    projectHeaderRow: {
+        minHeight: 60,
         flexDirection: 'row',
         alignItems: 'center',
-        marginBottom: 2,
+        justifyContent: 'space-between',
+        gap: 12,
+        paddingHorizontal: 18,
+        paddingVertical: 16,
     },
-    sessionTitle: {
-        fontSize: 15,
-        fontWeight: '500',
+    projectContent: {
         flex: 1,
+        minWidth: 0,
+    },
+    projectTitle: {
+        fontSize: 18,
+        color: theme.colors.text,
         ...Typography.default('semiBold'),
     },
-    sessionTitleConnected: {
-        color: theme.colors.text,
-    },
-    sessionTitleDisconnected: {
+    projectChevron: {
         color: theme.colors.textSecondary,
     },
-    sessionSubtitle: {
-        fontSize: 13,
-        color: theme.colors.textSecondary,
-        marginBottom: 4,
-        ...Typography.default(),
+    expandedThreads: {
+        borderTopWidth: 1,
+        borderTopColor: theme.colors.surfaceHigh,
+        paddingHorizontal: 14,
+        paddingTop: 10,
+        paddingBottom: 12,
+        gap: 8,
     },
-    statusRow: {
+    threadRow: {
+        minHeight: 52,
+        borderRadius: 12,
+        paddingHorizontal: 14,
+        paddingVertical: 12,
+        backgroundColor: theme.colors.groupped.background,
         flexDirection: 'row',
         alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
     },
-    statusDotContainer: {
-        alignItems: 'center',
-        justifyContent: 'center',
-        height: 16,
-        marginTop: 2,
-        marginRight: 4,
+    threadRowContent: {
+        flex: 1,
+        minWidth: 0,
     },
-    statusText: {
-        fontSize: 12,
-        fontWeight: '500',
-        lineHeight: 16,
+    threadRowTitle: {
+        fontSize: 16,
+        color: theme.colors.text,
         ...Typography.default(),
     },
-    avatarContainer: {
-        position: 'relative',
-        width: 48,
-        height: 48,
-    },
-    draftIconContainer: {
-        position: 'absolute',
-        bottom: -2,
-        right: -2,
-        width: 18,
-        height: 18,
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
-    draftIconOverlay: {
+    threadRowMeta: {
+        fontSize: 13,
         color: theme.colors.textSecondary,
+        ...Typography.default(),
     },
-    artifactsSection: {
-        paddingHorizontal: 16,
-        paddingBottom: 12,
+    openingBadge: {
+        marginTop: 6,
+        alignSelf: 'flex-start',
+        borderRadius: 999,
+        paddingHorizontal: 7,
+        paddingVertical: 2,
         backgroundColor: theme.colors.groupped.background,
+    },
+    openingBadgeText: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        ...Typography.default('semiBold'),
+    },
+    emptyState: {
+        marginHorizontal: 16,
+        marginTop: 8,
+        borderRadius: 18,
+        backgroundColor: theme.colors.surface,
+        paddingHorizontal: 20,
+        paddingVertical: 20,
+    },
+    emptyStateTitle: {
+        fontSize: 17,
+        color: theme.colors.text,
+        ...Typography.default('semiBold'),
+    },
+    emptyStateSubtitle: {
+        marginTop: 6,
+        fontSize: 15,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+    },
+    openingSpinner: {
+        color: theme.colors.textSecondary,
     },
 }));
 
-export function SessionsList() {
+interface SessionsListProps {
+    data: SessionListViewItem[];
+}
+
+export function SessionsList({ data }: SessionsListProps) {
     const styles = stylesheet;
     const safeArea = useSafeAreaInsets();
-    const data = useVisibleSessionListViewData();
-    const pathname = usePathname();
-    const isTablet = useIsTablet();
-    const compactSessionView = useSetting('compactSessionView');
-    const selectable = isTablet;
-    const dataWithSelected = selectable ? React.useMemo(() => {
-        return data?.map(item => ({
-            ...item,
-            selected: item.type === 'session'
-                ? pathname.startsWith(`/session/${item.session.id}`)
-                : false,
-        }));
-    }, [data, pathname]) : data;
+    const windowWidth = useWindowDimensions().width;
+    const [preferredCliToolTab, setPreferredCliToolTab] = useLocalSettingMutable('preferredCliToolTab');
+    const [cliThreadScopeByTool, setCliThreadScopeByTool] = useLocalSettingMutable('cliThreadScopeByTool');
+    const [expandedTools, setExpandedTools] = React.useState<Record<NativeCliTool, boolean>>({
+        claude: false,
+        codex: false,
+        gemini: false,
+    });
+    const [expandedProjects, setExpandedProjects] = React.useState<Record<string, boolean>>({});
+    const pagerRef = React.useRef<FlatList<CliThreadToolSection>>(null);
+    const lastSyncedToolRef = React.useRef<NativeCliTool | null>(null);
+    const [pageWidth, setPageWidth] = React.useState(windowWidth);
 
-    // Request review
+    const threadSourceItems = React.useMemo(
+        () => data.filter((item): item is Extract<SessionListViewItem, { type: 'session' | 'native-cli-session' }> =>
+            item.type === 'session' || item.type === 'native-cli-session',
+        ),
+        [data],
+    );
+    const sections = React.useMemo(() => buildCliThreadToolSections(threadSourceItems), [threadSourceItems]);
+    const selectedTool = React.useMemo(
+        () => pickPreferredCliThreadTool(sections, preferredCliToolTab),
+        [preferredCliToolTab, sections],
+    );
+    const selectedToolIndex = React.useMemo(
+        () => Math.max(0, sections.findIndex((section) => section.tool === selectedTool)),
+        [sections, selectedTool],
+    );
+
     React.useEffect(() => {
-        if (data && data.length > 0) {
+        if (data.length > 0) {
             requestReview();
         }
-    }, [data && data.length > 0]);
+    }, [data.length]);
 
-    // Early return if no data yet
-    if (!data) {
-        return (
-            <View style={styles.container} />
-        );
-    }
+    React.useEffect(() => {
+        lastSyncedToolRef.current = null;
+    }, [pageWidth]);
 
-    const keyExtractor = React.useCallback((item: SessionListViewItem & { selected?: boolean }, index: number) => {
-        switch (item.type) {
-            case 'header': return `header-${item.title}-${index}`;
-            case 'active-sessions': return 'active-sessions';
-            case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
-            case 'native-cli-project-group': return `native-cli-project-group-${item.tool}-${item.machine.id}-${item.title}-${index}`;
-            case 'session': return `session-${item.session.id}`;
-            case 'native-cli-session': return `native-cli-session-${item.entry.id}`;
+    React.useEffect(() => {
+        if (!sections[selectedToolIndex] || pageWidth <= 0) {
+            return;
         }
-    }, []);
 
-    const renderItem = React.useCallback(({ item, index }: { item: SessionListViewItem & { selected?: boolean }, index: number }) => {
-        switch (item.type) {
-            case 'header':
-                return (
-                    <View style={styles.headerSection}>
-                        <Text style={styles.headerText}>
-                            {item.title}
-                        </Text>
-                    </View>
-                );
-
-            case 'active-sessions':
-                // Extract just the session ID from pathname (e.g., /session/abc123/file -> abc123)
-                let selectedId: string | undefined;
-                if (isTablet && pathname.startsWith('/session/')) {
-                    const parts = pathname.split('/');
-                    selectedId = parts[2]; // parts[0] is empty, parts[1] is 'session', parts[2] is the ID
-                }
-
-                const ActiveComponent = compactSessionView ? ActiveSessionsGroupCompact : ActiveSessionsGroup;
-                return (
-                    <ActiveComponent
-                        sessions={item.sessions}
-                        selectedSessionId={selectedId}
-                    />
-                );
-
-            case 'project-group':
-                return (
-                    <View style={styles.projectGroup}>
-                        <Text style={styles.projectGroupTitle}>
-                            {item.displayPath}
-                        </Text>
-                        <Text style={styles.projectGroupSubtitle}>
-                            {item.machine.metadata?.displayName || item.machine.metadata?.host || item.machine.id}
-                        </Text>
-                    </View>
-                );
-
-            case 'native-cli-project-group':
-                return (
-                    <View style={styles.projectGroup}>
-                        <Text style={styles.projectGroupTitle}>
-                            {item.title}
-                        </Text>
-                        <Text style={styles.projectGroupSubtitle}>
-                            {item.subtitle}
-                        </Text>
-                    </View>
-                );
-
-            case 'session':
-                // Determine card styling based on position within date group
-                const prevItem = index > 0 && dataWithSelected ? dataWithSelected[index - 1] : null;
-                const nextItem = index < (dataWithSelected?.length || 0) - 1 && dataWithSelected ? dataWithSelected[index + 1] : null;
-
-                const isFirst = prevItem?.type === 'header';
-                const isLast = nextItem?.type !== 'session';
-                const isSingle = isFirst && isLast;
-
-                return (
-                    <SessionItem
-                        session={item.session}
-                        selected={item.selected}
-                        isFirst={isFirst}
-                        isLast={isLast}
-                        isSingle={isSingle}
-                    />
-                );
-
-            case 'native-cli-session': {
-                const prevItem = index > 0 && dataWithSelected ? dataWithSelected[index - 1] : null;
-                const nextItem = index < (dataWithSelected?.length || 0) - 1 && dataWithSelected ? dataWithSelected[index + 1] : null;
-                const isFirst = prevItem?.type === 'header' || prevItem?.type === 'native-cli-project-group';
-                const isLast = nextItem?.type !== 'native-cli-session';
-                const isSingle = isFirst && isLast;
-
-                return (
-                    <NativeCliHistoryItem
-                        entry={item.entry}
-                        isFirst={isFirst}
-                        isLast={isLast}
-                        isSingle={isSingle}
-                    />
-                );
-            }
+        if (lastSyncedToolRef.current === selectedTool) {
+            return;
         }
-    }, [pathname, dataWithSelected, compactSessionView]);
 
+        pagerRef.current?.scrollToIndex({
+            index: selectedToolIndex,
+            animated: false,
+        });
+        lastSyncedToolRef.current = selectedTool;
+    }, [pageWidth, sections, selectedTool, selectedToolIndex]);
 
-    // Remove this section as we'll use FlatList for all items now
+    const handlePagerMomentumEnd = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        if (pageWidth <= 0) {
+            return;
+        }
 
+        const nextIndex = Math.round(event.nativeEvent.contentOffset.x / pageWidth);
+        const nextTool = sections[nextIndex]?.tool;
+        if (!nextTool || nextTool === selectedTool) {
+            lastSyncedToolRef.current = selectedTool;
+            return;
+        }
 
-    const HeaderComponent = React.useCallback(() => {
+        lastSyncedToolRef.current = nextTool;
+        setPreferredCliToolTab(nextTool);
+    }, [pageWidth, sections, selectedTool, setPreferredCliToolTab]);
+
+    const setToolScope = React.useCallback((tool: NativeCliTool, scope: CliThreadScope) => {
+        setCliThreadScopeByTool({
+            ...cliThreadScopeByTool,
+            [tool]: scope,
+        });
+    }, [cliThreadScopeByTool, setCliThreadScopeByTool]);
+
+    const renderListHeader = React.useCallback((section: CliThreadToolSection) => {
+        const scope = cliThreadScopeByTool[section.tool] ?? 'current-project';
+        const scopedProjects = getCliThreadScopedProjects(section, scope);
+        const isExpanded = expandedTools[section.tool];
+        const canExpand = scope === 'all-projects' && scopedProjects.projects.length > DEFAULT_VISIBLE_PROJECTS;
+
         return (
-            <UpdateBanner />
+            <View style={styles.headerBlock}>
+                <View style={styles.summaryRow}>
+                    <View>
+                        <Text style={styles.summaryTitle}>
+                            {section.title}
+                        </Text>
+                        <Text style={styles.summaryMeta}>
+                            {getCliSectionScopedSummary(section, scope)}
+                        </Text>
+                    </View>
+                    <View style={styles.pageDots}>
+                        {CLI_THREAD_TOOL_ORDER.map((tool) => (
+                            <View
+                                key={tool}
+                                style={[
+                                    styles.pageDot,
+                                    tool === section.tool && styles.pageDotActive,
+                                ]}
+                            />
+                        ))}
+                    </View>
+                </View>
+                {section.projectCount > 0 && (
+                    <View style={styles.scopeRow}>
+                        {(['current-project', 'all-projects'] as const).map((option) => {
+                            const active = scope === option;
+                            const label = option === 'current-project' ? 'Current project' : 'All projects';
+                            return (
+                                <Pressable
+                                    key={option}
+                                    style={[
+                                        styles.scopeChip,
+                                        active && styles.scopeChipActive,
+                                    ]}
+                                    onPress={() => {
+                                        setToolScope(section.tool, option);
+                                    }}
+                                >
+                                    <Text
+                                        style={[
+                                            styles.scopeChipText,
+                                            active && styles.scopeChipTextActive,
+                                        ]}
+                                    >
+                                        {label}
+                                    </Text>
+                                </Pressable>
+                            );
+                        })}
+                    </View>
+                )}
+                {canExpand && (
+                    <Pressable
+                        style={styles.summaryButton}
+                        onPress={() => {
+                            setExpandedTools((current) => ({
+                                ...current,
+                                [section.tool]: !isExpanded,
+                            }));
+                        }}
+                    >
+                        <Text style={styles.summaryButtonText}>
+                            {isExpanded ? 'Show less' : 'Show more'}
+                        </Text>
+                    </Pressable>
+                )}
+            </View>
         );
-    }, []);
-
-    // Footer removed - all sessions now shown inline
+    }, [
+        expandedTools,
+        cliThreadScopeByTool,
+        setToolScope,
+        styles.headerBlock,
+        styles.pageDot,
+        styles.pageDotActive,
+        styles.pageDots,
+        styles.scopeChip,
+        styles.scopeChipActive,
+        styles.scopeChipText,
+        styles.scopeChipTextActive,
+        styles.scopeRow,
+        styles.summaryButton,
+        styles.summaryButtonText,
+        styles.summaryMeta,
+        styles.summaryRow,
+        styles.summaryTitle,
+        setExpandedTools,
+    ]);
 
     return (
         <View style={styles.container}>
-            <View style={styles.contentContainer}>
+            <View
+                style={styles.contentContainer}
+                onLayout={(event) => {
+                    const nextWidth = Math.round(event.nativeEvent.layout.width);
+                    if (nextWidth > 0 && nextWidth !== pageWidth) {
+                        setPageWidth(nextWidth);
+                    }
+                }}
+            >
+                <UpdateBanner />
                 <FlatList
-                    data={dataWithSelected}
-                    renderItem={renderItem}
-                    keyExtractor={keyExtractor}
-                    contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
-                    ListHeaderComponent={HeaderComponent}
-                    windowSize={5}
-                    maxToRenderPerBatch={8}
-                    initialNumToRender={12}
+                    ref={pagerRef}
+                    style={styles.pager}
+                    data={sections}
+                    horizontal
+                    pagingEnabled
+                    directionalLockEnabled
+                    showsHorizontalScrollIndicator={false}
+                    keyExtractor={(item) => item.tool}
+                    initialScrollIndex={selectedToolIndex}
+                    getItemLayout={(_, index) => ({
+                        length: pageWidth,
+                        offset: pageWidth * index,
+                        index,
+                    })}
+                    onMomentumScrollEnd={handlePagerMomentumEnd}
+                    renderItem={({ item: section }) => {
+                        const scope = cliThreadScopeByTool[section.tool] ?? 'current-project';
+                        const scopedProjects = getCliThreadScopedProjects(section, scope);
+                        const isExpanded = expandedTools[section.tool];
+                        const visibleProjects = isExpanded
+                            ? scopedProjects.projects
+                            : scopedProjects.projects.slice(0, DEFAULT_VISIBLE_PROJECTS);
+
+                        return (
+                            <View style={[styles.pageContainer, { width: pageWidth }]}>
+                                <FlatList
+                                    data={visibleProjects}
+                                    renderItem={({ item }) => (
+                                        <CliProjectCard
+                                            project={item}
+                                            expanded={expandedProjects[item.id] === true}
+                                            onToggleExpanded={() => {
+                                                setExpandedProjects((current) => ({
+                                                    ...current,
+                                                    [item.id]: !(current[item.id] === true),
+                                                }));
+                                            }}
+                                        />
+                                    )}
+                                    keyExtractor={(item) => item.id}
+                                    ListHeaderComponent={renderListHeader(section)}
+                                    ListEmptyComponent={<EmptyToolState tool={section.tool} />}
+                                    contentContainerStyle={[styles.pageContent, { paddingBottom: safeArea.bottom + 128 }]}
+                                    windowSize={5}
+                                    maxToRenderPerBatch={8}
+                                    initialNumToRender={12}
+                                />
+                            </View>
+                        );
+                    }}
                 />
             </View>
         </View>
     );
 }
 
-// Sub-component that handles session message logic
-const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }: {
-    session: Session;
-    selected?: boolean;
-    isFirst?: boolean;
-    isLast?: boolean;
-    isSingle?: boolean;
-}) => {
+const EmptyToolState = React.memo(({ tool }: { tool: NativeCliTool }) => {
     const styles = stylesheet;
-    const sessionStatus = useSessionStatus(session);
-    const sessionName = getSessionName(session);
-    const sessionSubtitle = getSessionSubtitle(session);
-    const navigateToSession = useNavigateToSession();
-    const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
-
-    const avatarId = React.useMemo(() => {
-        return getSessionAvatarId(session);
-    }, [session]);
-
-    const handlePress = React.useCallback(() => {
-        navigateToSession(session.id);
-    }, [navigateToSession, session.id]);
-
-    const handleContextMenu = React.useCallback((event: any) => {
-        event.preventDefault?.();
-        event.stopPropagation?.();
-        setActionsAnchor({
-            type: 'point',
-            x: event.nativeEvent.clientX ?? event.nativeEvent.pageX ?? 0,
-            y: event.nativeEvent.clientY ?? event.nativeEvent.pageY ?? 0,
-        });
-    }, []);
-
-    const webMenuProps = Platform.OS === 'web' ? {
-        onContextMenu: handleContextMenu,
-    } as any : {};
 
     return (
-        <View style={[
-            styles.sessionItemContainer,
-            isSingle ? styles.sessionItemContainerSingle :
-                isFirst ? styles.sessionItemContainerFirst :
-                    isLast ? styles.sessionItemContainerLast : {}
-        ]}>
-        <Pressable
-            style={[
-                styles.sessionItem,
-                selected && styles.sessionItemSelected,
-                isSingle ? styles.sessionItemSingle :
-                    isFirst ? styles.sessionItemFirst :
-                        isLast ? styles.sessionItemLast : {}
-            ]}
-            onPress={handlePress}
-            {...webMenuProps}
-        >
-            <View style={styles.avatarContainer}>
-                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
-                {session.draft && (
-                    <View style={styles.draftIconContainer}>
-                        <Ionicons
-                            name="create-outline"
-                            size={12}
-                            style={styles.draftIconOverlay}
-                        />
-                    </View>
-                )}
-            </View>
-            <View style={styles.sessionContent}>
-                {/* Title line */}
-                <View style={styles.sessionTitleRow}>
-                    <Text style={[
-                        styles.sessionTitle,
-                        sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
-                    ]} numberOfLines={1}> {/* {variant !== 'no-path' ? 1 : 2} - issue is we don't have anything to take this space yet and it looks strange - if summaries were more reliably generated, we can add this. While no summary - add something like "New session" or "Empty session", and extend summary to 2 lines once we have it */}
-                        {sessionName}
-                    </Text>
-                </View>
-
-                {/* Subtitle line */}
-                <Text style={styles.sessionSubtitle} numberOfLines={1}>
-                    {sessionSubtitle}
-                </Text>
-
-                {/* Status line with dot */}
-                <View style={styles.statusRow}>
-                    <View style={styles.statusDotContainer}>
-                        <StatusDot color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
-                    </View>
-                    <Text style={[
-                        styles.statusText,
-                        { color: sessionStatus.statusColor }
-                    ]}>
-                        {sessionStatus.statusText}
-                    </Text>
-                </View>
-            </View>
-        </Pressable>
-        {Platform.OS === 'web' && (
-            <SessionActionsPopover
-                anchor={actionsAnchor}
-                onClose={() => setActionsAnchor(null)}
-                session={session}
-                visible={!!actionsAnchor}
-            />
-        )}
+        <View style={styles.emptyState}>
+            <Text style={styles.emptyStateTitle}>
+                No {getCliSectionTitle(tool)} work yet
+            </Text>
+            <Text style={styles.emptyStateSubtitle}>
+                Start a {getCliSectionTitle(tool)} session on your computer, and it will show up here for quick continue.
+            </Text>
         </View>
     );
 });
 
-const NativeCliHistoryItem = React.memo(({ entry, isFirst, isLast, isSingle }: {
-    entry: NativeCliHistoryEntry;
-    isFirst?: boolean;
-    isLast?: boolean;
-    isSingle?: boolean;
+const CliProjectCard = React.memo(({
+    project,
+    expanded,
+    onToggleExpanded,
+}: {
+    project: CliThreadProjectGroup;
+    expanded: boolean;
+    onToggleExpanded: () => void;
 }) => {
     const styles = stylesheet;
-    const machine = useMachine(entry.machineId);
-    const navigateToSession = useNavigateToSession();
-
-    const subtitle = React.useMemo(() => {
-        const relativePath = formatPathRelativeToHome(entry.workingDirectory, machine?.metadata?.homeDir);
-        if (entry.summary && entry.summary !== entry.title) {
-            return entry.summary;
-        }
-        return relativePath;
-    }, [entry.summary, entry.title, entry.workingDirectory, machine?.metadata?.homeDir]);
-
-    const machineLabel = machine?.metadata?.displayName || machine?.metadata?.host || entry.machineId;
-
-    const [resuming, resumeHistorySession] = useOrbitAction(async () => {
-        const result = await machineResumeNativeCliHistory({
-            machineId: entry.machineId,
-            tool: entry.tool,
-            backendId: entry.backendId,
-            workingDirectory: entry.workingDirectory,
-            title: entry.title,
-            summary: entry.summary,
-        });
-
-        switch (result.type) {
-            case 'success': {
-                for (let attempt = 0; attempt < 40; attempt += 1) {
-                    await sync.refreshSessions();
-                    const session = storage.getState().sessions[result.sessionId];
-                    if (!session) {
-                        await new Promise((resolve) => setTimeout(resolve, 250));
-                        continue;
-                    }
-
-                    await sync.refreshSessionMessages(result.sessionId);
-
-                    const sessionMessages = storage.getState().sessionMessages[result.sessionId];
-                    const hasHistoryMessages = (sessionMessages?.messages.length ?? 0) > 0;
-                    if (hasHistoryMessages) {
-                        break;
-                    }
-
-                    await new Promise((resolve) => setTimeout(resolve, 250));
-                }
-                navigateToSession(result.sessionId);
-                return;
-            }
-            case 'requestToApproveDirectoryCreation':
-                throw new OrbitError('Resume cannot create a new directory. Start this session from its original path first.', false);
-            case 'error':
-                throw new OrbitError(result.errorMessage, false);
-        }
+    const longPressTriggeredRef = React.useRef(false);
+    const [deleting, deleteProject] = useOrbitAction(async () => {
+        await deleteCliProjectGroup(project);
     });
 
+    const requestDeleteProject = React.useCallback(() => {
+        longPressTriggeredRef.current = true;
+        showDeleteActionSheet(
+            t('sessionInfo.deleteProject'),
+            t('sessionInfo.deleteProject'),
+            () => {
+                void (async () => {
+                    const confirmed = await Modal.confirm(
+                        t('sessionInfo.deleteProject'),
+                        t('sessionInfo.deleteProjectWarning'),
+                        {
+                            cancelText: t('common.cancel'),
+                            confirmText: t('common.delete'),
+                            destructive: true,
+                        },
+                    );
+
+                    if (confirmed) {
+                        deleteProject();
+                    }
+                })();
+            },
+        );
+    }, [deleteProject]);
+
+    const handlePress = React.useCallback(() => {
+        if (longPressTriggeredRef.current) {
+            longPressTriggeredRef.current = false;
+            return;
+        }
+
+        if (deleting) {
+            return;
+        }
+
+        onToggleExpanded();
+    }, [deleting, onToggleExpanded]);
+
+    const projectTrigger = (
+        <Pressable
+            style={styles.projectHeaderRow}
+            onPress={handlePress}
+            onLongPress={requestDeleteProject}
+            delayLongPress={350}
+        >
+            <View style={styles.projectContent}>
+                <Text style={styles.projectTitle} numberOfLines={1}>
+                    {project.title}
+                </Text>
+            </View>
+            {deleting ? (
+                <ActivityIndicator size="small" color={styles.projectChevron.color as string} />
+            ) : (
+                <Ionicons
+                    name={expanded ? 'chevron-up' : 'chevron-down'}
+                    size={20}
+                    style={styles.projectChevron}
+                />
+            )}
+        </Pressable>
+    );
+
     return (
-        <View style={[
-            styles.sessionItemContainer,
-            isSingle ? styles.sessionItemContainerSingle :
-                isFirst ? styles.sessionItemContainerFirst :
-                    isLast ? styles.sessionItemContainerLast : {}
-        ]}>
-            <Pressable
-                style={[
-                    styles.sessionItem,
-                    isSingle ? styles.sessionItemSingle :
-                        isFirst ? styles.sessionItemFirst :
-                            isLast ? styles.sessionItemLast : {}
-                ]}
-                onPress={resumeHistorySession}
-            >
-                <View style={styles.avatarContainer}>
-                    <Avatar id={`${entry.machineId}:${entry.id}`} size={48} flavor={entry.tool} />
-                    {resuming && (
-                        <View style={styles.draftIconContainer}>
-                            <Ionicons
-                                name="refresh-outline"
-                                size={12}
-                                style={styles.draftIconOverlay}
-                            />
-                        </View>
-                    )}
+        <View style={styles.projectCard}>
+            {projectTrigger}
+            {expanded && (
+                <View style={styles.expandedThreads}>
+                    {project.items.map((item) => (
+                        <CliProjectThreadRow key={item.id} item={item} />
+                    ))}
                 </View>
-                <View style={styles.sessionContent}>
-                    <View style={styles.sessionTitleRow}>
-                        <Text style={[styles.sessionTitle, styles.sessionTitleConnected]} numberOfLines={1}>
-                            {entry.title}
-                        </Text>
-                    </View>
-                    <Text style={styles.sessionSubtitle} numberOfLines={1}>
-                        {subtitle}
-                    </Text>
-                    <View style={styles.statusRow}>
-                        <View style={styles.statusDotContainer}>
-                            <StatusDot color="#34C759" />
-                        </View>
-                        <Text style={[styles.statusText, { color: '#34C759' }]}>
-                            {`${entry.tool === 'claude' ? 'Claude' : entry.tool === 'codex' ? 'Codex' : 'Gemini'} · Continue on ${machineLabel}`}
-                        </Text>
-                    </View>
-                </View>
-            </Pressable>
+            )}
         </View>
     );
+});
+
+const CliProjectThreadRow = React.memo(({ item }: { item: CliThreadListItem }) => {
+    const styles = stylesheet;
+    const navigateToSession = useNavigateToSession();
+    const navigateDirectlyToSession = useNavigateDirectlyToSession();
+    const longPressTriggeredRef = React.useRef(false);
+    const [opening, openThread] = useOrbitAction(async () => {
+        await openCliThreadItem(item, {
+            navigateToSession,
+            navigateDirectlyToSession,
+        });
+    });
+    const [deleting, deleteThread] = useOrbitAction(async () => {
+        await deleteCliThreadItem(item);
+    });
+
+    const requestDeleteThread = React.useCallback(() => {
+        longPressTriggeredRef.current = true;
+        showDeleteActionSheet(
+            t('sessionInfo.deleteSession'),
+            t('sessionInfo.deleteSession'),
+            () => {
+                void (async () => {
+                    const confirmed = await Modal.confirm(
+                        t('sessionInfo.deleteSession'),
+                        t('sessionInfo.deleteSessionWarning'),
+                        {
+                            cancelText: t('common.cancel'),
+                            confirmText: t('common.delete'),
+                            destructive: true,
+                        },
+                    );
+
+                    if (confirmed) {
+                        deleteThread();
+                    }
+                })();
+            },
+        );
+    }, [deleteThread]);
+
+    const handlePress = React.useCallback(() => {
+        if (longPressTriggeredRef.current) {
+            longPressTriggeredRef.current = false;
+            return;
+        }
+
+        if (opening || deleting) {
+            return;
+        }
+
+        openThread();
+    }, [deleting, openThread, opening]);
+
+    const threadTrigger = (
+        <Pressable
+            style={styles.threadRow}
+            onPress={handlePress}
+            onLongPress={requestDeleteThread}
+            delayLongPress={350}
+        >
+            <View style={styles.threadRowContent}>
+                <Text style={styles.threadRowTitle} numberOfLines={1}>
+                    {item.title}
+                </Text>
+            </View>
+            <Text style={styles.threadRowMeta}>
+                {deleting ? `${t('common.delete')}...` : opening ? 'Connecting...' : formatCliThreadUpdatedAt(item.updatedAt)}
+            </Text>
+        </Pressable>
+    );
+
+    return threadTrigger;
 });

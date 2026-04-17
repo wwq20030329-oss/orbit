@@ -9,6 +9,7 @@ export interface AppConfig {
     elevenLabsAgentId?: string;
     consoleLoggingDefault?: boolean;
     serverUrl?: string;
+    urlScheme?: string;
 }
 
 /**

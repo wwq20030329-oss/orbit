@@ -1,6 +1,6 @@
 import type { Machine } from '@/sync/storageTypes';
+import { isMachinePresenceOnline } from './presence';
 
 export function isMachineOnline(machine: Machine): boolean {
-    // Use the active flag directly, no timeout checks
-    return machine.active;
+    return isMachinePresenceOnline(machine);
 }

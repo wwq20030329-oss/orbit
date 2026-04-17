@@ -9,7 +9,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { layout } from '@/components/layout';
-import { useNavigateToSession } from '@/hooks/useNavigateToSession';
+import { useOpenSession } from '@/hooks/useOpenSession';
 import { Pressable } from 'react-native';
 import { t } from '@/text';
 
@@ -163,7 +163,6 @@ function groupSessionsByDate(sessions: Session[]): SessionHistoryItem[] {
 export default function SessionHistory() {
     const safeArea = useSafeAreaInsets();
     const allSessions = useAllSessions();
-    const navigateToSession = useNavigateToSession();
     
     const groupedItems = React.useMemo(() => {
         return groupSessionsByDate(allSessions);
@@ -195,30 +194,20 @@ export default function SessionHistory() {
             const isSingle = isFirst && isLast;
             
             return (
-                <Pressable
-                    style={[
-                        styles.sessionCard,
-                        isSingle ? styles.sessionCardSingle : 
-                        isFirst ? styles.sessionCardFirst :
-                        isLast ? styles.sessionCardLast : {}
-                    ]}
-                    onPress={() => navigateToSession(session.id)}
-                >
-                    <Avatar id={avatarId} size={48} />
-                    <View style={styles.sessionContent}>
-                        <Text style={styles.sessionTitle} numberOfLines={1}>
-                            {sessionName}
-                        </Text>
-                        <Text style={styles.sessionSubtitle} numberOfLines={1}>
-                            {sessionSubtitle}
-                        </Text>
-                    </View>
-                </Pressable>
+                <SessionHistoryRow
+                    avatarId={avatarId}
+                    isFirst={isFirst}
+                    isLast={isLast}
+                    isSingle={isSingle}
+                    session={session}
+                    sessionName={sessionName}
+                    sessionSubtitle={sessionSubtitle}
+                />
             );
         }
         
         return null;
-    }, [groupedItems, navigateToSession]);
+    }, [groupedItems]);
     
     const keyExtractor = React.useCallback((item: SessionHistoryItem, index: number) => {
         if (item.type === 'date-header') {
@@ -266,5 +255,48 @@ export default function SessionHistory() {
                 />
             </View>
         </View>
+    );
+}
+
+function SessionHistoryRow({
+    session,
+    sessionName,
+    sessionSubtitle,
+    avatarId,
+    isFirst,
+    isLast,
+    isSingle,
+}: {
+    session: Session;
+    sessionName: string;
+    sessionSubtitle: string;
+    avatarId: string;
+    isFirst: boolean;
+    isLast: boolean;
+    isSingle: boolean;
+}) {
+    const { opening, openSession } = useOpenSession(session);
+
+    return (
+        <Pressable
+            style={[
+                styles.sessionCard,
+                isSingle ? styles.sessionCardSingle :
+                    isFirst ? styles.sessionCardFirst :
+                    isLast ? styles.sessionCardLast : {}
+            ]}
+            onPress={openSession}
+        >
+            <Avatar id={avatarId} size={48} />
+            <View style={styles.sessionContent}>
+                <Text style={styles.sessionTitle} numberOfLines={1}>
+                    {sessionName}
+                    {opening ? '…' : ''}
+                </Text>
+                <Text style={styles.sessionSubtitle} numberOfLines={1}>
+                    {sessionSubtitle}
+                </Text>
+            </View>
+        </Pressable>
     );
 }

@@ -1,108 +1,88 @@
 import * as React from 'react';
-import { SessionListViewItem, storage, useAllMachines, useNativeCliHistoryByMachine, useSessionListViewData, useSetting } from '@/sync/storage';
-import { machineListNativeCliHistory } from '@/sync/ops';
+import { SessionListViewItem, storage, useAllMachines, useCliSessionsForList, useLocalSetting, useNativeCliHistoryByMachine } from '@/sync/storage';
+import type { Machine } from '@/sync/storageTypes';
+import { ensureNativeCliHistoryLoadedForMachines } from '@/utils/nativeCliHistoryRefresh';
+import { getNativeCliEntrySourceKeyForSession } from '@/utils/nativeCliHistory';
 import { isMachineOnline } from '@/utils/machineUtils';
-import { appendNativeCliHistoryToSessionList } from '@/utils/nativeCliHistory';
 
-const nativeCliHistoryInFlight = new Set<string>();
-const nativeCliHistoryLastFetchedAt = new Map<string, number>();
-const NATIVE_CLI_HISTORY_REFRESH_MS = 30_000;
+function getPreferredVisibleMachineIds(
+    machines: Machine[],
+): Set<string> {
+    const activeMachineIds = machines
+        .filter((machine) => isMachineOnline(machine))
+        .map((machine) => machine.id);
+
+    if (activeMachineIds.length > 0) {
+        return new Set(activeMachineIds);
+    }
+
+    return new Set(machines.map((machine) => machine.id));
+}
 
 export function useVisibleSessionListViewData(): SessionListViewItem[] | null {
-    const data = useSessionListViewData();
-    const hideInactiveSessions = useSetting('hideInactiveSessions');
+    const isDataReady = storage((state) => state.isDataReady);
+    const sessions = useCliSessionsForList();
+    const hiddenNativeCliEntries = useLocalSetting('hiddenNativeCliEntries');
     const machines = useAllMachines({ includeOffline: true });
     const nativeCliHistoryByMachine = useNativeCliHistoryByMachine();
+    const deferredSessions = React.useDeferredValue(sessions);
+    const deferredMachines = React.useDeferredValue(machines);
+    const deferredNativeCliHistoryByMachine = React.useDeferredValue(nativeCliHistoryByMachine);
 
     React.useEffect(() => {
-        const onlineMachines = machines.filter((machine) => isMachineOnline(machine));
-
-        for (const machine of onlineMachines) {
-            if (!machine.metadata?.cliAvailability) {
-                continue;
-            }
-
-            const hasSupportedCli = machine.metadata.cliAvailability.claude
-                || machine.metadata.cliAvailability.codex
-                || machine.metadata.cliAvailability.gemini;
-            if (!hasSupportedCli) {
-                continue;
-            }
-
-            const lastFetchedAt = nativeCliHistoryLastFetchedAt.get(machine.id) ?? 0;
-            const isFresh = Date.now() - lastFetchedAt < NATIVE_CLI_HISTORY_REFRESH_MS;
-            if (isFresh || nativeCliHistoryInFlight.has(machine.id)) {
-                continue;
-            }
-
-            nativeCliHistoryInFlight.add(machine.id);
-            void machineListNativeCliHistory(machine.id)
-                .then((entries) => {
-                    nativeCliHistoryLastFetchedAt.set(machine.id, Date.now());
-                    storage.getState().applyNativeCliHistory(machine.id, entries.map((entry) => ({
-                        ...entry,
-                        machineId: machine.id,
-                    })));
-                })
-                .catch(() => {
-                    nativeCliHistoryLastFetchedAt.set(machine.id, Date.now());
-                })
-                .finally(() => {
-                    nativeCliHistoryInFlight.delete(machine.id);
-                });
-        }
+        void ensureNativeCliHistoryLoadedForMachines(machines);
     }, [machines]);
 
     return React.useMemo(() => {
-        if (!data) {
-            return data;
+        if (!isDataReady) {
+            return null;
         }
 
-        const baseItems = hideInactiveSessions ? filterInactiveSessions(data) : data;
-        const onlineMachineIds = new Set(
-            machines.filter((machine) => isMachineOnline(machine)).map((machine) => machine.id),
-        );
-
-        const nativeEntries = Object.entries(nativeCliHistoryByMachine)
-            .filter(([machineId]) => onlineMachineIds.has(machineId))
+        const knownMachineIds = getPreferredVisibleMachineIds(deferredMachines);
+        const allNativeEntries = Object.entries(deferredNativeCliHistoryByMachine)
+            .filter(([machineId]) => knownMachineIds.has(machineId))
             .flatMap(([, entries]) => entries)
             .sort((left, right) => right.updatedAt - left.updatedAt);
 
-        const machinesById = Object.fromEntries(
-            machines.map((machine) => [machine.id, machine]),
-        );
+        const visibleNativeEntries = allNativeEntries;
 
-        return appendNativeCliHistoryToSessionList(baseItems, nativeEntries, machinesById);
-    }, [data, hideInactiveSessions, machines, nativeCliHistoryByMachine]);
-}
-
-function filterInactiveSessions(data: SessionListViewItem[]): SessionListViewItem[] {
-    const filtered: SessionListViewItem[] = [];
-    let pendingProjectGroup: SessionListViewItem | null = null;
-
-    for (const item of data) {
-        if (item.type === 'project-group') {
-            pendingProjectGroup = item;
-            continue;
-        }
-
-        if (item.type === 'session') {
-            if (item.session.active) {
-                if (pendingProjectGroup) {
-                    filtered.push(pendingProjectGroup);
-                    pendingProjectGroup = null;
-                }
-                filtered.push(item);
+        const hiddenEntryKeys = new Set(Object.keys(hiddenNativeCliEntries));
+        const visibleSessions = deferredSessions.filter((session) => {
+            const sessionMachineId = session.metadata?.machineId;
+            if (sessionMachineId && !knownMachineIds.has(sessionMachineId)) {
+                return false;
             }
-            continue;
-        }
 
-        pendingProjectGroup = null;
+            const sourceKey = getNativeCliEntrySourceKeyForSession(session);
+            return !sourceKey || !hiddenEntryKeys.has(sourceKey);
+        });
 
-        if (item.type === 'active-sessions') {
-            filtered.push(item);
-        }
-    }
+        const visibleItems: Array<
+            Extract<SessionListViewItem, { type: 'native-cli-session' }>
+            | Extract<SessionListViewItem, { type: 'session' }>
+        > = [
+            ...visibleNativeEntries.map((entry) => ({
+                type: 'native-cli-session' as const,
+                entry,
+            })),
+            ...visibleSessions.map((session) => ({
+                type: 'session' as const,
+                session,
+            })),
+        ];
 
-    return filtered;
+        visibleItems.sort((left, right) => {
+            const leftUpdatedAt = left.type === 'session' ? left.session.updatedAt : left.entry.updatedAt;
+            const rightUpdatedAt = right.type === 'session' ? right.session.updatedAt : right.entry.updatedAt;
+            return rightUpdatedAt - leftUpdatedAt;
+        });
+
+        return visibleItems;
+    }, [
+        deferredMachines,
+        deferredNativeCliHistoryByMachine,
+        deferredSessions,
+        hiddenNativeCliEntries,
+        isDataReady,
+    ]);
 }

@@ -13,6 +13,14 @@ import { parseCurrentBranch } from './git-parsers/parseBranch';
 import { parseNumStat, mergeDiffSummaries } from './git-parsers/parseDiff';
 import { projectManager, createProjectKey } from './projectManager';
 
+function isExpectedGitStatusRpcFailure(message: string | null | undefined): boolean {
+    const normalized = (message ?? '').trim().toLowerCase();
+    return normalized.includes('rpc call failed')
+        || normalized.includes('session encryption not found')
+        || normalized.includes('failed to decrypt')
+        || normalized.includes('rpc method not available');
+}
+
 export class GitStatusSync {
     // Map project keys to sync instances
     private projectSyncMap = new Map<string, InvalidateSync>();
@@ -137,7 +145,12 @@ export class GitStatusSync {
             });
 
             if (!statusResult.success) {
-                console.error('Failed to get git status:', statusResult.error);
+                const errorMessage = statusResult.error ?? statusResult.stderr ?? 'Unknown error';
+                if (isExpectedGitStatusRpcFailure(errorMessage)) {
+                    console.warn('Skipping git status refresh for non-interactive session:', errorMessage);
+                } else {
+                    console.warn('Failed to get git status:', errorMessage);
+                }
                 return;
             }
 
@@ -172,7 +185,7 @@ export class GitStatusSync {
             }
 
         } catch (error) {
-            console.error('Error fetching git status for session', sessionId, ':', error);
+            console.warn('Error fetching git status for session', sessionId, ':', error);
             // Don't apply error state, just skip this update
         }
     }

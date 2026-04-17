@@ -8,21 +8,39 @@ import { decodeBase64 } from '@/encryption/base64';
 import { useCheckScannerPermissions } from '@/hooks/useCheckCameraPermissions';
 import { Modal } from '@/modal';
 import { t } from '@/text';
+import { storage } from '@/sync/storage';
 import { sync, syncCreate } from '@/sync/sync';
+import { getTerminalAuthPrefixes } from '@/utils/appUrlScheme';
 
 interface UseConnectTerminalOptions {
     onSuccess?: () => void;
     onError?: (error: any) => void;
 }
 
+async function refreshMachinesWithRetry(maxAttempts: number = 5): Promise<void> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        await sync.refreshMachines();
+
+        const hasActiveMachine = Object.values(storage.getState().machines).some((machine) => machine?.active);
+        if (hasActiveMachine) {
+            return;
+        }
+
+        if (attempt < maxAttempts) {
+            await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+        }
+    }
+}
+
 export function useConnectTerminal(options?: UseConnectTerminalOptions) {
     const auth = useAuth();
     const [isLoading, setIsLoading] = React.useState(false);
     const checkScannerPermissions = useCheckScannerPermissions();
-    const authPrefix = 'orbit://terminal?';
+    const authPrefixes = getTerminalAuthPrefixes();
 
     const processAuthUrl = React.useCallback(async (url: string) => {
-        if (!url.startsWith(authPrefix)) {
+        const matchingPrefix = authPrefixes.find((prefix) => url.startsWith(prefix));
+        if (!matchingPrefix) {
             Modal.alert(t('common.error'), t('modals.invalidAuthUrl'), [{ text: t('common.ok') }]);
             return false;
         }
@@ -34,7 +52,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
         
         setIsLoading(true);
         try {
-            const tail = url.slice(authPrefix.length);
+            const tail = url.slice(matchingPrefix.length);
             const publicKey = decodeBase64(tail, 'base64url');
             void syncCreate(auth.credentials).catch((error) => {
                 console.warn('Sync initialization failed while connecting terminal; continuing with local key derivation.', error);
@@ -46,7 +64,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
                 sync.encryption?.contentDataKey,
             );
             await authApprove(auth.credentials.token, publicKey, responseV1, responseV2);
-            await sync.refreshMachines();
+            await refreshMachinesWithRetry();
             
             Modal.alert(t('common.success'), t('modals.terminalConnectedSuccessfully'), [
                 { 
@@ -57,13 +75,16 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
             return true;
         } catch (e) {
             console.error('Failed to connect terminal:', e);
-            Modal.alert(t('common.error'), t('modals.failedToConnectTerminal'), [{ text: t('common.ok') }]);
+            const errorMessage = e instanceof Error && e.message
+                ? `${t('modals.failedToConnectTerminal')}\n${e.message}`
+                : t('modals.failedToConnectTerminal');
+            Modal.alert(t('common.error'), errorMessage, [{ text: t('common.ok') }]);
             options?.onError?.(e);
             return false;
         } finally {
             setIsLoading(false);
         }
-    }, [auth.credentials, options]);
+    }, [auth.credentials, authPrefixes, options]);
 
     const connectTerminal = React.useCallback(async () => {
         if (await checkScannerPermissions()) {
@@ -84,7 +105,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
     React.useEffect(() => {
         if (CameraView.isModernBarcodeScannerAvailable) {
             const subscription = CameraView.onModernBarcodeScanned(async (event) => {
-                if (event.data.startsWith(authPrefix)) {
+                if (authPrefixes.some((prefix) => event.data.startsWith(prefix))) {
                     // Dismiss scanner on Android is called automatically when barcode is scanned
                     if (Platform.OS === 'ios') {
                         await CameraView.dismissScanner();
@@ -96,7 +117,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
                 subscription.remove();
             };
         }
-    }, [processAuthUrl, authPrefix]);
+    }, [processAuthUrl, authPrefixes]);
 
     return {
         connectTerminal,

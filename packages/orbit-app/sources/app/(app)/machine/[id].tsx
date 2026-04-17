@@ -19,6 +19,7 @@ import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { machineSpawnNewSession } from '@/sync/ops';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { MultiTextInput, type MultiTextInputHandle } from '@/components/MultiTextInput';
+import { useOpenSession } from '@/hooks/useOpenSession';
 
 const styles = StyleSheet.create((theme) => ({
     pathInputContainer: {
@@ -538,12 +539,9 @@ export default function MachineDetailScreen() {
                 {previousSessions.length > 0 && (
                     <ItemGroup title={'Previous Sessions (up to 5 most recent)'}>
                         {previousSessions.map(session => (
-                            <Item
+                            <PreviousSessionItem
                                 key={session.id}
-                                title={getSessionName(session)}
-                                subtitle={getSessionSubtitle(session)}
-                                onPress={() => navigateToSession(session.id)}
-                                rightElement={<Ionicons name="chevron-forward" size={20} color="#C7C7CC" />}
+                                session={session}
                             />
                         ))}
                     </ItemGroup>
@@ -596,5 +594,18 @@ export default function MachineDetailScreen() {
                 </ItemGroup>
             </ItemList>
         </>
+    );
+}
+
+function PreviousSessionItem({ session }: { session: Session }) {
+    const { opening, openSession } = useOpenSession(session);
+
+    return (
+        <Item
+            title={opening ? `${getSessionName(session)}…` : getSessionName(session)}
+            subtitle={getSessionSubtitle(session)}
+            onPress={openSession}
+            rightElement={<Ionicons name="chevron-forward" size={20} color="#C7C7CC" />}
+        />
     );
 }

@@ -1,4 +1,5 @@
 import { AuthCredentials } from '@/auth/tokenStorage';
+import { handleUnauthorizedResponse } from '@/auth/authRecovery';
 import { backoff } from '@/utils/time';
 import { getServerUrl } from './serverConfig';
 import {
@@ -30,6 +31,10 @@ export async function searchUsersByUsername(
                 }
             }
         );
+
+        if (await handleUnauthorizedResponse(response, '/v1/user/search')) {
+            throw new Error('Unauthorized');
+        }
 
         if (!response.ok) {
             if (response.status === 404) {
@@ -68,6 +73,10 @@ export async function getUserProfile(
                 }
             }
         );
+
+        if (await handleUnauthorizedResponse(response, `/v1/user/${userId}`)) {
+            throw new Error('Unauthorized');
+        }
 
         if (!response.ok) {
             if (response.status === 404) {
@@ -123,6 +132,10 @@ export async function sendFriendRequest(
             body: JSON.stringify({ uid: recipientId })
         });
 
+        if (await handleUnauthorizedResponse(response, '/v1/friends/add')) {
+            throw new Error('Unauthorized');
+        }
+
         if (!response.ok) {
             if (response.status === 404) {
                 return null;
@@ -163,6 +176,10 @@ export async function getFriendsList(
             }
         });
 
+        if (await handleUnauthorizedResponse(response, '/v1/friends')) {
+            throw new Error('Unauthorized');
+        }
+
         if (!response.ok) {
             throw new Error(`Failed to get friends list: ${response.status}`);
         }
@@ -197,6 +214,10 @@ export async function removeFriend(
             body: JSON.stringify({ uid: friendId })
         });
 
+        if (await handleUnauthorizedResponse(response, '/v1/friends/remove')) {
+            throw new Error('Unauthorized');
+        }
+
         if (!response.ok) {
             if (response.status === 404) {
                 return null;
@@ -212,5 +233,33 @@ export async function removeFriend(
         }
 
         return parsed.data.user;
+    });
+}
+
+/**
+ * Delete the current user's account
+ */
+export async function deleteUserAccount(
+    credentials: AuthCredentials
+): Promise<void> {
+    const API_ENDPOINT = getServerUrl();
+
+    return await backoff(async () => {
+        const response = await fetch(`${API_ENDPOINT}/v1/user`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `Bearer ${credentials.token}`
+            }
+        });
+
+        if (await handleUnauthorizedResponse(response, '/v1/user')) {
+            throw new Error('Unauthorized');
+        }
+
+        if (!response.ok) {
+            throw new Error(`Failed to delete account: ${response.status}`);
+        }
+
+        // Return success - no data expected
     });
 }

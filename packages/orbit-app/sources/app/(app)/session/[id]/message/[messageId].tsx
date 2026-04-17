@@ -42,6 +42,9 @@ export default React.memo(() => {
     React.useEffect(() => {
         if (sessionId) {
             sync.onSessionVisible(sessionId);
+            return () => {
+                sync.onSessionHidden(sessionId);
+            };
         }
     }, [sessionId]);
     
