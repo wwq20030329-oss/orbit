@@ -30,6 +30,17 @@ import {
     resetSessionOpenedAsHistoryOnlyForTests,
     type ResumeNativeCliSessionRequest,
 } from '@/utils/nativeCliRecoveryState';
+import {
+    buildNativeIdentifier,
+    getInFlightNativeIdentifierResolution,
+    parseNativeIdentifier,
+    registerInFlightNativeIdentifierResolution,
+} from '@/utils/nativeCliIdentifierResolution';
+import {
+    buildNativeCliHistoryEntryFromSession,
+    buildResumeRequestFromSession,
+    getResumeTargetForSession,
+} from '@/utils/nativeCliResumeRequest';
 
 export {
     clearSessionOpenedAsHistoryOnly,
@@ -42,7 +53,6 @@ export {
 const SESSION_POLL_ATTEMPTS = 40;
 const POLL_DELAY_MS = 250;
 const inFlightNativeResumeWarmups = new Map<string, Promise<void>>();
-const inFlightNativeIdentifierResolutions = new Map<string, Promise<string | null>>();
 const SESSION_ROUTE_SESSION_PREFIX = /^(?:claude|codex|gemini):session:(.+)$/;
 
 function isInternalCliMirrorSession(session: Session | null | undefined): boolean {
@@ -199,27 +209,6 @@ export async function resolveCanonicalSessionId(identifier: string): Promise<str
     return null;
 }
 
-function buildEntryFromSession(session: Session): NativeCliHistoryEntry | null {
-    const target = getResumeMetadataTarget(session);
-    const machineId = target?.machineId ?? session.metadata?.machineId ?? null;
-    if (!target || !target.workingDirectory || !machineId) {
-        return null;
-    }
-
-    return {
-        id: `${target.tool}:session:${session.id}`,
-        tool: target.tool,
-        backendId: target.backendId,
-        machineId,
-        workingDirectory: target.workingDirectory,
-        projectRoot: target.projectRoot ?? undefined,
-        title: session.metadata?.summary?.text?.trim() || 'Recovered Session',
-        summary: session.metadata?.summary?.text?.trim() || null,
-        updatedAt: session.updatedAt,
-        isLive: isSessionLikelyOnline(session),
-    };
-}
-
 function findReusableSessionForIdentifier(identifier: string): string | null {
     const existingSessionId = findExistingSessionForNativeIdentifier(identifier);
     if (!existingSessionId) {
@@ -235,10 +224,12 @@ function findReusableSessionForIdentifier(identifier: string): string | null {
         return null;
     }
 
-    const entry = buildEntryFromSession(session);
+    const entry = buildNativeCliHistoryEntryFromSession(session);
     if (!entry) {
         return existingSessionId;
     }
+
+    entry.isLive = isSessionLikelyOnline(session);
 
     return findReusableOrbitSessionIdForNativeEntry(
         entry,
@@ -254,81 +245,6 @@ function delay(ms: number): Promise<void> {
 
 function buildResumeWarmupKey(sessionId: string, identifier: string): string {
     return `${sessionId}:${identifier}`;
-}
-
-function buildNativeIdentifier(tool: NativeCliHistoryEntry['tool'], backendId: string): string {
-    return `${tool}:${backendId}`;
-}
-
-function getInFlightResolutionKeys(entry: Pick<NativeCliHistoryEntry, 'id' | 'tool' | 'backendId'>): string[] {
-    return Array.from(new Set([
-        entry.id,
-        `${entry.tool}:${entry.backendId}`,
-        `native-session:${entry.tool}:${entry.backendId}`,
-    ]));
-}
-
-function getInFlightNativeIdentifierResolution(identifier: string): Promise<string | null> | null {
-    const direct = inFlightNativeIdentifierResolutions.get(identifier);
-    if (direct) {
-        return direct;
-    }
-
-    const parsed = parseNativeIdentifier(identifier);
-    if (!parsed || parsed.tool === null) {
-        return null;
-    }
-
-    return (
-        inFlightNativeIdentifierResolutions.get(`${parsed.tool}:${parsed.backendId}`)
-        ?? inFlightNativeIdentifierResolutions.get(`native-session:${parsed.tool}:${parsed.backendId}`)
-        ?? null
-    );
-}
-
-function registerInFlightNativeIdentifierResolution(
-    entry: Pick<NativeCliHistoryEntry, 'id' | 'tool' | 'backendId'>,
-    promise: Promise<string | null>,
-): Promise<string | null> {
-    const keys = getInFlightResolutionKeys(entry);
-    for (const key of keys) {
-        inFlightNativeIdentifierResolutions.set(key, promise);
-    }
-
-    return promise.finally(() => {
-        for (const key of keys) {
-            if (inFlightNativeIdentifierResolutions.get(key) === promise) {
-                inFlightNativeIdentifierResolutions.delete(key);
-            }
-        }
-    });
-}
-
-function parseNativeIdentifier(identifier: string): { tool: NativeCliHistoryEntry['tool'] | null; backendId: string } | null {
-    const nativeSessionMatch = identifier.match(/^native-session:(claude|codex|gemini):(.+)$/);
-    if (nativeSessionMatch) {
-        return {
-            tool: nativeSessionMatch[1] as NativeCliHistoryEntry['tool'],
-            backendId: nativeSessionMatch[2]!,
-        };
-    }
-
-    const qualifiedMatch = identifier.match(/^(claude|codex|gemini):(.+)$/);
-    if (qualifiedMatch) {
-        return {
-            tool: qualifiedMatch[1] as NativeCliHistoryEntry['tool'],
-            backendId: qualifiedMatch[2]!,
-        };
-    }
-
-    if (!identifier.trim()) {
-        return null;
-    }
-
-    return {
-        tool: null,
-        backendId: identifier,
-    };
 }
 
 function isLikelyOnlineSession(session: Session): boolean {
@@ -411,11 +327,11 @@ export function findOrbitSessionIdForNativeIdentifier(
             return null;
         }
 
-        const directTarget = getResumeMetadataTarget(directSession);
+        const directTarget = getResumeTargetForSession(directSession);
         if (directTarget) {
             const remappedCandidates = Object.values(sessions)
                 .filter((session) => {
-                    const target = getResumeMetadataTarget(session);
+                    const target = getResumeTargetForSession(session);
                     if (!target || isInternalCliMirrorSession(session)) {
                         return false;
                     }
@@ -452,7 +368,7 @@ export function findOrbitSessionIdForNativeIdentifier(
 
     const candidates = Object.values(sessions)
         .filter((session) => {
-            const target = getResumeMetadataTarget(session);
+            const target = getResumeTargetForSession(session);
             if (!target || target.backendId !== parsed.backendId || isInternalCliMirrorSession(session)) {
                 return false;
             }
@@ -556,7 +472,7 @@ function findRememberedResumeRequestByNativeIdentifier(identifier: string): Resu
 }
 
 export function rememberNativeCliHintsForSession(session: Session): void {
-    const nativeTarget = getResumeMetadataTarget(session) ?? getNativeCliSessionTarget(session);
+    const nativeTarget = getResumeTargetForSession(session) ?? getNativeCliSessionTarget(session);
     const fallbackIdentifier = nativeTarget ? `${nativeTarget.tool}:${nativeTarget.backendId}` : null;
     const resumeRequest = buildResumeRequestFromSession(session);
 
@@ -585,219 +501,6 @@ export async function openRememberedNativeCliSession(sessionId: string): Promise
     }
 
     return resumeNativeCliSession(request);
-}
-
-interface ResumeMetadataTarget {
-    machineId?: string | null;
-    tool: NativeCliHistoryEntry['tool'];
-    backendId: string;
-    workingDirectory: string | null;
-    projectRoot: string | null;
-}
-
-function buildProjectTitle(path: string | null): string | null {
-    if (!path) {
-        return null;
-    }
-
-    const normalized = path.replace(/\/+$/, '');
-    const segments = normalized.split('/').filter(Boolean);
-    return segments.at(-1) ?? null;
-}
-
-function pickSessionTitle(session: Session, fallbackPath: string | null): string {
-    const summaryText = session.metadata?.summary?.text?.trim();
-    if (summaryText) {
-        return summaryText;
-    }
-
-    const projectTitle = buildProjectTitle(fallbackPath);
-    if (projectTitle) {
-        return projectTitle;
-    }
-
-    return 'Recovered Session';
-}
-
-function getResumeMetadataTarget(session: Session): ResumeMetadataTarget | null {
-    const metadata = session.metadata;
-    const machineId = metadata?.machineId ?? null;
-    if (!metadata) {
-        return null;
-    }
-
-    if (metadata.claudeSessionId) {
-        return {
-            machineId,
-            tool: 'claude',
-            backendId: metadata.claudeSessionId,
-            workingDirectory: metadata.path ?? null,
-            projectRoot: metadata.projectRoot ?? null,
-        };
-    }
-
-    if (metadata.codexThreadId) {
-        return {
-            machineId,
-            tool: 'codex',
-            backendId: metadata.codexThreadId,
-            workingDirectory: metadata.path ?? null,
-            projectRoot: metadata.projectRoot ?? null,
-        };
-    }
-
-    if (metadata.geminiSessionId) {
-        return {
-            machineId,
-            tool: 'gemini',
-            backendId: metadata.geminiSessionId,
-            workingDirectory: metadata.path ?? null,
-            projectRoot: metadata.projectRoot ?? null,
-        };
-    }
-
-    if (metadata.nativeHistorySourceTool && metadata.nativeHistorySourceBackendId) {
-        return {
-            machineId,
-            tool: metadata.nativeHistorySourceTool,
-            backendId: metadata.nativeHistorySourceBackendId,
-            workingDirectory: metadata.path ?? metadata.projectRoot ?? null,
-            projectRoot: metadata.projectRoot ?? null,
-        };
-    }
-
-    return null;
-}
-
-function compareResumeEntries(left: NativeCliHistoryEntry, right: NativeCliHistoryEntry): number {
-    const leftLive = left.isLive === true;
-    const rightLive = right.isLive === true;
-    if (leftLive !== rightLive) {
-        return leftLive ? -1 : 1;
-    }
-
-    if (left.updatedAt !== right.updatedAt) {
-        return right.updatedAt - left.updatedAt;
-    }
-
-    return left.id.localeCompare(right.id);
-}
-
-function compareResumeMachines(left: Machine, right: Machine): number {
-    const leftOnline = isMachineOnline(left);
-    const rightOnline = isMachineOnline(right);
-    if (leftOnline !== rightOnline) {
-        return leftOnline ? -1 : 1;
-    }
-
-    if (left.updatedAt !== right.updatedAt) {
-        return right.updatedAt - left.updatedAt;
-    }
-
-    return left.id.localeCompare(right.id);
-}
-
-function findNativeHistoryResumeEntry(target: ResumeMetadataTarget): NativeCliHistoryEntry | null {
-    const matches = Object.values(storage.getState().nativeCliHistoryByMachine)
-        .flat()
-        .filter((entry) => entry.tool === target.tool && entry.backendId === target.backendId)
-        .sort(compareResumeEntries);
-
-    return matches[0] ?? null;
-}
-
-function resolveResumeMachineId(session: Session, target: ResumeMetadataTarget): string | null {
-    const explicitMachineId = session.metadata?.machineId?.trim();
-    if (explicitMachineId) {
-        return explicitMachineId;
-    }
-
-    const machines = Object.values(storage.getState().machines);
-    if (machines.length === 0) {
-        return null;
-    }
-
-    const matchingEntryMachineIds = Array.from(new Set(
-        Object.entries(storage.getState().nativeCliHistoryByMachine)
-            .filter(([, entries]) => entries.some((entry) => entry.tool === target.tool && entry.backendId === target.backendId))
-            .map(([machineId]) => machineId),
-    ));
-    if (matchingEntryMachineIds.length === 1) {
-        return matchingEntryMachineIds[0]!;
-    }
-
-    const metadataHost = session.metadata?.host?.trim().toLowerCase();
-    if (metadataHost) {
-        const hostMatches = machines
-            .filter((machine) => machine.metadata?.host?.trim().toLowerCase() === metadataHost)
-            .sort(compareResumeMachines);
-        if (hostMatches.length === 1) {
-            return hostMatches[0]!.id;
-        }
-    }
-
-    if (machines.length === 1) {
-        return machines[0]!.id;
-    }
-
-    const onlineMachines = machines.filter(isMachineOnline).sort(compareResumeMachines);
-    if (onlineMachines.length === 1) {
-        return onlineMachines[0]!.id;
-    }
-
-    return null;
-}
-
-function buildResumeRequestFromSession(session: Session): ResumeNativeCliSessionRequest | null {
-    const metadataTarget = getResumeMetadataTarget(session);
-    if (!metadataTarget) {
-        const matchingEntry = findMatchingNativeCliEntryForSession(
-            session,
-            storage.getState().nativeCliHistoryByMachine,
-        );
-        if (!matchingEntry) {
-            return null;
-        }
-
-        return {
-            machineId: matchingEntry.machineId,
-            tool: matchingEntry.tool,
-            backendId: matchingEntry.backendId,
-            workingDirectory: matchingEntry.workingDirectory,
-            title: matchingEntry.title,
-            summary: matchingEntry.summary,
-            updatedAt: matchingEntry.updatedAt,
-        };
-    }
-
-    const historyEntry = findNativeHistoryResumeEntry(metadataTarget);
-    if (historyEntry) {
-        return {
-            machineId: historyEntry.machineId,
-            tool: historyEntry.tool,
-            backendId: historyEntry.backendId,
-            workingDirectory: historyEntry.workingDirectory,
-            title: historyEntry.title,
-            summary: historyEntry.summary,
-            updatedAt: historyEntry.updatedAt,
-        };
-    }
-
-    const machineId = resolveResumeMachineId(session, metadataTarget);
-    const workingDirectory = metadataTarget.workingDirectory ?? metadataTarget.projectRoot ?? null;
-    if (!machineId || !workingDirectory) {
-        return null;
-    }
-
-    return {
-        machineId,
-        tool: metadataTarget.tool,
-        backendId: metadataTarget.backendId,
-        workingDirectory,
-        title: pickSessionTitle(session, workingDirectory),
-        summary: session.metadata?.summary?.text?.trim() || null,
-        updatedAt: session.updatedAt,
-    };
 }
 
 async function resumeNativeCliSession(request: ResumeNativeCliSessionRequest): Promise<string> {

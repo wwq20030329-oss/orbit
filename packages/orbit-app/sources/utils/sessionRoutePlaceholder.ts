@@ -1,21 +1,12 @@
 import { storage } from '@/sync/storage';
 import { findNativeCliEntryByIdentifier } from '@/utils/nativeCliSessionResolver';
 import { getRememberedNativeCliResumeRequest } from '@/utils/openNativeCliSession';
+import { buildProjectTitle } from '@/utils/projectTitle';
 
 export interface SessionRoutePlaceholder {
     title: string;
     subtitle?: string;
     flavor: 'claude' | 'codex' | 'gemini';
-}
-
-function buildProjectTitle(path: string | null): string | null {
-    if (!path) {
-        return null;
-    }
-
-    const normalized = path.replace(/\/+$/, '');
-    const segments = normalized.split('/').filter(Boolean);
-    return segments.at(-1) ?? null;
 }
 
 function formatPathRelativeToHome(path: string, homeDir?: string): string {
