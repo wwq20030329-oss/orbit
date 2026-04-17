@@ -69,6 +69,7 @@ describe('getSessionRoutePlaceholder', () => {
     expect(getSessionRoutePlaceholder('codex:thread-1')).toEqual({
       title: 'project',
       subtitle: '~/project',
+      previewText: 'project',
       flavor: 'codex',
     });
   });
@@ -107,6 +108,7 @@ describe('getSessionRoutePlaceholder', () => {
     expect(getSessionRoutePlaceholder('placeholder-session')).toEqual({
       title: 'feature-a',
       subtitle: '~/worktrees/feature-a',
+      previewText: 'feature-a',
       flavor: 'claude',
     });
   });

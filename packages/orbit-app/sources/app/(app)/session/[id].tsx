@@ -114,12 +114,37 @@ export default React.memo(() => {
                         justifyContent: 'center',
                         alignItems: 'center',
                         gap: 12,
+                        paddingHorizontal: 24,
                     }}
                 >
                     <ActivityIndicator size="small" color={theme.colors.textSecondary} />
                     <Text style={{ color: theme.colors.textSecondary, fontSize: 14 }}>
                         {t('terminal.connecting')}
                     </Text>
+                    {routePlaceholder?.previewText && (
+                        <View
+                            style={{
+                                width: '100%',
+                                maxWidth: 520,
+                                marginTop: 8,
+                                borderRadius: 16,
+                                paddingHorizontal: 16,
+                                paddingVertical: 14,
+                                backgroundColor: theme.colors.surfaceHigh,
+                            }}
+                        >
+                            <Text
+                                numberOfLines={6}
+                                style={{
+                                    color: theme.colors.textSecondary,
+                                    fontSize: 14,
+                                    lineHeight: 20,
+                                }}
+                            >
+                                {routePlaceholder.previewText}
+                            </Text>
+                        </View>
+                    )}
                 </View>
             </>
         );

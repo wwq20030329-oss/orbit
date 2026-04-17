@@ -6,6 +6,7 @@ import { buildProjectTitle } from '@/utils/projectTitle';
 export interface SessionRoutePlaceholder {
     title: string;
     subtitle?: string;
+    previewText?: string;
     flavor: 'claude' | 'codex' | 'gemini';
 }
 
@@ -39,6 +40,7 @@ export function getSessionRoutePlaceholder(identifier: string): SessionRoutePlac
             subtitle: matchedEntry.workingDirectory
                 ? formatPathRelativeToHome(matchedEntry.workingDirectory, machine?.metadata?.homeDir)
                 : undefined,
+            previewText: matchedEntry.summary || matchedEntry.title || undefined,
             flavor: matchedEntry.tool,
         };
     }
@@ -56,6 +58,7 @@ export function getSessionRoutePlaceholder(identifier: string): SessionRoutePlac
         subtitle: rememberedRequest.workingDirectory
             ? formatPathRelativeToHome(rememberedRequest.workingDirectory, machine?.metadata?.homeDir)
             : undefined,
+        previewText: rememberedRequest.summary || rememberedRequest.title || undefined,
         flavor: rememberedRequest.tool,
     };
 }
