@@ -442,7 +442,7 @@ function startNativeResumeWarmup(sessionId: string, identifier: string): void {
         }
 
         try {
-            await sync.refreshSessionMessages(lastVisibleSessionId);
+            await sync.refreshSessionMessagesIfStale(lastVisibleSessionId);
         } catch {
             // Session encryption/session creation can lag slightly behind warmup.
         }

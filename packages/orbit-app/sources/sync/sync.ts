@@ -62,7 +62,10 @@ import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
 import { didSessionControlReturnToApp, getSessionControlState } from '@/utils/sessionControlState';
 import { VisibleSessionTracker } from './visibleSessionTracker';
-import { shouldRefreshSessionsOnVisible } from './sessionVisibleRefresh';
+import {
+    shouldRefreshSessionsOnVisible,
+    shouldRefreshVisibleSessionMessages,
+} from './sessionVisibleRefresh';
 import { invalidateNativeCliHistoryForMachines } from '@/utils/nativeCliHistoryRefresh';
 import { rememberNativeCliHintsForSession } from '@/utils/openNativeCliSession';
 import {
@@ -161,6 +164,8 @@ class Sync {
     private visibleSessions = new VisibleSessionTracker();
     private messageFetchAbortControllers = new Map<string, AbortController>();
     private messageBackfillPromises = new Map<string, Promise<void>>();
+    private visibleSessionMessageRefreshAt = new Map<string, number>();
+    private visibleSessionStateRefreshAt = new Map<string, number>();
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
@@ -318,15 +323,20 @@ class Sync {
 
     onSessionVisible = (sessionId: string) => {
         const becameVisible = this.visibleSessions.markVisible(sessionId);
+        const now = Date.now();
         if (becameVisible) {
-            this.getMessagesSync(sessionId).invalidate();
+            this.refreshVisibleSessionMessages(sessionId, now);
         }
 
         const session = storage.getState().sessions[sessionId];
         const sessionControlState = session
             ? getSessionControlState(session, { sessionId })
             : null;
-        if (becameVisible && shouldRefreshSessionsOnVisible(session, sessionControlState)) {
+        if (becameVisible && shouldRefreshSessionsOnVisible(session, sessionControlState, {
+            lastRefreshedAt: this.visibleSessionStateRefreshAt.get(sessionId) ?? null,
+            now,
+        })) {
+            this.visibleSessionStateRefreshAt.set(sessionId, now);
             this.sessionsSync.invalidate();
         }
         if (
@@ -380,6 +390,22 @@ class Sync {
             this.messagesSync.set(sessionId, sync);
         }
         return sync;
+    }
+
+    private refreshVisibleSessionMessages(sessionId: string, now = Date.now()) {
+        const loadedCount = storage.getState().sessionMessages[sessionId]?.messages.length ?? 0;
+        const shouldRefresh = shouldRefreshVisibleSessionMessages({
+            loadedCount,
+            lastRefreshedAt: this.visibleSessionMessageRefreshAt.get(sessionId) ?? null,
+            now,
+        });
+        if (!shouldRefresh) {
+            return false;
+        }
+
+        this.visibleSessionMessageRefreshAt.set(sessionId, now);
+        this.getMessagesSync(sessionId).invalidate();
+        return true;
     }
 
     private startOlderMessagesBackfill(
@@ -944,6 +970,16 @@ class Sync {
 
     public refreshSessionMessages = async (sessionId: string) => {
         return this.getMessagesSync(sessionId).invalidateAndAwait();
+    }
+
+    public refreshSessionMessagesIfStale = async (sessionId: string) => {
+        const now = Date.now();
+        const didSchedule = this.refreshVisibleSessionMessages(sessionId, now);
+        if (!didSchedule) {
+            return;
+        }
+
+        return this.getMessagesSync(sessionId).awaitQueue();
     }
 
     public getCredentials() {

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { shouldRefreshSessionsOnVisible } from './sessionVisibleRefresh';
+import {
+    shouldRefreshSessionsOnVisible,
+    shouldRefreshVisibleSessionMessages,
+    VISIBLE_SESSION_MESSAGES_REFRESH_COOLDOWN_MS,
+    VISIBLE_SESSION_STATE_REFRESH_COOLDOWN_MS,
+} from './sessionVisibleRefresh';
 import type { Session } from './storageTypes';
 import type { SessionControlState } from '@/utils/sessionControlState';
 
@@ -96,5 +101,52 @@ describe('shouldRefreshSessionsOnVisible', () => {
             }),
             makeControlState(),
         )).toBe(false);
+    });
+
+    it('rate limits repeated visibility refreshes for the same disconnected session', () => {
+        const now = 1_000_000;
+
+        expect(shouldRefreshSessionsOnVisible(
+            makeSession(),
+            makeControlState(),
+            {
+                lastRefreshedAt: now - (VISIBLE_SESSION_STATE_REFRESH_COOLDOWN_MS - 1),
+                now,
+            },
+        )).toBe(false);
+
+        expect(shouldRefreshSessionsOnVisible(
+            makeSession(),
+            makeControlState(),
+            {
+                lastRefreshedAt: now - VISIBLE_SESSION_STATE_REFRESH_COOLDOWN_MS,
+                now,
+            },
+        )).toBe(true);
+    });
+});
+
+describe('shouldRefreshVisibleSessionMessages', () => {
+    it('refreshes when no messages have loaded yet', () => {
+        expect(shouldRefreshVisibleSessionMessages({
+            loadedCount: 0,
+            lastRefreshedAt: Date.now(),
+        })).toBe(true);
+    });
+
+    it('rate limits repeated refreshes for already-loaded messages', () => {
+        const now = 2_000_000;
+
+        expect(shouldRefreshVisibleSessionMessages({
+            loadedCount: 20,
+            lastRefreshedAt: now - (VISIBLE_SESSION_MESSAGES_REFRESH_COOLDOWN_MS - 1),
+            now,
+        })).toBe(false);
+
+        expect(shouldRefreshVisibleSessionMessages({
+            loadedCount: 20,
+            lastRefreshedAt: now - VISIBLE_SESSION_MESSAGES_REFRESH_COOLDOWN_MS,
+            now,
+        })).toBe(true);
     });
 });

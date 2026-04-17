@@ -309,6 +309,18 @@ export function SessionsList({ data }: SessionsListProps) {
         () => Math.max(0, sections.findIndex((section) => section.tool === selectedTool)),
         [sections, selectedTool],
     );
+    const handleToggleToolExpanded = React.useCallback((tool: NativeCliTool) => {
+        setExpandedTools((current) => ({
+            ...current,
+            [tool]: !current[tool],
+        }));
+    }, [setExpandedTools]);
+    const handleToggleProjectExpanded = React.useCallback((projectId: string) => {
+        setExpandedProjects((current) => ({
+            ...current,
+            [projectId]: !(current[projectId] === true),
+        }));
+    }, [setExpandedProjects]);
 
     React.useEffect(() => {
         if (data.length > 0) {
@@ -358,101 +370,27 @@ export function SessionsList({ data }: SessionsListProps) {
             [tool]: scope,
         });
     }, [cliThreadScopeByTool, setCliThreadScopeByTool]);
-
-    const renderListHeader = React.useCallback((section: CliThreadToolSection) => {
-        const scope = cliThreadScopeByTool[section.tool] ?? 'current-project';
-        const scopedProjects = getCliThreadScopedProjects(section, scope);
-        const isExpanded = expandedTools[section.tool];
-        const canExpand = scope === 'all-projects' && scopedProjects.projects.length > DEFAULT_VISIBLE_PROJECTS;
-
-        return (
-            <View style={styles.headerBlock}>
-                <View style={styles.summaryRow}>
-                    <View>
-                        <Text style={styles.summaryTitle}>
-                            {section.title}
-                        </Text>
-                        <Text style={styles.summaryMeta}>
-                            {getCliSectionScopedSummary(section, scope)}
-                        </Text>
-                    </View>
-                    <View style={styles.pageDots}>
-                        {CLI_THREAD_TOOL_ORDER.map((tool) => (
-                            <View
-                                key={tool}
-                                style={[
-                                    styles.pageDot,
-                                    tool === section.tool && styles.pageDotActive,
-                                ]}
-                            />
-                        ))}
-                    </View>
-                </View>
-                {section.projectCount > 0 && (
-                    <View style={styles.scopeRow}>
-                        {(['current-project', 'all-projects'] as const).map((option) => {
-                            const active = scope === option;
-                            const label = option === 'current-project' ? 'Current project' : 'All projects';
-                            return (
-                                <Pressable
-                                    key={option}
-                                    style={[
-                                        styles.scopeChip,
-                                        active && styles.scopeChipActive,
-                                    ]}
-                                    onPress={() => {
-                                        setToolScope(section.tool, option);
-                                    }}
-                                >
-                                    <Text
-                                        style={[
-                                            styles.scopeChipText,
-                                            active && styles.scopeChipTextActive,
-                                        ]}
-                                    >
-                                        {label}
-                                    </Text>
-                                </Pressable>
-                            );
-                        })}
-                    </View>
-                )}
-                {canExpand && (
-                    <Pressable
-                        style={styles.summaryButton}
-                        onPress={() => {
-                            setExpandedTools((current) => ({
-                                ...current,
-                                [section.tool]: !isExpanded,
-                            }));
-                        }}
-                    >
-                        <Text style={styles.summaryButtonText}>
-                            {isExpanded ? 'Show less' : 'Show more'}
-                        </Text>
-                    </Pressable>
-                )}
-            </View>
-        );
-    }, [
-        expandedTools,
+    const renderToolPage = React.useCallback(({ item: section }: { item: CliThreadToolSection }) => (
+        <CliToolPage
+            section={section}
+            pageWidth={pageWidth}
+            bottomInset={safeArea.bottom}
+            scope={cliThreadScopeByTool[section.tool] ?? 'current-project'}
+            toolExpanded={expandedTools[section.tool]}
+            expandedProjects={expandedProjects}
+            onSetScope={setToolScope}
+            onToggleToolExpanded={handleToggleToolExpanded}
+            onToggleProjectExpanded={handleToggleProjectExpanded}
+        />
+    ), [
         cliThreadScopeByTool,
+        expandedProjects,
+        expandedTools,
+        handleToggleProjectExpanded,
+        handleToggleToolExpanded,
+        pageWidth,
+        safeArea.bottom,
         setToolScope,
-        styles.headerBlock,
-        styles.pageDot,
-        styles.pageDotActive,
-        styles.pageDots,
-        styles.scopeChip,
-        styles.scopeChipActive,
-        styles.scopeChipText,
-        styles.scopeChipTextActive,
-        styles.scopeRow,
-        styles.summaryButton,
-        styles.summaryButtonText,
-        styles.summaryMeta,
-        styles.summaryRow,
-        styles.summaryTitle,
-        setExpandedTools,
     ]);
 
     return (
@@ -483,46 +421,165 @@ export function SessionsList({ data }: SessionsListProps) {
                         index,
                     })}
                     onMomentumScrollEnd={handlePagerMomentumEnd}
-                    renderItem={({ item: section }) => {
-                        const scope = cliThreadScopeByTool[section.tool] ?? 'current-project';
-                        const scopedProjects = getCliThreadScopedProjects(section, scope);
-                        const isExpanded = expandedTools[section.tool];
-                        const visibleProjects = isExpanded
-                            ? scopedProjects.projects
-                            : scopedProjects.projects.slice(0, DEFAULT_VISIBLE_PROJECTS);
-
-                        return (
-                            <View style={[styles.pageContainer, { width: pageWidth }]}>
-                                <FlatList
-                                    data={visibleProjects}
-                                    renderItem={({ item }) => (
-                                        <CliProjectCard
-                                            project={item}
-                                            expanded={expandedProjects[item.id] === true}
-                                            onToggleExpanded={() => {
-                                                setExpandedProjects((current) => ({
-                                                    ...current,
-                                                    [item.id]: !(current[item.id] === true),
-                                                }));
-                                            }}
-                                        />
-                                    )}
-                                    keyExtractor={(item) => item.id}
-                                    ListHeaderComponent={renderListHeader(section)}
-                                    ListEmptyComponent={<EmptyToolState tool={section.tool} />}
-                                    contentContainerStyle={[styles.pageContent, { paddingBottom: safeArea.bottom + 128 }]}
-                                    windowSize={5}
-                                    maxToRenderPerBatch={8}
-                                    initialNumToRender={12}
-                                />
-                            </View>
-                        );
-                    }}
+                    renderItem={renderToolPage}
                 />
             </View>
         </View>
     );
 }
+
+const CliToolPage = React.memo(({
+    section,
+    pageWidth,
+    bottomInset,
+    scope,
+    toolExpanded,
+    expandedProjects,
+    onSetScope,
+    onToggleToolExpanded,
+    onToggleProjectExpanded,
+}: {
+    section: CliThreadToolSection;
+    pageWidth: number;
+    bottomInset: number;
+    scope: CliThreadScope;
+    toolExpanded: boolean;
+    expandedProjects: Record<string, boolean>;
+    onSetScope: (tool: NativeCliTool, scope: CliThreadScope) => void;
+    onToggleToolExpanded: (tool: NativeCliTool) => void;
+    onToggleProjectExpanded: (projectId: string) => void;
+}) => {
+    const styles = stylesheet;
+    const scopedProjects = React.useMemo(
+        () => getCliThreadScopedProjects(section, scope),
+        [scope, section],
+    );
+    const visibleProjects = React.useMemo(
+        () => (toolExpanded
+            ? scopedProjects.projects
+            : scopedProjects.projects.slice(0, DEFAULT_VISIBLE_PROJECTS)),
+        [scopedProjects.projects, toolExpanded],
+    );
+    const renderProject = React.useCallback(({ item }: { item: CliThreadProjectGroup }) => (
+        <CliProjectCard
+            project={item}
+            expanded={expandedProjects[item.id] === true}
+            onToggleExpanded={onToggleProjectExpanded}
+        />
+    ), [expandedProjects, onToggleProjectExpanded]);
+    const header = React.useMemo(() => (
+        <CliToolPageHeader
+            section={section}
+            scope={scope}
+            scopedProjectCount={scopedProjects.projects.length}
+            expanded={toolExpanded}
+            onSetScope={onSetScope}
+            onToggleExpanded={onToggleToolExpanded}
+        />
+    ), [onSetScope, onToggleToolExpanded, scope, scopedProjects.projects.length, section, toolExpanded]);
+
+    return (
+        <View style={[styles.pageContainer, { width: pageWidth }]}>
+            <FlatList
+                data={visibleProjects}
+                renderItem={renderProject}
+                keyExtractor={(item) => item.id}
+                ListHeaderComponent={header}
+                ListEmptyComponent={<EmptyToolState tool={section.tool} />}
+                contentContainerStyle={[styles.pageContent, { paddingBottom: bottomInset + 128 }]}
+                windowSize={5}
+                maxToRenderPerBatch={8}
+                initialNumToRender={12}
+            />
+        </View>
+    );
+});
+
+const CliToolPageHeader = React.memo(({
+    section,
+    scope,
+    scopedProjectCount,
+    expanded,
+    onSetScope,
+    onToggleExpanded,
+}: {
+    section: CliThreadToolSection;
+    scope: CliThreadScope;
+    scopedProjectCount: number;
+    expanded: boolean;
+    onSetScope: (tool: NativeCliTool, scope: CliThreadScope) => void;
+    onToggleExpanded: (tool: NativeCliTool) => void;
+}) => {
+    const styles = stylesheet;
+    const canExpand = scope === 'all-projects' && scopedProjectCount > DEFAULT_VISIBLE_PROJECTS;
+
+    return (
+        <View style={styles.headerBlock}>
+            <View style={styles.summaryRow}>
+                <View>
+                    <Text style={styles.summaryTitle}>
+                        {section.title}
+                    </Text>
+                    <Text style={styles.summaryMeta}>
+                        {getCliSectionScopedSummary(section, scope)}
+                    </Text>
+                </View>
+                <View style={styles.pageDots}>
+                    {CLI_THREAD_TOOL_ORDER.map((tool) => (
+                        <View
+                            key={tool}
+                            style={[
+                                styles.pageDot,
+                                tool === section.tool && styles.pageDotActive,
+                            ]}
+                        />
+                    ))}
+                </View>
+            </View>
+            {section.projectCount > 0 && (
+                <View style={styles.scopeRow}>
+                    {(['current-project', 'all-projects'] as const).map((option) => {
+                        const active = scope === option;
+                        const label = option === 'current-project' ? 'Current project' : 'All projects';
+                        return (
+                            <Pressable
+                                key={option}
+                                style={[
+                                    styles.scopeChip,
+                                    active && styles.scopeChipActive,
+                                ]}
+                                onPress={() => {
+                                    onSetScope(section.tool, option);
+                                }}
+                            >
+                                <Text
+                                    style={[
+                                        styles.scopeChipText,
+                                        active && styles.scopeChipTextActive,
+                                    ]}
+                                >
+                                    {label}
+                                </Text>
+                            </Pressable>
+                        );
+                    })}
+                </View>
+            )}
+            {canExpand && (
+                <Pressable
+                    style={styles.summaryButton}
+                    onPress={() => {
+                        onToggleExpanded(section.tool);
+                    }}
+                >
+                    <Text style={styles.summaryButtonText}>
+                        {expanded ? 'Show less' : 'Show more'}
+                    </Text>
+                </Pressable>
+            )}
+        </View>
+    );
+});
 
 const EmptyToolState = React.memo(({ tool }: { tool: NativeCliTool }) => {
     const styles = stylesheet;
@@ -546,7 +603,7 @@ const CliProjectCard = React.memo(({
 }: {
     project: CliThreadProjectGroup;
     expanded: boolean;
-    onToggleExpanded: () => void;
+    onToggleExpanded: (projectId: string) => void;
 }) => {
     const styles = stylesheet;
     const longPressTriggeredRef = React.useRef(false);
@@ -589,8 +646,8 @@ const CliProjectCard = React.memo(({
             return;
         }
 
-        onToggleExpanded();
-    }, [deleting, onToggleExpanded]);
+        onToggleExpanded(project.id);
+    }, [deleting, onToggleExpanded, project.id]);
 
     const projectTrigger = (
         <Pressable
