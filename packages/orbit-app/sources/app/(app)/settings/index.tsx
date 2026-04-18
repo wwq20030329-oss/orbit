@@ -1,3 +1,5 @@
-import { SettingsView } from "@/components/SettingsView";
+import { SettingsViewWrapper } from "@/components/SettingsViewWrapper";
 
-export default SettingsView;
+export default function SettingsIndexScreen() {
+    return <SettingsViewWrapper variant="floating" />;
+}
