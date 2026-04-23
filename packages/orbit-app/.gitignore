@@ -4,3 +4,17 @@
 
 expo-env.d.ts
 # @end expo-cli
+
+# TypeScript incremental build cache — rebuilt locally, never useful
+# to check in. A prior commit accidentally shipped a ~760 KB tsbuildinfo
+# that had to be purged; ignoring it explicitly prevents recurrence.
+*.tsbuildinfo
+
+# Expo local caches & build artifacts
+.expo/
+.expo-shared/
+web-build/
+dist/
+
+# Per-developer diagnostic output from the iOS Metro helper script
+scripts/ios-sync-debug-metro-config.out.*

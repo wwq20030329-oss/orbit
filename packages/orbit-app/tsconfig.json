@@ -6,8 +6,7 @@
     "paths": {
       "@/*": [
         "./sources/*"
-      ],
-      "hello-world": [ "../../hello-world" ]
+      ]
     },
     "jsx": "react-jsx",
     "esModuleInterop": true,
@@ -37,7 +36,6 @@
     "nativewind-env.d.ts"
   ],
   "exclude": [
-    "sources/trash/**/*",
     "node_modules"
   ]
 }

@@ -1,35 +1,37 @@
 import React from 'react';
-import { View, Pressable, FlatList, ActivityIndicator, ActionSheetIOS, Platform, useWindowDimensions, type NativeSyntheticEvent, type NativeScrollEvent } from 'react-native';
+import { View, Pressable, ActivityIndicator, ActionSheetIOS, Platform, FlatList } from 'react-native';
+import { FlashList } from '@shopify/flash-list';
 import { Text } from '@/components/StyledText';
-import { SessionListViewItem, useLocalSettingMutable } from '@/sync/storage';
-import type { NativeCliTool } from '@/sync/storageTypes';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Typography } from '@/constants/Typography';
 import { StyleSheet } from 'react-native-unistyles';
-import { requestReview } from '@/utils/requestReview';
 import { UpdateBanner } from './UpdateBanner';
 import { layout } from './layout';
 import { useNavigateDirectlyToSession, useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { useOrbitAction } from '@/hooks/useOrbitAction';
-import { getCliSectionTitle } from '@/utils/nativeCliHistory';
+import type { VisibleSessionListViewItem } from '@/hooks/useVisibleSessionListViewData';
+import { useCliThreadBrowserController } from '@/hooks/useCliThreadBrowserController';
 import { deleteCliProjectGroup, deleteCliThreadItem } from '@/utils/cliThreadDelete';
 import {
-    buildCliThreadToolSections,
     CLI_THREAD_TOOL_ORDER,
     formatCliThreadUpdatedAt,
+    getCliSectionTitle,
     getCliThreadScopedProjects,
-    pickPreferredCliThreadTool,
     type CliThreadScope,
     type CliThreadProjectGroup,
     type CliThreadToolSection,
     type CliThreadListItem,
+    type CliThreadDisplayTool,
+    type CliThreadToolSectionsState,
 } from '@/utils/cliThreadList';
 import { openCliThreadItem } from '@/utils/openCliThreadItem';
 import { Modal } from '@/modal';
 import { t } from '@/text';
+import { activatePhoneWorkspaceSession, shouldUsePhoneWorkspaceNavigation } from '@/utils/phoneWorkspaceNavigation';
 
 const DEFAULT_VISIBLE_PROJECTS = 6;
+const DRAWER_VISIBLE_THREADS = 60;
 
 function showDeleteActionSheet(
     title: string,
@@ -59,10 +61,10 @@ function showDeleteActionSheet(
 
 function getCliSectionSummary(section: CliThreadToolSection): string {
     if (section.projectCount === 0) {
-        return `No ${section.title} work yet`;
+        return t('sessionHistory.noWorkYet', { tool: section.title });
     }
 
-    return section.projectCount === 1 ? '1 project' : `${section.projectCount} projects`;
+    return t('sessionHistory.projectCount', { count: section.projectCount });
 }
 
 function getCliSectionScopedSummary(
@@ -70,14 +72,62 @@ function getCliSectionScopedSummary(
     scope: CliThreadScope,
 ): string {
     if (section.projectCount === 0) {
-        return `No ${section.title} work yet`;
+        return t('sessionHistory.noWorkYet', { tool: section.title });
     }
 
     if (scope === 'current-project') {
-        return 'Current project';
+        return t('sessionHistory.currentProject');
     }
 
     return getCliSectionSummary(section);
+}
+
+type DrawerThreadListRow =
+    | { type: 'header'; id: string; title: string }
+    | { type: 'item'; id: string; item: CliThreadListItem };
+
+function getDrawerThreadGroupTitle(timestamp: number): string {
+    const date = new Date(timestamp);
+    const now = new Date();
+    const sameDay = date.getFullYear() === now.getFullYear()
+        && date.getMonth() === now.getMonth()
+        && date.getDate() === now.getDate();
+
+    if (sameDay) {
+        return t('sessionHistory.today');
+    }
+
+    return new Intl.DateTimeFormat(undefined, {
+        year: 'numeric',
+        month: 'long',
+    }).format(date);
+}
+
+function buildDrawerThreadRows(items: CliThreadListItem[]): DrawerThreadListRow[] {
+    const rows: DrawerThreadListRow[] = [];
+    let lastGroupId: string | null = null;
+
+    for (const item of items) {
+        const date = new Date(item.updatedAt);
+        const groupId = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+
+        if (groupId !== lastGroupId) {
+            lastGroupId = groupId;
+            rows.push({
+                type: 'header',
+                id: `header-${groupId}`,
+                title: getDrawerThreadGroupTitle(item.updatedAt),
+            });
+        }
+
+        rows.push({
+            type: 'item',
+            id: item.id,
+            item,
+        });
+    }
+
+    return rows;
 }
 
 const stylesheet = StyleSheet.create((theme) => ({
@@ -181,6 +231,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         marginBottom: 12,
         borderRadius: 18,
         backgroundColor: theme.colors.surface,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
         overflow: 'hidden',
     },
     projectHeaderRow: {
@@ -205,8 +257,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.textSecondary,
     },
     expandedThreads: {
-        borderTopWidth: 1,
-        borderTopColor: theme.colors.surfaceHigh,
+        borderTopWidth: StyleSheet.hairlineWidth,
+        borderTopColor: theme.colors.divider,
         paddingHorizontal: 14,
         paddingTop: 10,
         paddingBottom: 12,
@@ -218,6 +270,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingHorizontal: 14,
         paddingVertical: 12,
         backgroundColor: theme.colors.groupped.background,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
@@ -255,6 +309,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         marginTop: 8,
         borderRadius: 18,
         backgroundColor: theme.colors.surface,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
         paddingHorizontal: 20,
         paddingVertical: 20,
     },
@@ -269,111 +325,103 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.textSecondary,
         ...Typography.default(),
     },
+    drawerSectionHeader: {
+        paddingHorizontal: 18,
+        paddingTop: 18,
+        paddingBottom: 8,
+    },
+    drawerSectionHeaderText: {
+        fontSize: 12,
+        color: theme.colors.groupped.sectionTitle,
+        textTransform: 'uppercase',
+        letterSpacing: 0.3,
+        ...Typography.default('semiBold'),
+    },
+    drawerThreadRow: {
+        minHeight: 56,
+        marginHorizontal: 16,
+        marginBottom: 8,
+        borderRadius: 16,
+        paddingHorizontal: 16,
+        paddingVertical: 14,
+        backgroundColor: theme.colors.surface,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+    },
+    drawerThreadTitle: {
+        fontSize: 15,
+        color: theme.colors.text,
+        ...Typography.default('semiBold'),
+    },
+    drawerThreadMeta: {
+        fontSize: 13,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+    },
     openingSpinner: {
         color: theme.colors.textSecondary,
     },
 }));
 
 interface SessionsListProps {
-    data: SessionListViewItem[];
+    data: VisibleSessionListViewItem[];
+    mode?: 'default' | 'drawer';
+    drawerView?: 'sessions' | 'history';
+    onDrawerItemPress?: () => void;
+    precomputedToolSectionsState?: CliThreadToolSectionsState | null;
+    preselectedTool?: CliThreadDisplayTool | null;
 }
 
-export function SessionsList({ data }: SessionsListProps) {
+type DrawerViewMode = 'sessions' | 'history';
+
+function SessionsListView({
+    data,
+    mode = 'default',
+    drawerView = 'history',
+    onDrawerItemPress,
+    precomputedToolSectionsState = null,
+    preselectedTool = null,
+}: SessionsListProps) {
     const styles = stylesheet;
     const safeArea = useSafeAreaInsets();
-    const windowWidth = useWindowDimensions().width;
-    const [preferredCliToolTab, setPreferredCliToolTab] = useLocalSettingMutable('preferredCliToolTab');
-    const [cliThreadScopeByTool, setCliThreadScopeByTool] = useLocalSettingMutable('cliThreadScopeByTool');
-    const [expandedTools, setExpandedTools] = React.useState<Record<NativeCliTool, boolean>>({
-        claude: false,
-        codex: false,
-        gemini: false,
+    const isDrawerMode = mode === 'drawer';
+    const {
+        cliThreadScopeByTool,
+        expandedProjects,
+        expandedTools,
+        handlePagerMomentumEnd,
+        handleToggleProjectExpanded,
+        handleToggleToolExpanded,
+        pageWidth,
+        pagerRef,
+        sections,
+        selectedTool,
+        selectedToolIndex,
+        setPageWidth,
+        setToolScope,
+        persistPreferredCliToolTab,
+    } = useCliThreadBrowserController({
+        data,
+        mode,
+        drawerView,
+        precomputedToolSectionsState,
+        preselectedTool,
     });
-    const [expandedProjects, setExpandedProjects] = React.useState<Record<string, boolean>>({});
-    const pagerRef = React.useRef<FlatList<CliThreadToolSection>>(null);
-    const lastSyncedToolRef = React.useRef<NativeCliTool | null>(null);
-    const [pageWidth, setPageWidth] = React.useState(windowWidth);
-
-    const threadSourceItems = React.useMemo(
-        () => data.filter((item): item is Extract<SessionListViewItem, { type: 'session' | 'native-cli-session' }> =>
-            item.type === 'session' || item.type === 'native-cli-session',
-        ),
-        [data],
-    );
-    const sections = React.useMemo(() => buildCliThreadToolSections(threadSourceItems), [threadSourceItems]);
-    const selectedTool = React.useMemo(
-        () => pickPreferredCliThreadTool(sections, preferredCliToolTab),
-        [preferredCliToolTab, sections],
-    );
-    const selectedToolIndex = React.useMemo(
-        () => Math.max(0, sections.findIndex((section) => section.tool === selectedTool)),
-        [sections, selectedTool],
-    );
-    const handleToggleToolExpanded = React.useCallback((tool: NativeCliTool) => {
-        setExpandedTools((current) => ({
-            ...current,
-            [tool]: !current[tool],
-        }));
-    }, [setExpandedTools]);
-    const handleToggleProjectExpanded = React.useCallback((projectId: string) => {
-        setExpandedProjects((current) => ({
-            ...current,
-            [projectId]: !(current[projectId] === true),
-        }));
-    }, [setExpandedProjects]);
-
-    React.useEffect(() => {
-        if (data.length > 0) {
-            requestReview();
-        }
-    }, [data.length]);
-
-    React.useEffect(() => {
-        lastSyncedToolRef.current = null;
-    }, [pageWidth]);
-
-    React.useEffect(() => {
-        if (!sections[selectedToolIndex] || pageWidth <= 0) {
-            return;
-        }
-
-        if (lastSyncedToolRef.current === selectedTool) {
-            return;
-        }
-
-        pagerRef.current?.scrollToIndex({
-            index: selectedToolIndex,
-            animated: false,
-        });
-        lastSyncedToolRef.current = selectedTool;
-    }, [pageWidth, sections, selectedTool, selectedToolIndex]);
-
-    const handlePagerMomentumEnd = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        if (pageWidth <= 0) {
-            return;
-        }
-
-        const nextIndex = Math.round(event.nativeEvent.contentOffset.x / pageWidth);
-        const nextTool = sections[nextIndex]?.tool;
-        if (!nextTool || nextTool === selectedTool) {
-            lastSyncedToolRef.current = selectedTool;
-            return;
-        }
-
-        lastSyncedToolRef.current = nextTool;
-        setPreferredCliToolTab(nextTool);
-    }, [pageWidth, sections, selectedTool, setPreferredCliToolTab]);
-
-    const setToolScope = React.useCallback((tool: NativeCliTool, scope: CliThreadScope) => {
-        setCliThreadScopeByTool({
-            ...cliThreadScopeByTool,
-            [tool]: scope,
-        });
-    }, [cliThreadScopeByTool, setCliThreadScopeByTool]);
     const renderToolPage = React.useCallback(({ item: section }: { item: CliThreadToolSection }) => (
         <CliToolPage
             section={section}
             pageWidth={pageWidth}
+            isStandalone={isDrawerMode}
+            selector={isDrawerMode ? (
+                <CliToolSelector
+                    selectedTool={selectedTool}
+                    onSelectTool={persistPreferredCliToolTab}
+                />
+            ) : null}
             bottomInset={safeArea.bottom}
             scope={cliThreadScopeByTool[section.tool] ?? 'current-project'}
             toolExpanded={expandedTools[section.tool]}
@@ -389,9 +437,30 @@ export function SessionsList({ data }: SessionsListProps) {
         handleToggleProjectExpanded,
         handleToggleToolExpanded,
         pageWidth,
+        isDrawerMode,
         safeArea.bottom,
+        selectedTool,
+        persistPreferredCliToolTab,
         setToolScope,
     ]);
+
+    const selectedSection = sections[selectedToolIndex] ?? sections[0] ?? null;
+
+    if (isDrawerMode && selectedSection) {
+        return (
+            <View style={styles.container}>
+                <View style={styles.contentContainer}>
+                    <CliDrawerPage
+                        section={selectedSection}
+                        selector={null}
+                        bottomInset={safeArea.bottom}
+                        drawerView={drawerView}
+                        onDrawerItemPress={onDrawerItemPress}
+                    />
+                </View>
+            </View>
+        );
+    }
 
     return (
         <View style={styles.container}>
@@ -420,6 +489,9 @@ export function SessionsList({ data }: SessionsListProps) {
                         offset: pageWidth * index,
                         index,
                     })}
+                    initialNumToRender={1}
+                    maxToRenderPerBatch={2}
+                    windowSize={2}
                     onMomentumScrollEnd={handlePagerMomentumEnd}
                     renderItem={renderToolPage}
                 />
@@ -428,9 +500,94 @@ export function SessionsList({ data }: SessionsListProps) {
     );
 }
 
+export const SessionsList = React.memo(SessionsListView);
+
+const CliDrawerHeader = React.memo(({ title }: { title: string }) => {
+    const styles = stylesheet;
+    return (
+        <View style={styles.drawerSectionHeader}>
+            <Text style={styles.drawerSectionHeaderText}>{title}</Text>
+        </View>
+    );
+});
+
+const CliDrawerItem = React.memo(({ 
+    item, 
+    drawerView, 
+    onDrawerItemPress 
+}: { 
+    item: CliThreadListItem; 
+    drawerView: DrawerViewMode;
+    onDrawerItemPress?: () => void;
+}) => {
+    return (
+        <CliProjectThreadRow
+            item={item}
+            variant="drawer"
+            openMode={drawerView === 'sessions' ? 'direct-session' : 'resolved'}
+            onDrawerItemPress={onDrawerItemPress}
+        />
+    );
+});
+
+const CliDrawerPage = React.memo(({
+    section,
+    selector,
+    bottomInset,
+    drawerView,
+    onDrawerItemPress,
+}: {
+    section: CliThreadToolSection;
+    selector?: React.ReactNode;
+    bottomInset: number;
+    drawerView: DrawerViewMode;
+    onDrawerItemPress?: () => void;
+}) => {
+    const styles = stylesheet;
+    const flattenedItems = React.useMemo(
+        () => section.items.slice(0, DRAWER_VISIBLE_THREADS),
+        [section.items],
+    );
+    const rows = React.useMemo(() => buildDrawerThreadRows(flattenedItems), [flattenedItems]);
+
+    const renderItem = React.useCallback(({ item }: { item: DrawerThreadListRow }) => {
+        if (item.type === 'header') {
+            return <CliDrawerHeader title={item.title} />;
+        }
+
+        return (
+            <CliDrawerItem
+                item={item.item}
+                drawerView={drawerView}
+                onDrawerItemPress={onDrawerItemPress}
+            />
+        );
+    }, [drawerView, onDrawerItemPress]);
+
+    const headerComponent = React.useMemo(() => (
+        selector ? <View style={styles.headerBlock}>{selector}</View> : null
+    ), [selector, styles.headerBlock]);
+
+    return (
+        // FlashList v2 dropped `estimatedItemSize` (the library now
+        // measures items automatically). Keeping the prop around would
+        // fail TypeScript and spam warnings at runtime.
+        <FlashList
+            data={rows}
+            keyExtractor={(item) => item.id}
+            ListHeaderComponent={headerComponent}
+            ListEmptyComponent={<EmptyToolState tool={section.tool} compact />}
+            renderItem={renderItem}
+            contentContainerStyle={[styles.pageContent, { paddingBottom: bottomInset + 36 }]}
+        />
+    );
+});
+
 const CliToolPage = React.memo(({
     section,
     pageWidth,
+    isStandalone = false,
+    selector = null,
     bottomInset,
     scope,
     toolExpanded,
@@ -441,12 +598,14 @@ const CliToolPage = React.memo(({
 }: {
     section: CliThreadToolSection;
     pageWidth: number;
+    isStandalone?: boolean;
+    selector?: React.ReactNode;
     bottomInset: number;
     scope: CliThreadScope;
     toolExpanded: boolean;
     expandedProjects: Record<string, boolean>;
-    onSetScope: (tool: NativeCliTool, scope: CliThreadScope) => void;
-    onToggleToolExpanded: (tool: NativeCliTool) => void;
+    onSetScope: (tool: CliThreadDisplayTool, scope: CliThreadScope) => void;
+    onToggleToolExpanded: (tool: CliThreadDisplayTool) => void;
     onToggleProjectExpanded: (projectId: string) => void;
 }) => {
     const styles = stylesheet;
@@ -470,6 +629,7 @@ const CliToolPage = React.memo(({
     const header = React.useMemo(() => (
         <CliToolPageHeader
             section={section}
+            selector={selector}
             scope={scope}
             scopedProjectCount={scopedProjects.projects.length}
             expanded={toolExpanded}
@@ -479,17 +639,14 @@ const CliToolPage = React.memo(({
     ), [onSetScope, onToggleToolExpanded, scope, scopedProjects.projects.length, section, toolExpanded]);
 
     return (
-        <View style={[styles.pageContainer, { width: pageWidth }]}>
-            <FlatList
+        <View style={[styles.pageContainer, !isStandalone && { width: pageWidth }]}>
+            <FlashList
                 data={visibleProjects}
                 renderItem={renderProject}
                 keyExtractor={(item) => item.id}
                 ListHeaderComponent={header}
                 ListEmptyComponent={<EmptyToolState tool={section.tool} />}
                 contentContainerStyle={[styles.pageContent, { paddingBottom: bottomInset + 128 }]}
-                windowSize={5}
-                maxToRenderPerBatch={8}
-                initialNumToRender={12}
             />
         </View>
     );
@@ -497,6 +654,7 @@ const CliToolPage = React.memo(({
 
 const CliToolPageHeader = React.memo(({
     section,
+    selector,
     scope,
     scopedProjectCount,
     expanded,
@@ -504,17 +662,19 @@ const CliToolPageHeader = React.memo(({
     onToggleExpanded,
 }: {
     section: CliThreadToolSection;
+    selector?: React.ReactNode;
     scope: CliThreadScope;
     scopedProjectCount: number;
     expanded: boolean;
-    onSetScope: (tool: NativeCliTool, scope: CliThreadScope) => void;
-    onToggleExpanded: (tool: NativeCliTool) => void;
+    onSetScope: (tool: CliThreadDisplayTool, scope: CliThreadScope) => void;
+    onToggleExpanded: (tool: CliThreadDisplayTool) => void;
 }) => {
     const styles = stylesheet;
     const canExpand = scope === 'all-projects' && scopedProjectCount > DEFAULT_VISIBLE_PROJECTS;
 
     return (
         <View style={styles.headerBlock}>
+            {selector}
             <View style={styles.summaryRow}>
                 <View>
                     <Text style={styles.summaryTitle}>
@@ -540,7 +700,9 @@ const CliToolPageHeader = React.memo(({
                 <View style={styles.scopeRow}>
                     {(['current-project', 'all-projects'] as const).map((option) => {
                         const active = scope === option;
-                        const label = option === 'current-project' ? 'Current project' : 'All projects';
+                        const label = option === 'current-project'
+                            ? t('sessionHistory.currentProject')
+                            : t('sessionHistory.allProjects');
                         return (
                             <Pressable
                                 key={option}
@@ -573,7 +735,7 @@ const CliToolPageHeader = React.memo(({
                     }}
                 >
                     <Text style={styles.summaryButtonText}>
-                        {expanded ? 'Show less' : 'Show more'}
+                        {expanded ? t('sessionHistory.showLess') : t('sessionHistory.showMore')}
                     </Text>
                 </Pressable>
             )}
@@ -581,16 +743,55 @@ const CliToolPageHeader = React.memo(({
     );
 });
 
-const EmptyToolState = React.memo(({ tool }: { tool: NativeCliTool }) => {
+const CliToolSelector = React.memo(({
+    selectedTool,
+    onSelectTool,
+}: {
+    selectedTool: CliThreadDisplayTool;
+    onSelectTool: (tool: CliThreadDisplayTool) => void;
+}) => {
+    const styles = stylesheet;
+
+    return (
+        <View style={styles.scopeRow}>
+            {CLI_THREAD_TOOL_ORDER.map((tool) => {
+                const active = tool === selectedTool;
+                return (
+                    <Pressable
+                        key={tool}
+                        style={[
+                            styles.scopeChip,
+                            active && styles.scopeChipActive,
+                        ]}
+                        onPress={() => onSelectTool(tool)}
+                    >
+                        <Text
+                            style={[
+                                styles.scopeChipText,
+                                active && styles.scopeChipTextActive,
+                            ]}
+                        >
+                            {getCliSectionTitle(tool)}
+                        </Text>
+                    </Pressable>
+                );
+            })}
+        </View>
+    );
+});
+
+const EmptyToolState = React.memo(({ tool, compact = false }: { tool: CliThreadDisplayTool; compact?: boolean }) => {
     const styles = stylesheet;
 
     return (
         <View style={styles.emptyState}>
             <Text style={styles.emptyStateTitle}>
-                No {getCliSectionTitle(tool)} work yet
+                {t('sessionHistory.noWorkYet', { tool: getCliSectionTitle(tool) })}
             </Text>
             <Text style={styles.emptyStateSubtitle}>
-                Start a {getCliSectionTitle(tool)} session on your computer, and it will show up here for quick continue.
+                {compact
+                    ? t('sessionHistory.startSessionCompact', { tool: getCliSectionTitle(tool) })
+                    : t('sessionHistory.startSessionDetail', { tool: getCliSectionTitle(tool) })}
             </Text>
         </View>
     );
@@ -687,12 +888,32 @@ const CliProjectCard = React.memo(({
     );
 });
 
-const CliProjectThreadRow = React.memo(({ item }: { item: CliThreadListItem }) => {
+const CliProjectThreadRow = React.memo(({
+    item,
+    variant = 'default',
+    openMode = 'resolved',
+    onDrawerItemPress,
+}: {
+    item: CliThreadListItem;
+    variant?: 'default' | 'drawer';
+    openMode?: 'resolved' | 'direct-session';
+    onDrawerItemPress?: () => void;
+}) => {
     const styles = stylesheet;
     const navigateToSession = useNavigateToSession();
     const navigateDirectlyToSession = useNavigateDirectlyToSession();
     const longPressTriggeredRef = React.useRef(false);
     const [opening, openThread] = useOrbitAction(async () => {
+        if (openMode === 'direct-session' && item.source === 'session' && item.session) {
+            if (shouldUsePhoneWorkspaceNavigation()) {
+                activatePhoneWorkspaceSession(item.session.id);
+                return;
+            }
+
+            navigateDirectlyToSession(item.session.id);
+            return;
+        }
+
         await openCliThreadItem(item, {
             navigateToSession,
             navigateDirectlyToSession,
@@ -737,23 +958,31 @@ const CliProjectThreadRow = React.memo(({ item }: { item: CliThreadListItem }) =
             return;
         }
 
+        if (variant === 'drawer') {
+            onDrawerItemPress?.();
+        }
+
         openThread();
-    }, [deleting, openThread, opening]);
+    }, [deleting, onDrawerItemPress, openThread, opening, variant]);
 
     const threadTrigger = (
         <Pressable
-            style={styles.threadRow}
+            style={variant === 'drawer' ? styles.drawerThreadRow : styles.threadRow}
             onPress={handlePress}
             onLongPress={requestDeleteThread}
             delayLongPress={350}
         >
             <View style={styles.threadRowContent}>
-                <Text style={styles.threadRowTitle} numberOfLines={1}>
+                <Text style={variant === 'drawer' ? styles.drawerThreadTitle : styles.threadRowTitle} numberOfLines={1}>
                     {item.title}
                 </Text>
             </View>
-            <Text style={styles.threadRowMeta}>
-                {deleting ? `${t('common.delete')}...` : opening ? 'Connecting...' : formatCliThreadUpdatedAt(item.updatedAt)}
+            <Text style={variant === 'drawer' ? styles.drawerThreadMeta : styles.threadRowMeta}>
+                {deleting
+                    ? `${t('common.delete')}...`
+                    : opening
+                        ? t('terminal.connecting')
+                        : formatCliThreadUpdatedAt(item.updatedAt)}
             </Text>
         </Pressable>
     );
