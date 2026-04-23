@@ -20,6 +20,20 @@ const mmkvStores = new Map<string, Map<string, string>>();
 const platform = { OS: 'ios' as 'ios' | 'android' | 'web' };
 const originalEnv = { ...process.env };
 
+// Build-time app config (app.config.js → extra.app) consumed by serverConfig.
+// Tests mutate this between cases to simulate different build variants.
+const buildConfig: {
+    serverUrl?: string;
+    fallbackServerUrls?: string[];
+} = {
+    serverUrl: 'https://api.2003383.xyz',
+    fallbackServerUrls: ['http://192.227.228.53:3005'],
+};
+
+vi.mock('./appConfig', () => ({
+    loadAppConfig: () => ({ ...buildConfig }),
+}));
+
 vi.mock('react-native-mmkv', () => ({
     MMKV: class MockMMKV {
         private readonly store: Map<string, string>;
@@ -69,6 +83,11 @@ describe('serverConfig', () => {
         delete process.env.EXPO_PUBLIC_ORBIT_SERVER_URL;
         vi.unstubAllGlobals();
         (globalThis as { __DEV__?: boolean }).__DEV__ = false;
+        // Reset the mocked build config between tests so each case starts
+        // from a predictable "dev bundle with HTTP fallback" baseline and
+        // can opt into the production (empty fallback) shape explicitly.
+        buildConfig.serverUrl = 'https://api.2003383.xyz';
+        buildConfig.fallbackServerUrls = ['http://192.227.228.53:3005'];
     });
 
     afterEach(() => {
@@ -132,6 +151,32 @@ describe('serverConfig', () => {
         expect(fetchMock).toHaveBeenNthCalledWith(
             2,
             'http://192.227.228.53:3005/health',
+            expect.objectContaining({ method: 'GET' }),
+        );
+    });
+
+    // Regression guard for App Store / Play Store builds: a production bundle
+    // MUST NOT silently downgrade to plain HTTP if its HTTPS host is down.
+    // Doing so would ship bearer tokens over cleartext on Android (where
+    // iOS ATS enforcement does not exist).
+    it('never probes plain-HTTP fallbacks when the build config has no fallback list', async () => {
+        buildConfig.serverUrl = 'https://api.example.com';
+        buildConfig.fallbackServerUrls = [];
+
+        const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const { ensureReachableServerUrl, getServerUrlCandidates } = await loadServerConfig();
+
+        expect(getServerUrlCandidates()).toEqual(['https://api.example.com']);
+
+        // Even when the primary is unreachable we stick with it — the
+        // caller is responsible for surfacing the connection error, NOT
+        // for switching protocols.
+        await expect(ensureReachableServerUrl()).resolves.toBe('https://api.example.com');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledWith(
+            'https://api.example.com/health',
             expect.objectContaining({ method: 'GET' }),
         );
     });

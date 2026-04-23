@@ -9,7 +9,16 @@ export interface AppConfig {
     elevenLabsAgentId?: string;
     consoleLoggingDefault?: boolean;
     serverUrl?: string;
+    /**
+     * Build-time list of server URLs to try as a fallback if the primary
+     * {@link serverUrl} is unreachable. Production App Store bundles ship
+     * an EMPTY list so the app never downgrades to plain HTTP; dev/preview
+     * bundles may include local/dev HTTP endpoints.
+     */
+    fallbackServerUrls?: string[];
     urlScheme?: string;
+    publicAppUrl?: string;
+    publicSiteUrl?: string;
 }
 
 /**

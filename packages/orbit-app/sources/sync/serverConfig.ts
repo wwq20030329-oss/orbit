@@ -1,6 +1,7 @@
 import { MMKV } from 'react-native-mmkv';
 import { Platform } from 'react-native';
 import { normalizeServerUrl } from './serverUrlNormalize';
+import { loadAppConfig } from './appConfig';
 
 // Diagnostics storage persists across logouts, but server selection itself is
 // intentionally no longer user-configurable inside the app.
@@ -9,8 +10,17 @@ const serverConfigStorage = new MMKV({ id: 'server-config' });
 const LEGACY_SERVER_KEY = 'custom-server-url';
 const LOG_SERVER_KEY = 'log-server-url';
 const ACTIVE_SERVER_KEY = 'active-server-url';
-const DEFAULT_SERVER_URL = 'https://api.2003383.xyz';
-const FALLBACK_SERVER_URLS = ['http://192.227.228.53:3005'];
+
+// Defaults come from the build-time app config (see app.config.js). Production
+// App Store bundles receive an empty fallback list, which means the app will
+// NEVER auto-downgrade to plain HTTP. Keeping a hardcoded fallback in source
+// previously caused Android production builds to silently send bearer tokens
+// over cleartext if the HTTPS host was unreachable.
+const BUILD_CONFIG = loadAppConfig();
+const DEFAULT_SERVER_URL = BUILD_CONFIG.serverUrl || 'https://api.2003383.xyz';
+const FALLBACK_SERVER_URLS: string[] = Array.isArray(BUILD_CONFIG.fallbackServerUrls)
+    ? BUILD_CONFIG.fallbackServerUrls
+    : [];
 const IS_NATIVE_RUNTIME = Platform.OS !== 'web';
 const SERVER_PROBE_TIMEOUT_MS = 4000;
 
