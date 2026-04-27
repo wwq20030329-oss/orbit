@@ -100,7 +100,6 @@ export interface EnvironmentConfig {
     template: string;
     projectTemplate: string;
     projectPath: string;
-    authenticatedWebUrl?: string;
     cliCommand?: string;
 }
 
@@ -254,6 +253,93 @@ function runCommandChecked(
     }
 
     return typeof result.stdout === "string" ? result.stdout : "";
+}
+
+type ResolvedCommand = {
+    command: string;
+    args: string[];
+};
+
+type CommandCandidate = {
+    command: string;
+    prefixArgs: string[];
+};
+
+let cachedYarnCommand: CommandCandidate | null = null;
+let cachedTsxCommand: CommandCandidate | null = null;
+
+function resolveCommand(command: string, args: string[]): ResolvedCommand {
+    if (command === "yarn") {
+        if (cachedYarnCommand === null) {
+            cachedYarnCommand = resolveYarnCommand();
+        }
+
+        return {
+            command: cachedYarnCommand.command,
+            args: [...cachedYarnCommand.prefixArgs, ...args],
+        };
+    }
+
+    if (command === "tsx") {
+        if (cachedTsxCommand === null) {
+            cachedTsxCommand = resolveTsxCommand();
+        }
+
+        return {
+            command: cachedTsxCommand.command,
+            args: [...cachedTsxCommand.prefixArgs, ...args],
+        };
+    }
+
+    return { command, args };
+}
+
+function resolveYarnCommand(): CommandCandidate {
+    const yarnCandidates: CommandCandidate[] = [
+        { command: "yarn", prefixArgs: [] },
+        { command: "corepack", prefixArgs: ["yarn"] },
+    ];
+
+    for (const candidate of yarnCandidates) {
+        const result = spawnSync(candidate.command, [...candidate.prefixArgs, "--version"], {
+            stdio: "ignore",
+        });
+        if (!result.error && result.status === 0) {
+            return candidate;
+        }
+    }
+
+    throw new Error("Unable to run Yarn commands: neither `yarn` nor `corepack yarn` is available on PATH.");
+}
+
+function resolveTsxCommand(): CommandCandidate {
+    const localTsxPath = path.join(
+        REPO_ROOT,
+        "node_modules",
+        ".bin",
+        process.platform === "win32" ? "tsx.cmd" : "tsx",
+    );
+    const tsxCandidates: CommandCandidate[] = [
+        { command: localTsxPath, prefixArgs: [] },
+        { command: "tsx", prefixArgs: [] },
+        { command: "npx", prefixArgs: ["tsx"] },
+    ];
+
+    for (const candidate of tsxCandidates) {
+        if (candidate.command === localTsxPath && !fs.existsSync(localTsxPath)) {
+            continue;
+        }
+
+        const result = spawnSync(candidate.command, [...candidate.prefixArgs, "--version"], {
+            cwd: REPO_ROOT,
+            stdio: "ignore",
+        });
+        if (!result.error && result.status === 0) {
+            return candidate;
+        }
+    }
+
+    throw new Error("Unable to run TSX commands: neither local `tsx`, PATH `tsx`, nor `npx tsx` is available.");
 }
 
 function parseVersionParts(value?: string): number[] {
@@ -426,9 +512,8 @@ async function ensureIosMetroRunning(envDir: string, envVars: Record<string, str
 async function ensureEnvironmentReadyForIos(name: string, envDir: string): Promise<void> {
     const config = readEnvironmentConfig(name);
     const serverRunning = isPortInUse(config.serverPort);
-    const webRunning = isPortInUse(config.expoPort);
 
-    if (!serverRunning || !webRunning) {
+    if (!serverRunning) {
         console.log("Environment services are not running. Starting them now...");
         await startEnvironmentServices(name);
     }
@@ -603,17 +688,22 @@ function spawnService(
     args: string[],
     opts: { cwd: string; env: Record<string, string | undefined>; logFile: string },
 ): number {
+    const resolved = resolveCommand(command, args);
     fs.mkdirSync(path.dirname(opts.logFile), { recursive: true });
     const logFd = fs.openSync(opts.logFile, "a");
-    const child = spawn(command, args, {
+    const child = spawn(resolved.command, resolved.args, {
         cwd: opts.cwd,
         env: opts.env,
         stdio: ["ignore", logFd, logFd],
         detached: true,
     });
+    if (child.pid === undefined) {
+        fs.closeSync(logFd);
+        throw new Error(`Failed to start service with ${resolved.command} ${resolved.args.join(" ")}`);
+    }
     child.unref();
     fs.closeSync(logFd);
-    return child.pid!;
+    return child.pid;
 }
 
 export const VALID_TEMPLATES = ["authenticated-empty", "empty"] as const;
@@ -669,15 +759,19 @@ export async function createEnvironment(opts?: { noSwitch?: boolean }): Promise<
     console.log(`Running database migration for ${name}...`);
     const migrationEnv = buildEnvVars(envDir, serverPort, expoPort);
     const standaloneTs = path.join(REPO_ROOT, "packages", "orbit-server", "sources", "standalone.ts");
+    const migrationCommand = resolveCommand("tsx", [standaloneTs, "migrate"]);
     const result = spawnSync(
-        "tsx",
-        [standaloneTs, "migrate"],
+        migrationCommand.command,
+        migrationCommand.args,
         {
             cwd: path.join(REPO_ROOT, "packages", "orbit-server"),
             env: { ...process.env, ...migrationEnv },
             stdio: "inherit",
         }
     );
+    if (result.error) {
+        throw result.error;
+    }
     if (result.status !== 0) {
         throw new Error(`Migration failed with exit code ${result.status}`);
     }
@@ -689,14 +783,12 @@ export async function createEnvironment(opts?: { noSwitch?: boolean }): Promise<
     console.log("");
     console.log(`Environment created: ${name}`);
     console.log(`  Server: http://localhost:${serverPort}`);
-    console.log(`  Webapp: http://localhost:${expoPort}`);
     console.log(`  Project: ${projectPath}`);
     console.log("");
     const envShRelative = path.relative(process.cwd(), path.join(envDir, "env.sh"));
     console.log("Start in separate terminals:");
     console.log("");
     console.log(`  Server:  yarn env:server`);
-    console.log(`  Webapp:  yarn env:web`);
     console.log("");
     console.log("CLI (from any terminal, anywhere):");
     console.log("");
@@ -735,29 +827,12 @@ export async function startEnvironmentServices(name: string): Promise<void> {
         throw new Error(`Server failed to start. Check logs: ${serverLogFile}`);
     }
     console.log(`  Server is healthy.`);
-
-    const webLogFile = path.join(envDir, "web", "stdout.log");
-    fs.mkdirSync(path.join(envDir, "web"), { recursive: true });
-    console.log(`Starting web on port ${config.expoPort}...`);
-    const webPid = spawnService("yarn", ["web", "--port", String(config.expoPort)], {
-        cwd: path.join(REPO_ROOT, "packages", "orbit-app"),
-        env: { ...mergedEnv, BROWSER: "none" },
-        logFile: webLogFile,
-    });
-    writePidFile(envDir, "web", webPid);
-
-    try {
-        await waitFor(() => isPortInUse(config.expoPort), 30_000, "web");
-    } catch {
-        throw new Error(`Web failed to start. Check logs: ${webLogFile}`);
-    }
-    console.log(`  Web is listening.`);
 }
 
 export async function seedEnvironment(name: string): Promise<void> {
     const envDir = getEnvironmentDir(name);
     const config = readEnvironmentConfig(name);
-    const serverUrl = `http://localhost:${config.serverPort}`;
+    const serverUrl = resolveConfiguredDevServerUrl(config.serverPort);
 
     try {
         const res = await fetch(`${serverUrl}/`);
@@ -815,8 +890,7 @@ export async function seedEnvironment(name: string): Promise<void> {
         ),
     );
 
-    const authenticatedWebUrl = buildAuthenticatedWebUrl(config.expoPort, token, secretBase64);
-    writeEnvironmentConfig({ ...config, authenticatedWebUrl });
+    writeEnvironmentConfig(config);
 
     const daemonStatePath = path.join(envDir, "cli", "home", "daemon.state.json");
     if (fs.existsSync(daemonStatePath)) {
@@ -852,14 +926,13 @@ export async function seedEnvironment(name: string): Promise<void> {
     }, 10_000, "machine registration").then(() => true, () => false);
 
     console.log(`  Seeded: credentials written, daemon ${machineRegistered ? "registered" : "starting"}`);
-    console.log(`  Auth URL: ${authenticatedWebUrl}`);
 }
 
 export function stopEnvironment(name: string): void {
     const envDir = getEnvironmentDir(name);
     let killed = 0;
 
-    for (const service of ["server", "web", IOS_METRO_SERVICE] as const) {
+    for (const service of ["server", IOS_METRO_SERVICE] as const) {
         const pid = readPidFile(envDir, service);
         if (pid !== null) {
             if (isProcessAlive(pid)) {
@@ -929,19 +1002,13 @@ function commandList() {
         const marker = isCurrent ? " *" : "  ";
 
         const serverUp = isPortInUse(config.serverPort);
-        const expoUp = isPortInUse(config.expoPort);
 
         const serverStatus = serverUp ? "running" : "stopped";
-        const expoStatus = expoUp ? "running" : "stopped";
 
         const serverUrl = `http://localhost:${config.serverPort}`;
-        const bundlerUrl = `http://localhost:${config.expoPort}`;
-        const webAppUrl = config.authenticatedWebUrl ?? bundlerUrl;
 
         console.log(`${marker} ${envName}`);
         console.log(`     Server:  ${serverUrl} (${serverStatus})`);
-        console.log(`     Bundler: ${bundlerUrl} (${expoStatus})`);
-        console.log(`     Web app: ${webAppUrl}`);
         console.log(`     Created: ${config.createdAt}`);
         console.log("");
     }
@@ -990,10 +1057,7 @@ function commandCurrent() {
     console.log(envShPath);
 
     const config = readEnvironmentConfig(currentConfig.current);
-    const webAppUrl = config.authenticatedWebUrl ?? `http://localhost:${config.expoPort}`;
     console.log(`\nServer:  http://localhost:${config.serverPort}`);
-    console.log(`Bundler: http://localhost:${config.expoPort}`);
-    console.log(`Web app: ${webAppUrl}`);
 }
 
 async function commandRun(service: string, serviceArgs: string[] = []) {
@@ -1019,27 +1083,13 @@ async function commandRun(service: string, serviceArgs: string[] = []) {
     switch (service) {
         case "server": {
             console.log(`Starting server for environment "${envName}" on port ${config.serverPort}...`);
+            const serverCommand = resolveCommand("yarn", ["standalone", "serve"]);
             const result = spawnSync(
-                "yarn",
-                ["standalone", "serve"],
+                serverCommand.command,
+                serverCommand.args,
                 {
                     cwd: path.join(REPO_ROOT, "packages", "orbit-server"),
                     env: mergedEnv,
-                    stdio: "inherit",
-                }
-            );
-            process.exit(result.status ?? 1);
-            break;
-        }
-        case "web": {
-            console.log(`Starting web app for environment "${envName}" on port ${config.expoPort}...`);
-            const result = spawnSync(
-                "yarn",
-                ["web", "--port", String(config.expoPort)],
-                {
-                    cwd: path.join(REPO_ROOT, "packages", "orbit-app"),
-                    // Expo treats `--web` as "open in browser". Disable that for env-managed runs.
-                    env: { ...mergedEnv, BROWSER: "none" },
                     stdio: "inherit",
                 }
             );
@@ -1058,9 +1108,10 @@ async function commandRun(service: string, serviceArgs: string[] = []) {
         }
         case "android": {
             console.log(`Starting Android app for environment "${envName}"...`);
+            const androidCommand = resolveCommand("yarn", ["android"]);
             const result = spawnSync(
-                "yarn",
-                ["android"],
+                androidCommand.command,
+                androidCommand.args,
                 {
                     cwd: path.join(REPO_ROOT, "packages", "orbit-app"),
                     env: mergedEnv,
@@ -1085,7 +1136,7 @@ async function commandRun(service: string, serviceArgs: string[] = []) {
             break;
         }
         default:
-            console.error(`Unknown service: "${service}". Use: server, web, ios, android, cli`);
+            console.error(`Unknown service: "${service}". Use: server, ios, android, cli`);
             process.exit(1);
     }
 }
@@ -1097,12 +1148,9 @@ async function commandRun(service: string, serviceArgs: string[] = []) {
 function buildEnvVars(envDir: string, serverPort: number, expoPort: number): Record<string, string> {
     const devAuth = readDevAuth(envDir);
     const projectDir = path.join(envDir, "project");
-    const externalServerUrl = process.env.ORBIT_DEV_SERVER_URL || process.env.HAPPY_DEV_SERVER_URL;
-    const externalLogServerUrl = process.env.ORBIT_DEV_LOG_SERVER_URL || process.env.HAPPY_DEV_LOG_SERVER_URL || "";
-    const startupTimeoutMs = externalServerUrl && externalServerUrl.trim().length > 0 ? "5000" : "1200";
-    const resolvedServerUrl = externalServerUrl && externalServerUrl.trim().length > 0
-        ? normalizeExternalDevServerUrl(externalServerUrl.trim())
-        : `http://localhost:${serverPort}`;
+    const externalLogServerUrl = process.env.ORBIT_DEV_LOG_SERVER_URL || "";
+    const resolvedServerUrl = resolveConfiguredDevServerUrl(serverPort);
+    const startupTimeoutMs = resolvedServerUrl.includes("localhost") ? "1200" : "5000";
 
     return {
         // Server
@@ -1117,29 +1165,32 @@ function buildEnvVars(envDir: string, serverPort: number, expoPort: number): Rec
         // App (Expo)
         EXPO_PUBLIC_SERVER_URL: resolvedServerUrl,
         EXPO_PUBLIC_ORBIT_SERVER_URL: resolvedServerUrl,
-        EXPO_PUBLIC_HAPPY_SERVER_URL: resolvedServerUrl,
         EXPO_PUBLIC_LOG_SERVER_URL: externalLogServerUrl,
         EXPO_PORT: String(expoPort),
 
         // CLI
         ORBIT_SERVER_URL: resolvedServerUrl,
-        ORBIT_WEBAPP_URL: `http://localhost:${expoPort}`,
         ORBIT_HOME_DIR: path.join(envDir, "cli", "home"),
         ORBIT_PROJECT_DIR: projectDir,
         ORBIT_VARIANT: "dev",
+        ORBIT_APP_URL_SCHEME: "orbitdev",
         ORBIT_STARTUP_TIMEOUT_MS: startupTimeoutMs,
-        HAPPY_SERVER_URL: resolvedServerUrl,
-        HAPPY_WEBAPP_URL: `http://localhost:${expoPort}`,
-        HAPPY_HOME_DIR: path.join(envDir, "cli", "home"),
-        HAPPY_PROJECT_DIR: projectDir,
-        HAPPY_VARIANT: "dev",
-        HAPPY_STARTUP_TIMEOUT_MS: startupTimeoutMs,
         DEBUG: "1",
         ...(devAuth ? {
             EXPO_PUBLIC_DEV_TOKEN: devAuth.token,
             EXPO_PUBLIC_DEV_SECRET: devAuth.secret,
         } : {}),
     };
+}
+
+function resolveConfiguredDevServerUrl(serverPort: number): string {
+    const externalServerUrl = process.env.ORBIT_DEV_SERVER_URL;
+
+    if (externalServerUrl && externalServerUrl.trim().length > 0) {
+        return normalizeExternalDevServerUrl(externalServerUrl.trim());
+    }
+
+    return `http://localhost:${serverPort}`;
 }
 
 function normalizeExternalDevServerUrl(serverUrl: string): string {
@@ -1181,7 +1232,6 @@ function buildEnvSh(name: string, envDir: string, serverPort: number, expoPort: 
     lines.push("# App (Expo)");
     lines.push(`export EXPO_PUBLIC_SERVER_URL="${vars.EXPO_PUBLIC_SERVER_URL}"`);
     lines.push(`export EXPO_PUBLIC_ORBIT_SERVER_URL="${vars.EXPO_PUBLIC_ORBIT_SERVER_URL}"`);
-    lines.push(`export EXPO_PUBLIC_HAPPY_SERVER_URL="${vars.EXPO_PUBLIC_HAPPY_SERVER_URL}"`);
     lines.push(`export EXPO_PUBLIC_LOG_SERVER_URL="${vars.EXPO_PUBLIC_LOG_SERVER_URL}"`);
     if (vars.EXPO_PUBLIC_DEV_TOKEN && vars.EXPO_PUBLIC_DEV_SECRET) {
         lines.push(`export EXPO_PUBLIC_DEV_TOKEN="${vars.EXPO_PUBLIC_DEV_TOKEN}"`);
@@ -1192,17 +1242,11 @@ function buildEnvSh(name: string, envDir: string, serverPort: number, expoPort: 
 
     lines.push("# CLI");
     lines.push(`export ORBIT_SERVER_URL="${vars.ORBIT_SERVER_URL}"`);
-    lines.push(`export ORBIT_WEBAPP_URL="${vars.ORBIT_WEBAPP_URL}"`);
     lines.push(`export ORBIT_HOME_DIR="${vars.ORBIT_HOME_DIR}"`);
     lines.push(`export ORBIT_PROJECT_DIR="${vars.ORBIT_PROJECT_DIR}"`);
     lines.push(`export ORBIT_VARIANT=dev`);
+    lines.push(`export ORBIT_APP_URL_SCHEME="${vars.ORBIT_APP_URL_SCHEME}"`);
     lines.push(`export ORBIT_STARTUP_TIMEOUT_MS="${vars.ORBIT_STARTUP_TIMEOUT_MS}"`);
-    lines.push(`export HAPPY_SERVER_URL="${vars.HAPPY_SERVER_URL}"`);
-    lines.push(`export HAPPY_WEBAPP_URL="${vars.HAPPY_WEBAPP_URL}"`);
-    lines.push(`export HAPPY_HOME_DIR="${vars.HAPPY_HOME_DIR}"`);
-    lines.push(`export HAPPY_PROJECT_DIR="${vars.HAPPY_PROJECT_DIR}"`);
-    lines.push(`export HAPPY_VARIANT=dev`);
-    lines.push(`export HAPPY_STARTUP_TIMEOUT_MS="${vars.HAPPY_STARTUP_TIMEOUT_MS}"`);
     lines.push(`export DEBUG=1`);
     lines.push(`export PATH="${path.join(envDir, "bin")}:$PATH"`);
     lines.push("");
@@ -1241,14 +1285,6 @@ function writeEnvCommands(envDir: string): void {
     }
 }
 
-function buildAuthenticatedWebUrl(expoPort: number, token: string, secret: string): string {
-    const webParams = new URLSearchParams({
-        dev_token: token,
-        dev_secret: Buffer.from(secret, "base64").toString("base64url"),
-    });
-    return `http://localhost:${expoPort}/?${webParams}`;
-}
-
 function buildCliCommand(envDir: string): string {
     return `source "${path.join(envDir, "env.sh")}" && orbit`;
 }
@@ -1284,7 +1320,8 @@ async function commandUp(template: Template, opts?: { noSwitch?: boolean }) {
         console.log("Building CLI (needed for daemon)...");
         const envVars = buildEnvVars(envDir, config.serverPort, config.expoPort);
         const mergedEnv: Record<string, string | undefined> = { ...process.env, ...envVars };
-        const buildResult = spawnSync("yarn", ["build"], {
+        const buildCommand = resolveCommand("yarn", ["build"]);
+        const buildResult = spawnSync(buildCommand.command, buildCommand.args, {
             cwd: path.join(REPO_ROOT, "packages", "orbit-cli"),
             env: mergedEnv,
             stdio: "inherit",
@@ -1303,18 +1340,13 @@ async function commandUp(template: Template, opts?: { noSwitch?: boolean }) {
     console.log("");
     console.log(`Environment "${envName}" is up!`);
     console.log(`  Server: http://localhost:${config.serverPort}`);
-    console.log(`  Web:    http://localhost:${config.expoPort}`);
     console.log(`  Project: ${finalConfig.projectPath}`);
 
-    if (finalConfig.authenticatedWebUrl) {
-        console.log(`  Open:   ${finalConfig.authenticatedWebUrl}`);
-    }
     if (finalConfig.cliCommand) {
         console.log(`  CLI:    ${finalConfig.cliCommand}`);
     }
 
     console.log(`  Logs:   ${path.relative(process.cwd(), path.join(envDir, "server", "stdout.log"))}`);
-    console.log(`          ${path.relative(process.cwd(), path.join(envDir, "web", "stdout.log"))}`);
     console.log(`  Stop:   yarn env:down`);
     console.log("");
 }
@@ -1355,9 +1387,8 @@ function commandTailscale() {
     // Reset existing funnels
     try { execSync("tailscale funnel reset", { stdio: "ignore" }); } catch {}
 
-    // Expose web app on 443 and server on 8443
+    // Expose the API server on 8443. The web app is no longer part of local envs.
     try {
-        execSync(`tailscale funnel --bg ${config.expoPort}`, { stdio: "inherit" });
         execSync(`tailscale funnel --bg --https=8443 ${config.serverPort}`, { stdio: "inherit" });
     } catch (e: any) {
         console.error("Failed to set up Tailscale funnel:", e.message);
@@ -1367,7 +1398,6 @@ function commandTailscale() {
     console.log("");
     console.log(`Tailscale funnel active for "${currentConfig.current}":`);
     console.log("");
-    console.log(`  Web:    https://${hostname}`);
     console.log(`  Server: https://${hostname}:8443`);
     console.log("");
 }
@@ -1407,7 +1437,7 @@ async function main(): Promise<void> {
             break;
         case "run":
             if (!args[0]) {
-                console.error("Usage: yarn env:server | yarn env:web | yarn env:cli");
+                console.error("Usage: yarn env:server | yarn env:ios | yarn env:android | yarn env:cli");
                 process.exit(1);
             }
             await commandRun(args[0], args.slice(1));
@@ -1445,16 +1475,15 @@ Usage:
   yarn env:use <name>       Switch to a different environment
   yarn env:remove <name>    Delete an environment
   yarn env:current          Print current environment's env.sh path
-  yarn env:seed             Seed auth for CLI + web (requires server running)
+  yarn env:seed             Seed auth for CLI daemon (requires server running)
 
   yarn env:server           Start the server (current environment)
-  yarn env:web              Start the web app (current environment)
   yarn env:ios              Start the iOS simulator app (reuses installed app when possible)
   yarn env:ios:rebuild      Force rebuild + reinstall the iOS simulator app
   yarn env:android          Start the Android app (current environment)
   yarn env:cli              Start the CLI (current environment)
 
-  yarn env:tailscale        Expose server + web via Tailscale funnel
+  yarn env:tailscale        Expose server via Tailscale funnel
 `);
             if (subcommand && subcommand !== "--help" && subcommand !== "-h") {
                 process.exit(1);

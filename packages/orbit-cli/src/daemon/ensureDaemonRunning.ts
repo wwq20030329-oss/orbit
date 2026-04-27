@@ -1,11 +1,21 @@
 import { logger } from '@/ui/logger'
-import { isDaemonRunningCurrentlyInstalledOrbitVersion } from './controlClient'
+import { checkIfDaemonRunningAndCleanupStaleState, isDaemonRunningCurrentlyInstalledOrbitVersion } from './controlClient'
 import { spawnOrbitCLI } from '@/utils/spawnOrbitCLI'
+import { install as installDaemonLaunchAgent } from './install'
+import { isLaunchAgentCurrent } from './mac/install'
 
 export async function ensureDaemonRunning(): Promise<void> {
   logger.debug('Ensuring Orbit background service is running and matches our version...')
 
-  if (await isDaemonRunningCurrentlyInstalledOrbitVersion()) {
+  const daemonAlreadyRunning = await isDaemonRunningCurrentlyInstalledOrbitVersion()
+  if (daemonAlreadyRunning) {
+    if (!isLaunchAgentCurrent()) {
+      try {
+        await installDaemonLaunchAgent()
+      } catch (error) {
+        logger.debug('Failed to install Orbit daemon LaunchAgent:', error)
+      }
+    }
     return
   }
 
@@ -18,6 +28,19 @@ export async function ensureDaemonRunning(): Promise<void> {
   })
   daemonProcess.unref()
 
-  // Give daemon a moment to write PID & port file before first notification.
-  await new Promise(resolve => setTimeout(resolve, 200))
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (await checkIfDaemonRunningAndCleanupStaleState()) {
+      if (!isLaunchAgentCurrent()) {
+        try {
+          await installDaemonLaunchAgent()
+        } catch (error) {
+          logger.debug('Failed to install Orbit daemon LaunchAgent:', error)
+        }
+      }
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+
+  throw new Error('Failed to start Orbit background service')
 }

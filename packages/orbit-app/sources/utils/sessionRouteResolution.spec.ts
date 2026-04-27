@@ -22,6 +22,7 @@ describe('sessionRouteResolution', () => {
     hoisted.resolveCanonicalSessionId.mockReset();
     hoisted.resolveExistingDisplaySessionId.mockReset();
     hoisted.resolveExistingCanonicalSessionId.mockReset();
+    vi.useRealTimers();
   });
 
   it('returns the existing canonical session as the initial route state', () => {
@@ -69,6 +70,24 @@ describe('sessionRouteResolution', () => {
     expect(getInitialSessionRouteResolution('codex:thread-1')).toEqual({
       initialSessionId: null,
       displaySessionId: 'session-offline',
+      resolvedSessionId: null,
+      shouldReplaceRoute: false,
+    });
+  });
+
+  it('falls back instead of hanging when canonical resolution never settles', async () => {
+    vi.useFakeTimers();
+    hoisted.resolveExistingCanonicalSessionId.mockReturnValue(null);
+    hoisted.resolveExistingDisplaySessionId.mockReturnValue(null);
+    hoisted.resolveCanonicalSessionId.mockImplementation(() => new Promise(() => {}));
+
+    const resolutionPromise = resolveSessionRoute('session-1');
+
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await expect(resolutionPromise).resolves.toEqual({
+      initialSessionId: null,
+      displaySessionId: null,
       resolvedSessionId: null,
       shouldReplaceRoute: false,
     });

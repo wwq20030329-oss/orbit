@@ -13,6 +13,7 @@ import type { DecryptedMachine, DecryptedSession } from './api';
 import { resumeSessionOnMachine, spawnSessionOnMachine, type SupportedAgent } from './machineRpc';
 import { SessionClient } from './session';
 import { formatMachineTable, formatSessionTable, formatSessionStatus, formatMessageHistory, formatJson } from './output';
+import { resolveOperationalSession } from './sessionResolution';
 
 // --- Helpers ---
 
@@ -35,6 +36,16 @@ function resolveByPrefix<T extends { id: string }>(items: T[], value: string, la
 async function resolveSession(config: Config, creds: Credentials, sessionId: string): Promise<DecryptedSession> {
     const sessions = await listSessions(config, creds);
     return resolveByPrefix(sessions, sessionId, 'Session ID');
+}
+
+async function resolveSessionForOperation(
+    config: Config,
+    creds: Credentials,
+    sessionId: string,
+): Promise<{ requested: DecryptedSession; resolved: DecryptedSession; continued: boolean }> {
+    const sessions = await listSessions(config, creds);
+    const requested = resolveByPrefix(sessions, sessionId, 'Session ID');
+    return resolveOperationalSession({ requested, sessions });
 }
 
 async function resolveMachine(config: Config, creds: Credentials, machineId: string): Promise<DecryptedMachine> {
@@ -186,7 +197,8 @@ program
     .action(async (sessionId: string, opts: { json?: boolean }) => {
         const config = loadConfig();
         const creds = requireCredentials(config);
-        const session = await resolveSession(config, creds, sessionId);
+        const operation = await resolveSessionForOperation(config, creds, sessionId);
+        const session = operation.resolved;
 
         const client = createClient(session, creds, config);
 
@@ -222,10 +234,19 @@ program
         }
 
         if (opts.json) {
-            console.log(formatJson(session));
+            console.log(formatJson({
+                ...session,
+                ...(operation.continued ? {
+                    requestedSessionId: operation.requested.id,
+                    resolvedSessionId: operation.resolved.id,
+                } : {}),
+            }));
         } else {
             if (!liveData) {
                 console.log('> Note: showing cached data (could not get live status).');
+            }
+            if (operation.continued) {
+                console.log(`> Resolved historical session ${operation.requested.id} to active continuation ${operation.resolved.id}.`);
             }
             console.log(formatSessionStatus(session));
         }
@@ -380,7 +401,8 @@ program
     .action(async (sessionId: string, message: string, opts: { yolo?: boolean; wait?: boolean; json?: boolean }) => {
         const config = loadConfig();
         const creds = requireCredentials(config);
-        const session = await resolveSession(config, creds, sessionId);
+        const operation = await resolveSessionForOperation(config, creds, sessionId);
+        const session = operation.resolved;
         const permissionMode = opts.yolo ? 'yolo' : null;
 
         const client = createClient(session, creds, config);
@@ -400,11 +422,21 @@ program
         }
 
         if (opts.json) {
-            console.log(formatJson({ sessionId: session.id, message, sent: true, permissionMode }));
+            console.log(formatJson({
+                sessionId: session.id,
+                message,
+                sent: true,
+                permissionMode,
+                ...(operation.continued ? {
+                    requestedSessionId: operation.requested.id,
+                    resolvedSessionId: operation.resolved.id,
+                } : {}),
+            }));
         } else {
             console.log([
                 '## Message Sent',
                 '',
+                ...(operation.continued ? [`- Requested Session ID: \`${operation.requested.id}\``] : []),
                 `- Session ID: \`${session.id}\``,
                 `- Permission Mode: ${permissionMode ?? 'default'}`,
                 `- Waited For Idle: ${opts.wait ? 'yes' : 'no'}`,
@@ -482,7 +514,8 @@ program
     .action(async (sessionId: string, opts: { timeout: number }) => {
         const config = loadConfig();
         const creds = requireCredentials(config);
-        const session = await resolveSession(config, creds, sessionId);
+        const operation = await resolveSessionForOperation(config, creds, sessionId);
+        const session = operation.resolved;
 
         const client = createClient(session, creds, config);
         try {
@@ -491,6 +524,7 @@ program
             console.log([
                 '## Session Idle',
                 '',
+                ...(operation.continued ? [`- Requested Session ID: \`${operation.requested.id}\``] : []),
                 `- Session ID: \`${session.id}\``,
             ].join('\n'));
         } catch (err) {

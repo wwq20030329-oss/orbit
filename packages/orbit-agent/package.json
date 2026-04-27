@@ -33,9 +33,9 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc --noEmit && pkgroll",
-    "test": "$npm_execpath run build && vitest run",
-    "test:integration": "$npm_execpath run build && vitest run --config vitest.integration.config.ts",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc --noEmit && node ../../scripts/run-pkgroll.cjs",
+    "test": "$npm_execpath run build && node ../../scripts/run-vitest.cjs run",
+    "test:integration": "$npm_execpath run build && node ../../scripts/run-vitest.cjs run --config vitest.integration.config.ts",
     "dev": "tsx src/index.ts",
     "prepublishOnly": "$npm_execpath run build && $npm_execpath test",
     "release": "npx --no-install release-it"

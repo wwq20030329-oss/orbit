@@ -12,7 +12,7 @@ import { getSessionName, formatOSPlatform, formatPathRelativeToHome, getSessionA
 import type { SessionStatus } from '@/utils/sessionStatus';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
-import { machineDeleteNativeCliHistory, sessionKill, sessionDelete } from '@/sync/ops';
+import { sessionKill, sessionDelete } from '@/sync/ops';
 import { maybeCleanupWorktree } from '@/hooks/useWorktreeCleanup';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -257,8 +257,17 @@ function SessionInfoContent({ session }: { session: Session }) {
         performArchive();
     }, [performArchive]);
 
-    // Use OrbitAction for deletion - kills session first if needed, then deletes
-    const [deletingSession, performDelete] = useOrbitAction(async () => {
+    const nativeCliBackendId = session.metadata?.claudeSessionId
+        ?? session.metadata?.codexThreadId
+        ?? session.metadata?.geminiSessionId
+        ?? session.metadata?.nativeHistorySourceBackendId
+        ?? null;
+    const isNativeCliHistorySession = getSessionCliTool(session) !== 'other'
+        && Boolean(nativeCliBackendId)
+        && Boolean(session.metadata?.machineId);
+
+    // Native CLI history is read-only in Orbit; only pure Orbit sessions use destructive deletion.
+    const [, performDelete] = useOrbitAction(async () => {
         // Prompt for worktree cleanup before killing (needs an active machine connection)
         await maybeCleanupWorktree(session.id, session.metadata?.path, session.metadata?.machineId);
 
@@ -267,38 +276,12 @@ function SessionInfoContent({ session }: { session: Session }) {
             await sessionKill(session.id).catch(() => {});
         }
 
-        const nativeCliTool = getSessionCliTool(session);
-        const nativeCliBackendId = session.metadata?.claudeSessionId
-            ?? session.metadata?.codexThreadId
-            ?? session.metadata?.geminiSessionId
-            ?? session.metadata?.nativeHistorySourceBackendId
-            ?? null;
-        const nativeCliMachineId = session.metadata?.machineId ?? null;
-
-        if (nativeCliTool !== 'other' && nativeCliBackendId && nativeCliMachineId) {
-            const nativeDeleteResult = await machineDeleteNativeCliHistory({
-                machineId: nativeCliMachineId,
-                tool: nativeCliTool,
-                backendId: nativeCliBackendId,
-                workingDirectory: session.metadata?.path ?? session.metadata?.projectRoot ?? undefined,
-            });
-
-            if (!nativeDeleteResult.success) {
-                throw new OrbitError(nativeDeleteResult.message || t('sessionInfo.failedToDeleteSession'), false);
-            }
-
-            const existingEntries = storage.getState().nativeCliHistoryByMachine[nativeCliMachineId] ?? [];
-            storage.getState().applyNativeCliHistory(
-                nativeCliMachineId,
-                existingEntries.filter((entry) => !(entry.tool === nativeCliTool && entry.backendId === nativeCliBackendId)),
-            );
-        }
-
         const result = await sessionDelete(session.id);
         if (!result.success) {
             throw new OrbitError(result.message || t('sessionInfo.failedToDeleteSession'), false);
         }
 
+        storage.getState().deleteSession(session.id);
         router.replace('/');
     });
 
@@ -320,12 +303,6 @@ function SessionInfoContent({ session }: { session: Session }) {
     const formatDate = useCallback((timestamp: number) => {
         return new Date(timestamp).toLocaleString();
     }, []);
-
-    const nativeCliBackendId = session.metadata?.claudeSessionId
-        ?? session.metadata?.codexThreadId
-        ?? session.metadata?.geminiSessionId
-        ?? session.metadata?.nativeHistorySourceBackendId
-        ?? null;
 
     const nativeCliBackendTitle = session.metadata?.claudeSessionId
         ? t('sessionInfo.claudeCodeSessionId')
@@ -491,12 +468,14 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={handleArchiveSession}
                         />
                     )}
-                    <Item
-                        title={t('sessionInfo.deleteSession')}
-                        subtitle={t('sessionInfo.deleteSessionSubtitle')}
-                        icon={<Ionicons name="trash-outline" size={29} color="#FF3B30" />}
-                        onPress={handleDeleteSession}
-                    />
+                    {!isNativeCliHistorySession && (
+                        <Item
+                            title={t('sessionInfo.deleteSession')}
+                            subtitle={t('sessionInfo.deleteSessionSubtitle')}
+                            icon={<Ionicons name="trash-outline" size={29} color="#FF3B30" />}
+                            onPress={handleDeleteSession}
+                        />
+                    )}
                 </ItemGroup>
 
                 {/* Metadata */}

@@ -15,6 +15,14 @@ import { PermissionFooter } from './PermissionFooter';
 import { parseToolUseError } from '@/utils/toolErrorParser';
 import { formatMCPTitle } from './views/MCPToolView';
 import { t } from '@/text';
+import { CollapsibleOutput } from '@/components/CollapsibleOutput';
+
+function countLines(text: string): number {
+    if (!text) return 0;
+    let n = 1;
+    for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) n++;
+    return n;
+}
 
 interface ToolViewProps {
     metadata: Metadata | null;
@@ -247,13 +255,17 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                             </ToolSectionView>
                         )}
 
-                        {tool.state === 'completed' && tool.result && (
-                            <ToolSectionView title={t('toolView.output')}>
-                                <CodeView
-                                    code={typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}
-                                />
-                            </ToolSectionView>
-                        )}
+                        {tool.state === 'completed' && tool.result && (() => {
+                            const code = typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2);
+                            const lines = countLines(code);
+                            return (
+                                <ToolSectionView title={t('toolView.output')}>
+                                    <CollapsibleOutput totalLines={lines} previewText={code}>
+                                        <CodeView code={code} />
+                                    </CollapsibleOutput>
+                                </ToolSectionView>
+                            );
+                        })()}
                     </View>
                 );
             })()}

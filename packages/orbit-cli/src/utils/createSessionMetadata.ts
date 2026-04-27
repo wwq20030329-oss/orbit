@@ -14,6 +14,7 @@ import type { AgentState, Metadata } from '@/api/types';
 import { configuration } from '@/configuration';
 import { projectPath } from '@/projectPath';
 import type { SandboxConfig } from '@/persistence';
+import { resolveProjectRoot } from './projectRoot';
 import packageJson from '../../package.json';
 
 /**
@@ -37,6 +38,11 @@ export interface CreateSessionMetadataOptions {
     dangerouslySkipPermissions?: boolean;
     /** Optional title used when resuming native local history */
     summaryText?: string | null;
+    /** Optional native CLI history source when seeding a resumed wrapper session */
+    nativeHistorySource?: {
+        tool: 'claude' | 'codex' | 'gemini';
+        backendId: string;
+    } | null;
 }
 
 /**
@@ -47,6 +53,66 @@ export interface SessionMetadataResult {
     state: AgentState;
     /** Session metadata */
     metadata: Metadata;
+}
+
+/**
+ * Creates the shared base metadata used by CLI-backed sessions before any
+ * runner-specific config overlays are applied.
+ */
+export function createBaseSessionMetadata(opts: CreateSessionMetadataOptions): Metadata {
+    const currentWorkingDirectory = process.cwd();
+
+    return applyNativeHistorySourceMetadata({
+        path: currentWorkingDirectory,
+        projectRoot: resolveProjectRoot(currentWorkingDirectory),
+        host: os.hostname(),
+        version: packageJson.version,
+        os: os.platform(),
+        machineId: opts.machineId,
+        homeDir: os.homedir(),
+        orbitHomeDir: configuration.orbitHomeDir,
+        orbitLibDir: projectPath(),
+        orbitToolsDir: resolve(projectPath(), 'tools', 'unpacked'),
+        startedFromDaemon: opts.startedBy === 'daemon',
+        hostPid: process.pid,
+        startedBy: opts.startedBy || 'terminal',
+        lifecycleState: 'running',
+        lifecycleStateSince: Date.now(),
+        flavor: opts.flavor,
+        sandbox: opts.sandbox?.enabled ? opts.sandbox : null,
+        dangerouslySkipPermissions: opts.dangerouslySkipPermissions ?? null,
+        ...(opts.summaryText ? {
+            summary: {
+                text: opts.summaryText,
+                updatedAt: Date.now(),
+            },
+        } : {}),
+    }, opts.nativeHistorySource);
+}
+
+export function applyNativeHistorySourceMetadata(
+    metadata: Metadata,
+    nativeHistorySource: CreateSessionMetadataOptions['nativeHistorySource'],
+): Metadata {
+    if (!nativeHistorySource) {
+        return metadata;
+    }
+
+    const seededMetadata: Metadata = {
+        ...metadata,
+        nativeHistorySourceTool: nativeHistorySource.tool,
+        nativeHistorySourceBackendId: nativeHistorySource.backendId,
+    };
+
+    if (nativeHistorySource.tool === 'claude') {
+        seededMetadata.claudeSessionId = nativeHistorySource.backendId;
+    } else if (nativeHistorySource.tool === 'codex') {
+        seededMetadata.codexThreadId = nativeHistorySource.backendId;
+    } else if (nativeHistorySource.tool === 'gemini') {
+        seededMetadata.geminiSessionId = nativeHistorySource.backendId;
+    }
+
+    return seededMetadata;
 }
 
 /**
@@ -74,31 +140,7 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         controlledByUser: false,
     };
 
-    const metadata: Metadata = {
-        path: process.cwd(),
-        host: os.hostname(),
-        version: packageJson.version,
-        os: os.platform(),
-        machineId: opts.machineId,
-        homeDir: os.homedir(),
-        orbitHomeDir: configuration.orbitHomeDir,
-        orbitLibDir: projectPath(),
-        orbitToolsDir: resolve(projectPath(), 'tools', 'unpacked'),
-        startedFromDaemon: opts.startedBy === 'daemon',
-        hostPid: process.pid,
-        startedBy: opts.startedBy || 'terminal',
-        lifecycleState: 'running',
-        lifecycleStateSince: Date.now(),
-        flavor: opts.flavor,
-        sandbox: opts.sandbox?.enabled ? opts.sandbox : null,
-        dangerouslySkipPermissions: opts.dangerouslySkipPermissions ?? null,
-        ...(opts.summaryText ? {
-            summary: {
-                text: opts.summaryText,
-                updatedAt: Date.now(),
-            },
-        } : {}),
-    };
+    const metadata = createBaseSessionMetadata(opts);
 
     return { state, metadata };
 }

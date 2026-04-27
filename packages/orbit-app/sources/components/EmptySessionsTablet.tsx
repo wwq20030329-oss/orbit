@@ -6,6 +6,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { useRouter } from 'expo-router';
+import { t } from '@/text';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -58,7 +59,8 @@ export function EmptySessionsTablet() {
     const { theme } = useUnistyles();
     const styles = stylesheet;
     const router = useRouter();
-    const machines = useAllMachines();
+    const machines = useAllMachines({ includeOffline: true });
+    const hasRegisteredMachines = machines.length > 0;
     
     const hasOnlineMachines = React.useMemo(() => {
         return machines.some(machine => isMachineOnline(machine));
@@ -78,13 +80,13 @@ export function EmptySessionsTablet() {
             />
             
             <Text style={styles.titleText}>
-                No active sessions
+                {t('components.emptySessionsTablet.noActiveSessions')}
             </Text>
             
             {hasOnlineMachines ? (
                 <>
                     <Text style={styles.descriptionText}>
-                        Start a new session on any of your connected machines.
+                        {t('components.emptySessionsTablet.onlineDescription')}
                     </Text>
                     <Pressable
                         style={styles.button}
@@ -97,13 +99,33 @@ export function EmptySessionsTablet() {
                             style={styles.buttonIcon}
                         />
                         <Text style={styles.buttonText}>
-                            Start New Session
+                            {t('components.emptySessionsTablet.startNewSession')}
+                        </Text>
+                    </Pressable>
+                </>
+            ) : hasRegisteredMachines ? (
+                <>
+                    <Text style={styles.descriptionText}>
+                        {t('components.emptySessionsTablet.offlineDescription')}
+                    </Text>
+                    <Pressable
+                        style={styles.button}
+                        onPress={handleStartNewSession}
+                    >
+                        <Ionicons
+                            name="desktop-outline"
+                            size={20}
+                            color={theme.colors.button.primary.tint}
+                            style={styles.buttonIcon}
+                        />
+                        <Text style={styles.buttonText}>
+                            {t('newSession.title')}
                         </Text>
                     </Pressable>
                 </>
             ) : (
                 <Text style={styles.descriptionText}>
-                    Open a new terminal on your computer to start session.
+                    {t('components.emptySessionsTablet.offlineDescription')}
                 </Text>
             )}
         </View>

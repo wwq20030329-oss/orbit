@@ -11,7 +11,7 @@ const repoRoot = resolve(packageDir, '..', '..');
 const environmentsDir = join(repoRoot, 'environments', 'data', 'envs');
 const currentEnvironmentPath = join(repoRoot, 'environments', 'data', 'current.json');
 const binPath = resolve(packageDir, 'bin', 'orbit-agent.mjs');
-const keepIntegrationEnv = ['1', 'true', 'yes'].includes((process.env.HAPPY_AGENT_KEEP_ENV ?? '').toLowerCase());
+const keepIntegrationEnv = ['1', 'true', 'yes'].includes((process.env.ORBIT_AGENT_KEEP_ENV ?? '').toLowerCase());
 
 type EnvironmentConfig = {
     name: string;
@@ -93,8 +93,8 @@ function readDaemonState(envDir: string): DaemonState | null {
 function agentEnvVars(serverPort: number, homeDir: string): NodeJS.ProcessEnv {
     return {
         ...process.env,
-        HAPPY_SERVER_URL: `http://localhost:${serverPort}`,
-        HAPPY_HOME_DIR: homeDir,
+        ORBIT_SERVER_URL: `http://localhost:${serverPort}`,
+        ORBIT_HOME_DIR: homeDir,
     };
 }
 

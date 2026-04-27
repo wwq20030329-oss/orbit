@@ -54,6 +54,7 @@ import {
   buildOrbitLiveRuntimeId,
   buildOrbitLiveSnapshot,
 } from './orbitLiveRuntime';
+import { pruneNativeLiveMirrorClients } from './nativeLiveMirrorState';
 import { createInFlightRequestDeduper } from './inFlightRequestDeduper';
 import { killDuplicateDaemonSpawnedSessionProcesses, killOrphanDaemonSpawnedSessionProcesses } from './doctor';
 import { LiveRuntimeManager } from './liveRuntimeManager';
@@ -1068,15 +1069,7 @@ export async function startDaemon(): Promise<void> {
         await client.flush();
       }
 
-      for (const [key, client] of nativeLiveMirrorClients.entries()) {
-        if (liveKeys.has(key)) {
-          continue;
-        }
-        client.sendSessionDeath();
-        await client.flush();
-        await client.close();
-        nativeLiveMirrorClients.delete(key);
-      }
+      await pruneNativeLiveMirrorClients(liveKeys, nativeLiveMirrorClients, nativeLiveMirrorCounts);
     };
 
     let nativeLiveMirrorRunning = false;

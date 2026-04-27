@@ -118,6 +118,21 @@ const {
         return selectFields({ seq: next }, args?.select);
     });
 
+    const accountUpsert = vi.fn(async (args: any) => {
+        const accountId = args?.where?.id as string;
+        const current = state.accountSeqById.get(accountId);
+        if (typeof current === "number") {
+            const increment = args?.update?.seq?.increment ?? 0;
+            const next = current + increment;
+            state.accountSeqById.set(accountId, next);
+            return selectFields({ seq: next }, args?.select);
+        }
+
+        const createdSeq = args?.create?.seq ?? 1;
+        state.accountSeqById.set(accountId, createdSeq);
+        return selectFields({ seq: createdSeq }, args?.select);
+    });
+
     const sessionMessageFindMany = vi.fn(async (args: any) => {
         let rows = [...state.messages];
 
@@ -127,12 +142,18 @@ const {
         if (typeof args?.where?.seq?.gt === "number") {
             rows = rows.filter((message) => message.seq > args.where.seq.gt);
         }
+        if (typeof args?.where?.seq?.lt === "number") {
+            rows = rows.filter((message) => message.seq < args.where.seq.lt);
+        }
         if (Array.isArray(args?.where?.localId?.in)) {
             const localIds = new Set(args.where.localId.in);
             rows = rows.filter((message) => localIds.has(message.localId));
         }
         if (args?.orderBy?.seq === "asc") {
             rows.sort((a, b) => a.seq - b.seq);
+        }
+        if (args?.orderBy?.seq === "desc") {
+            rows.sort((a, b) => b.seq - a.seq);
         }
         if (args?.orderBy?.createdAt === "desc") {
             rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
@@ -170,7 +191,8 @@ const {
             create: sessionMessageCreate
         },
         account: {
-            update: accountUpdate
+            update: accountUpdate,
+            upsert: accountUpsert
         }
     };
 
@@ -180,7 +202,8 @@ const {
             update: sessionUpdate
         },
         account: {
-            update: accountUpdate
+            update: accountUpdate,
+            upsert: accountUpsert
         },
         sessionMessage: {
             findMany: sessionMessageFindMany,
@@ -311,6 +334,51 @@ describe("v3SessionRoutes", () => {
         const body3 = page3.json();
         expect(body3.messages.map((message: any) => message.seq)).toEqual([5]);
         expect(body3.hasMore).toBe(false);
+    });
+
+    it("supports loading the most recent page first", async () => {
+        seedSession({ id: "session-1", accountId: "user-1" });
+        for (let seq = 1; seq <= 5; seq += 1) {
+            seedMessage({ sessionId: "session-1", seq, localId: `l${seq}`, content: { t: "encrypted", c: String(seq) } });
+        }
+
+        app = await createApp();
+        const response = await app.inject({
+            method: "GET",
+            url: "/v3/sessions/session-1/messages?tail=true&limit=2",
+            headers: { "x-user-id": "user-1" }
+        });
+
+        expect(response.statusCode).toBe(200);
+        const body = response.json();
+        expect(body.messages.map((message: any) => message.seq)).toEqual([4, 5]);
+        expect(body.hasMore).toBe(true);
+    });
+
+    it("supports paging older messages with before_seq", async () => {
+        seedSession({ id: "session-1", accountId: "user-1" });
+        for (let seq = 1; seq <= 5; seq += 1) {
+            seedMessage({ sessionId: "session-1", seq, localId: `l${seq}`, content: { t: "encrypted", c: String(seq) } });
+        }
+
+        app = await createApp();
+        const page1 = await app.inject({
+            method: "GET",
+            url: "/v3/sessions/session-1/messages?before_seq=4&limit=2",
+            headers: { "x-user-id": "user-1" }
+        });
+        const body1 = page1.json();
+        expect(body1.messages.map((message: any) => message.seq)).toEqual([2, 3]);
+        expect(body1.hasMore).toBe(true);
+
+        const page2 = await app.inject({
+            method: "GET",
+            url: "/v3/sessions/session-1/messages?before_seq=2&limit=2",
+            headers: { "x-user-id": "user-1" }
+        });
+        const body2 = page2.json();
+        expect(body2.messages.map((message: any) => message.seq)).toEqual([1]);
+        expect(body2.hasMore).toBe(false);
     });
 
     it("returns empty results for empty sessions and after_seq beyond latest", async () => {

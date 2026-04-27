@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { claudeCheckSession } from './claudeCheckSession';
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -183,6 +183,37 @@ describe('claudeCheckSession', () => {
             );
 
             expect(claudeCheckSession(sessionId, testDir)).toBe(true);
+        });
+    });
+
+    describe('Corrupted tool-use history repair', () => {
+        it('should repair assistant tool_use entries with empty names before validation', () => {
+            const sessionId = '12345678-1234-1234-1234-123456789abc';
+            const sessionFile = join(testDir, `${sessionId}.jsonl`);
+            writeFileSync(sessionFile,
+                JSON.stringify({ uuid: 'msg-1', type: 'user' }) + '\n' +
+                JSON.stringify({
+                    uuid: 'msg-2',
+                    type: 'assistant',
+                    message: {
+                        role: 'assistant',
+                        content: [
+                            {
+                                type: 'tool_use',
+                                id: 'tool-1',
+                                name: '',
+                                input: { include_schema: true }
+                            }
+                        ]
+                    }
+                }) + '\n'
+            );
+
+            expect(claudeCheckSession(sessionId, testDir)).toBe(true);
+
+            const repairedFile = readFileSync(sessionFile, 'utf-8');
+            expect(repairedFile).toContain('"name":"UnknownTool"');
+            expect(repairedFile).not.toContain('"name":""');
         });
     });
 });

@@ -131,7 +131,7 @@ export default function MachineDetailScreen() {
             'You will not be able to spawn new sessions on this machine until you restart the daemon on your computer again. Your current sessions will stay alive.',
             [
                 {
-                    text: 'Cancel',
+                    text: t('common.cancel'),
                     style: 'cancel'
                 },
                 {
@@ -141,7 +141,7 @@ export default function MachineDetailScreen() {
                         setIsStoppingDaemon(true);
                         try {
                             const result = await machineStopDaemon(machineId!);
-                            Modal.alert('Daemon Stopped', result.message);
+                            Modal.alert(t('common.success'), result.message);
                             // Refresh to get updated metadata
                             await sync.refreshMachines();
                         } catch (error) {
@@ -194,7 +194,7 @@ export default function MachineDetailScreen() {
                 Modal.alert(t('common.success'), 'Machine renamed successfully');
             } catch (error) {
                 Modal.alert(
-                    'Error',
+                    t('common.error'),
                     error instanceof Error ? error.message : 'Failed to rename machine'
                 );
                 // Refresh to get latest state

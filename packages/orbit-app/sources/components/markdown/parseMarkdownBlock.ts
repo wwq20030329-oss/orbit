@@ -65,18 +65,44 @@ function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock
     return { table, nextIndex: index };
 }
 
-export function parseMarkdownBlock(markdown: string) {
-    const blocks: MarkdownBlock[] = [];
+/**
+ * A block paired with the raw markdown substring it was parsed from.
+ * The `source` string is everything from the first line of the block
+ * through the last line consumed (joined with `\n`), and is used as the
+ * cache key by the incremental block-level parser — see
+ * `parseMarkdownIncremental.ts`. Source tracking lets streaming updates
+ * skip re-parsing and re-rendering blocks whose markdown text did not
+ * change, which is the dominant cost while an AI agent is producing
+ * a long reply token by token.
+ */
+export interface MarkdownBlockWithSource {
+    block: MarkdownBlock;
+    source: string;
+}
+
+export function parseMarkdownBlock(markdown: string): MarkdownBlock[] {
+    return parseMarkdownBlocksWithSources(markdown).map((entry) => entry.block);
+}
+
+export function parseMarkdownBlocksWithSources(markdown: string): MarkdownBlockWithSource[] {
+    const results: MarkdownBlockWithSource[] = [];
     const lines = markdown.split('\n');
     let index = 0;
+
     outer: while (index < lines.length) {
+        const blockStart = index;
         const line = lines[index];
         index++;
+
+        const push = (block: MarkdownBlock) => {
+            const source = lines.slice(blockStart, index).join('\n');
+            results.push({ block, source });
+        };
 
         // Headers
         for (let i = 1; i <= 6; i++) {
             if (line.startsWith(`${'#'.repeat(i)} `)) {
-                blocks.push({ type: 'header', level: i as 1 | 2 | 3 | 4 | 5 | 6, content: parseMarkdownSpans(line.slice(i + 1).trim(), true) });
+                push({ type: 'header', level: i as 1 | 2 | 3 | 4 | 5 | 6, content: parseMarkdownSpans(line.slice(i + 1).trim(), true) });
                 continue outer;
             }
         }
@@ -101,16 +127,16 @@ export function parseMarkdownBlock(markdown: string) {
 
             // Detect mermaid diagram language and route to appropriate block type
             if (language === 'mermaid') {
-                blocks.push({ type: 'mermaid', content: contentString });
+                push({ type: 'mermaid', content: contentString });
             } else {
-                blocks.push({ type: 'code-block', language, content: contentString });
+                push({ type: 'code-block', language, content: contentString });
             }
             continue;
         }
 
         // Horizontal rule
         if (trimmed === '---') {
-            blocks.push({ type: 'horizontal-rule' });
+            push({ type: 'horizontal-rule' });
             continue;
         }
 
@@ -131,7 +157,7 @@ export function parseMarkdownBlock(markdown: string) {
                 index++;
             }
             if (items.length > 0) {
-                blocks.push({ type: 'options', items });
+                push({ type: 'options', items });
             }
             continue;
         }
@@ -139,7 +165,7 @@ export function parseMarkdownBlock(markdown: string) {
         // Image block
         const imageMatch = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
         if (imageMatch) {
-            blocks.push({ type: 'image', alt: imageMatch[1], url: imageMatch[2].trim() });
+            push({ type: 'image', alt: imageMatch[1], url: imageMatch[2].trim() });
             continue;
         }
 
@@ -154,7 +180,7 @@ export function parseMarkdownBlock(markdown: string) {
                 allLines.push({ number: parseInt(nextMatch[1]), content: nextLine.slice(nextMatch[0].length) });
                 index++;
             }
-            blocks.push({ type: 'numbered-list', items: allLines.map((l) => ({ number: l.number, spans: parseMarkdownSpans(l.content, false) })) });
+            push({ type: 'numbered-list', items: allLines.map((l) => ({ number: l.number, spans: parseMarkdownSpans(l.content, false) })) });
             continue;
         }
 
@@ -171,24 +197,28 @@ export function parseMarkdownBlock(markdown: string) {
                 allLines.push(nextLine.slice(nextMatch[0].length));
                 index++;
             }
-            blocks.push({ type: 'list', items: allLines.map((l) => parseMarkdownSpans(l, false)) });
+            push({ type: 'list', items: allLines.map((l) => parseMarkdownSpans(l, false)) });
             continue;
         }
 
         // Check for table
         if (trimmed.includes('|') && !trimmed.startsWith('```')) {
+            const tableBlockStart = blockStart;
             const { table, nextIndex } = parseTable(lines, index - 1);
             if (table) {
-                blocks.push(table);
                 index = nextIndex;
+                // Emit with full source covering the original first line
+                // through the last consumed table row.
+                const source = lines.slice(tableBlockStart, index).join('\n');
+                results.push({ block: table, source });
                 continue outer;
             }
         }
 
         // Fallback
         if (trimmed.length > 0) {
-            blocks.push({ type: 'text', content: parseMarkdownSpans(trimmed, false) });
+            push({ type: 'text', content: parseMarkdownSpans(trimmed, false) });
         }
     }
-    return blocks;
+    return results;
 }

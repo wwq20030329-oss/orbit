@@ -10,7 +10,7 @@ import { Modal } from '@/modal';
 import { t } from '@/text';
 import { storage } from '@/sync/storage';
 import { sync, syncCreate } from '@/sync/sync';
-import { getTerminalAuthPrefixes } from '@/utils/appUrlScheme';
+import { getTerminalAuthPayload, isTerminalAuthUrl } from '@/utils/appUrlScheme';
 
 interface UseConnectTerminalOptions {
     onSuccess?: () => void;
@@ -36,11 +36,10 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
     const auth = useAuth();
     const [isLoading, setIsLoading] = React.useState(false);
     const checkScannerPermissions = useCheckScannerPermissions();
-    const authPrefixes = getTerminalAuthPrefixes();
 
     const processAuthUrl = React.useCallback(async (url: string) => {
-        const matchingPrefix = authPrefixes.find((prefix) => url.startsWith(prefix));
-        if (!matchingPrefix) {
+        const payload = getTerminalAuthPayload(url);
+        if (!payload) {
             Modal.alert(t('common.error'), t('modals.invalidAuthUrl'), [{ text: t('common.ok') }]);
             return false;
         }
@@ -52,8 +51,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
         
         setIsLoading(true);
         try {
-            const tail = url.slice(matchingPrefix.length);
-            const publicKey = decodeBase64(tail, 'base64url');
+            const publicKey = decodeBase64(payload, 'base64url');
             void syncCreate(auth.credentials).catch((error) => {
                 console.warn('Sync initialization failed while connecting terminal; continuing with local key derivation.', error);
             });
@@ -84,7 +82,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
         } finally {
             setIsLoading(false);
         }
-    }, [auth.credentials, authPrefixes, options]);
+    }, [auth.credentials, options]);
 
     const connectTerminal = React.useCallback(async () => {
         if (await checkScannerPermissions()) {
@@ -105,7 +103,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
     React.useEffect(() => {
         if (CameraView.isModernBarcodeScannerAvailable) {
             const subscription = CameraView.onModernBarcodeScanned(async (event) => {
-                if (authPrefixes.some((prefix) => event.data.startsWith(prefix))) {
+                if (isTerminalAuthUrl(event.data)) {
                     // Dismiss scanner on Android is called automatically when barcode is scanned
                     if (Platform.OS === 'ios') {
                         await CameraView.dismissScanner();
@@ -117,7 +115,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
                 subscription.remove();
             };
         }
-    }, [processAuthUrl, authPrefixes]);
+    }, [processAuthUrl]);
 
     return {
         connectTerminal,

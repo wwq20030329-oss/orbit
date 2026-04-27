@@ -1,18 +1,17 @@
 import React from 'react';
-import { View, Pressable, ActivityIndicator, ActionSheetIOS, Platform, FlatList } from 'react-native';
+import { View, Pressable, ActionSheetIOS, Platform, FlatList, Animated, Easing } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
 import { Text } from '@/components/StyledText';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Typography } from '@/constants/Typography';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { UpdateBanner } from './UpdateBanner';
 import { layout } from './layout';
 import { useNavigateDirectlyToSession, useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { useOrbitAction } from '@/hooks/useOrbitAction';
 import type { VisibleSessionListViewItem } from '@/hooks/useVisibleSessionListViewData';
 import { useCliThreadBrowserController } from '@/hooks/useCliThreadBrowserController';
-import { deleteCliProjectGroup, deleteCliThreadItem } from '@/utils/cliThreadDelete';
 import {
     CLI_THREAD_TOOL_ORDER,
     formatCliThreadUpdatedAt,
@@ -29,34 +28,68 @@ import { openCliThreadItem } from '@/utils/openCliThreadItem';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { activatePhoneWorkspaceSession, shouldUsePhoneWorkspaceNavigation } from '@/utils/phoneWorkspaceNavigation';
+import { storage, useLocalSettingMutable } from '@/sync/storage';
 
 const DEFAULT_VISIBLE_PROJECTS = 6;
-const DRAWER_VISIBLE_THREADS = 60;
+const DRAWER_VISIBLE_THREADS = 12;
 
-function showDeleteActionSheet(
-    title: string,
-    destructiveLabel: string,
-    onSelectDelete: () => void,
-): void {
+function showDrawerThreadActionSheet(options: {
+    title: string;
+    isPinned: boolean;
+    onTogglePinned: () => void;
+    onHideFromDrawer: () => void;
+}): void {
     if (Platform.OS !== 'ios') {
-        onSelectDelete();
+        void Modal.confirm(
+            options.title,
+            t('sessionHistory.drawerRemoveOnly'),
+            {
+                cancelText: t('common.cancel'),
+                confirmText: t('sessionHistory.removeFromDrawer'),
+            },
+        ).then((confirmed) => {
+            if (confirmed) {
+                options.onHideFromDrawer();
+            }
+        });
         return;
     }
 
+    const pinLabel = options.isPinned
+        ? t('sessionHistory.unpinFromDrawer')
+        : t('sessionHistory.pinToDrawer');
+    const removeLabel = t('sessionHistory.removeFromDrawer');
+
     ActionSheetIOS.showActionSheetWithOptions(
         {
-            title,
-            options: [t('common.cancel'), destructiveLabel],
+            title: options.title,
+            message: t('sessionHistory.drawerRemoveOnly'),
+            options: [t('common.cancel'), pinLabel, removeLabel],
             cancelButtonIndex: 0,
-            destructiveButtonIndex: 1,
             userInterfaceStyle: 'light',
         },
         (buttonIndex) => {
             if (buttonIndex === 1) {
-                onSelectDelete();
+                options.onTogglePinned();
+                return;
+            }
+
+            if (buttonIndex === 2) {
+                options.onHideFromDrawer();
             }
         },
     );
+}
+
+function restoreDrawerThreadInLocalSettings(threadId: string): void {
+    const { localSettings, applyLocalSettings } = storage.getState();
+    if (!localSettings.drawerHiddenCliThreadIds[threadId]) {
+        return;
+    }
+
+    const nextHiddenThreadIds = { ...localSettings.drawerHiddenCliThreadIds };
+    delete nextHiddenThreadIds[threadId];
+    applyLocalSettings({ drawerHiddenCliThreadIds: nextHiddenThreadIds });
 }
 
 function getCliSectionSummary(section: CliThreadToolSection): string {
@@ -280,6 +313,9 @@ const stylesheet = StyleSheet.create((theme) => ({
     threadRowContent: {
         flex: 1,
         minWidth: 0,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
     },
     threadRowTitle: {
         fontSize: 16,
@@ -361,6 +397,9 @@ const stylesheet = StyleSheet.create((theme) => ({
         fontSize: 13,
         color: theme.colors.textSecondary,
         ...Typography.default(),
+    },
+    drawerPinIcon: {
+        marginTop: 1,
     },
     openingSpinner: {
         color: theme.colors.textSecondary,
@@ -514,18 +553,27 @@ const CliDrawerHeader = React.memo(({ title }: { title: string }) => {
 const CliDrawerItem = React.memo(({ 
     item, 
     drawerView, 
-    onDrawerItemPress 
+    isPinned,
+    onDrawerItemPress,
+    onHideFromDrawer,
+    onTogglePinned,
 }: { 
     item: CliThreadListItem; 
     drawerView: DrawerViewMode;
+    isPinned: boolean;
     onDrawerItemPress?: () => void;
+    onHideFromDrawer: (item: CliThreadListItem) => void;
+    onTogglePinned: (item: CliThreadListItem) => void;
 }) => {
     return (
         <CliProjectThreadRow
             item={item}
             variant="drawer"
             openMode={drawerView === 'sessions' ? 'direct-session' : 'resolved'}
+            isPinned={isPinned}
             onDrawerItemPress={onDrawerItemPress}
+            onHideFromDrawer={onHideFromDrawer}
+            onTogglePinned={onTogglePinned}
         />
     );
 });
@@ -544,11 +592,64 @@ const CliDrawerPage = React.memo(({
     onDrawerItemPress?: () => void;
 }) => {
     const styles = stylesheet;
+    const [drawerPinnedThreadIds, setDrawerPinnedThreadIds] = useLocalSettingMutable('drawerPinnedCliThreadIds');
+    const [drawerHiddenThreadIds, setDrawerHiddenThreadIds] = useLocalSettingMutable('drawerHiddenCliThreadIds');
     const flattenedItems = React.useMemo(
-        () => section.items.slice(0, DRAWER_VISIBLE_THREADS),
-        [section.items],
+        () => {
+            const pinnedItems: CliThreadListItem[] = [];
+            const regularItems: CliThreadListItem[] = [];
+
+            for (const item of section.items) {
+                if (drawerHiddenThreadIds[item.id]) {
+                    continue;
+                }
+
+                if (drawerPinnedThreadIds[item.id]) {
+                    pinnedItems.push(item);
+                    continue;
+                }
+
+                regularItems.push(item);
+            }
+
+            pinnedItems.sort((left, right) => {
+                const pinnedDelta = (drawerPinnedThreadIds[right.id] ?? 0) - (drawerPinnedThreadIds[left.id] ?? 0);
+                if (pinnedDelta !== 0) {
+                    return pinnedDelta;
+                }
+
+                return right.updatedAt - left.updatedAt;
+            });
+
+            return [...pinnedItems, ...regularItems].slice(0, DRAWER_VISIBLE_THREADS);
+        },
+        [drawerHiddenThreadIds, drawerPinnedThreadIds, section.items],
     );
     const rows = React.useMemo(() => buildDrawerThreadRows(flattenedItems), [flattenedItems]);
+    const handleTogglePinned = React.useCallback((item: CliThreadListItem) => {
+        const nextPinnedThreadIds = { ...drawerPinnedThreadIds };
+        const nextHiddenThreadIds = { ...drawerHiddenThreadIds };
+        if (nextPinnedThreadIds[item.id]) {
+            delete nextPinnedThreadIds[item.id];
+        } else {
+            nextPinnedThreadIds[item.id] = Date.now();
+            delete nextHiddenThreadIds[item.id];
+        }
+
+        setDrawerPinnedThreadIds(nextPinnedThreadIds);
+        setDrawerHiddenThreadIds(nextHiddenThreadIds);
+    }, [drawerHiddenThreadIds, drawerPinnedThreadIds, setDrawerHiddenThreadIds, setDrawerPinnedThreadIds]);
+    const handleHideFromDrawer = React.useCallback((item: CliThreadListItem) => {
+        const nextPinnedThreadIds = { ...drawerPinnedThreadIds };
+        const nextHiddenThreadIds = {
+            ...drawerHiddenThreadIds,
+            [item.id]: Date.now(),
+        };
+        delete nextPinnedThreadIds[item.id];
+
+        setDrawerPinnedThreadIds(nextPinnedThreadIds);
+        setDrawerHiddenThreadIds(nextHiddenThreadIds);
+    }, [drawerHiddenThreadIds, drawerPinnedThreadIds, setDrawerHiddenThreadIds, setDrawerPinnedThreadIds]);
 
     const renderItem = React.useCallback(({ item }: { item: DrawerThreadListRow }) => {
         if (item.type === 'header') {
@@ -559,10 +660,13 @@ const CliDrawerPage = React.memo(({
             <CliDrawerItem
                 item={item.item}
                 drawerView={drawerView}
+                isPinned={!!drawerPinnedThreadIds[item.item.id]}
                 onDrawerItemPress={onDrawerItemPress}
+                onHideFromDrawer={handleHideFromDrawer}
+                onTogglePinned={handleTogglePinned}
             />
         );
-    }, [drawerView, onDrawerItemPress]);
+    }, [drawerPinnedThreadIds, drawerView, handleHideFromDrawer, handleTogglePinned, onDrawerItemPress]);
 
     const headerComponent = React.useMemo(() => (
         selector ? <View style={styles.headerBlock}>{selector}</View> : null
@@ -807,70 +911,26 @@ const CliProjectCard = React.memo(({
     onToggleExpanded: (projectId: string) => void;
 }) => {
     const styles = stylesheet;
-    const longPressTriggeredRef = React.useRef(false);
-    const [deleting, deleteProject] = useOrbitAction(async () => {
-        await deleteCliProjectGroup(project);
-    });
-
-    const requestDeleteProject = React.useCallback(() => {
-        longPressTriggeredRef.current = true;
-        showDeleteActionSheet(
-            t('sessionInfo.deleteProject'),
-            t('sessionInfo.deleteProject'),
-            () => {
-                void (async () => {
-                    const confirmed = await Modal.confirm(
-                        t('sessionInfo.deleteProject'),
-                        t('sessionInfo.deleteProjectWarning'),
-                        {
-                            cancelText: t('common.cancel'),
-                            confirmText: t('common.delete'),
-                            destructive: true,
-                        },
-                    );
-
-                    if (confirmed) {
-                        deleteProject();
-                    }
-                })();
-            },
-        );
-    }, [deleteProject]);
 
     const handlePress = React.useCallback(() => {
-        if (longPressTriggeredRef.current) {
-            longPressTriggeredRef.current = false;
-            return;
-        }
-
-        if (deleting) {
-            return;
-        }
-
         onToggleExpanded(project.id);
-    }, [deleting, onToggleExpanded, project.id]);
+    }, [onToggleExpanded, project.id]);
 
     const projectTrigger = (
         <Pressable
             style={styles.projectHeaderRow}
             onPress={handlePress}
-            onLongPress={requestDeleteProject}
-            delayLongPress={350}
         >
             <View style={styles.projectContent}>
                 <Text style={styles.projectTitle} numberOfLines={1}>
                     {project.title}
                 </Text>
             </View>
-            {deleting ? (
-                <ActivityIndicator size="small" color={styles.projectChevron.color as string} />
-            ) : (
-                <Ionicons
-                    name={expanded ? 'chevron-up' : 'chevron-down'}
-                    size={20}
-                    style={styles.projectChevron}
-                />
-            )}
+            <Ionicons
+                name={expanded ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                style={styles.projectChevron}
+            />
         </Pressable>
     );
 
@@ -892,17 +952,26 @@ const CliProjectThreadRow = React.memo(({
     item,
     variant = 'default',
     openMode = 'resolved',
+    isPinned = false,
     onDrawerItemPress,
+    onHideFromDrawer,
+    onTogglePinned,
 }: {
     item: CliThreadListItem;
     variant?: 'default' | 'drawer';
     openMode?: 'resolved' | 'direct-session';
+    isPinned?: boolean;
     onDrawerItemPress?: () => void;
+    onHideFromDrawer?: (item: CliThreadListItem) => void;
+    onTogglePinned?: (item: CliThreadListItem) => void;
 }) => {
     const styles = stylesheet;
+    const { theme } = useUnistyles();
     const navigateToSession = useNavigateToSession();
     const navigateDirectlyToSession = useNavigateDirectlyToSession();
     const longPressTriggeredRef = React.useRef(false);
+    const rowExitProgress = React.useRef(new Animated.Value(0)).current;
+    const [isHidingFromDrawer, setIsHidingFromDrawer] = React.useState(false);
     const [opening, openThread] = useOrbitAction(async () => {
         if (openMode === 'direct-session' && item.source === 'session' && item.session) {
             if (shouldUsePhoneWorkspaceNavigation()) {
@@ -919,34 +988,34 @@ const CliProjectThreadRow = React.memo(({
             navigateDirectlyToSession,
         });
     });
-    const [deleting, deleteThread] = useOrbitAction(async () => {
-        await deleteCliThreadItem(item);
-    });
 
-    const requestDeleteThread = React.useCallback(() => {
-        longPressTriggeredRef.current = true;
-        showDeleteActionSheet(
-            t('sessionInfo.deleteSession'),
-            t('sessionInfo.deleteSession'),
-            () => {
-                void (async () => {
-                    const confirmed = await Modal.confirm(
-                        t('sessionInfo.deleteSession'),
-                        t('sessionInfo.deleteSessionWarning'),
-                        {
-                            cancelText: t('common.cancel'),
-                            confirmText: t('common.delete'),
-                            destructive: true,
-                        },
-                    );
+    const hideDrawerThread = React.useCallback(() => {
+        if (!onHideFromDrawer || isHidingFromDrawer) {
+            return;
+        }
 
-                    if (confirmed) {
-                        deleteThread();
-                    }
-                })();
-            },
-        );
-    }, [deleteThread]);
+        setIsHidingFromDrawer(true);
+        Animated.timing(rowExitProgress, {
+            toValue: 1,
+            duration: 170,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+        }).start(() => {
+            onHideFromDrawer(item);
+        });
+    }, [isHidingFromDrawer, item, onHideFromDrawer, rowExitProgress]);
+
+    const requestThreadActions = React.useCallback(() => {
+        if (variant === 'drawer' && onHideFromDrawer && onTogglePinned) {
+            longPressTriggeredRef.current = true;
+            showDrawerThreadActionSheet({
+                title: item.title,
+                isPinned,
+                onTogglePinned: () => onTogglePinned(item),
+                onHideFromDrawer: hideDrawerThread,
+            });
+        }
+    }, [hideDrawerThread, isPinned, item, onHideFromDrawer, onTogglePinned, variant]);
 
     const handlePress = React.useCallback(() => {
         if (longPressTriggeredRef.current) {
@@ -954,7 +1023,7 @@ const CliProjectThreadRow = React.memo(({
             return;
         }
 
-        if (opening || deleting) {
+        if (opening || isHidingFromDrawer) {
             return;
         }
 
@@ -962,30 +1031,61 @@ const CliProjectThreadRow = React.memo(({
             onDrawerItemPress?.();
         }
 
+        restoreDrawerThreadInLocalSettings(item.id);
         openThread();
-    }, [deleting, onDrawerItemPress, openThread, opening, variant]);
+    }, [isHidingFromDrawer, item.id, onDrawerItemPress, openThread, opening, variant]);
 
-    const threadTrigger = (
+    const threadPressable = (
         <Pressable
             style={variant === 'drawer' ? styles.drawerThreadRow : styles.threadRow}
             onPress={handlePress}
-            onLongPress={requestDeleteThread}
+            onLongPress={variant === 'drawer' ? requestThreadActions : undefined}
             delayLongPress={350}
         >
             <View style={styles.threadRowContent}>
+                {variant === 'drawer' && isPinned ? (
+                    <Ionicons
+                        name="pin"
+                        size={13}
+                        color={theme.colors.textSecondary}
+                        style={styles.drawerPinIcon}
+                    />
+                ) : null}
                 <Text style={variant === 'drawer' ? styles.drawerThreadTitle : styles.threadRowTitle} numberOfLines={1}>
                     {item.title}
                 </Text>
             </View>
             <Text style={variant === 'drawer' ? styles.drawerThreadMeta : styles.threadRowMeta}>
-                {deleting
-                    ? `${t('common.delete')}...`
-                    : opening
-                        ? t('terminal.connecting')
-                        : formatCliThreadUpdatedAt(item.updatedAt)}
+                {opening
+                    ? t('terminal.connecting')
+                    : formatCliThreadUpdatedAt(item.updatedAt)}
             </Text>
         </Pressable>
     );
 
+    const threadTrigger = variant === 'drawer' ? (
+        <Animated.View
+            style={{
+                opacity: rowExitProgress.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [1, 0],
+                }),
+                transform: [
+                    {
+                        translateX: rowExitProgress.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [0, -18],
+                        }),
+                    },
+                ],
+            }}
+        >
+            {threadPressable}
+        </Animated.View>
+    ) : threadPressable;
+
+    // FlashList recycles drawer rows aggressively; keeping Swipeable state inside
+    // those recycled cells can leave multiple "hide" actions stuck open. Drawer
+    // cleanup stays available through the long-press action sheet instead.
     return threadTrigger;
 });

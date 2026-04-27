@@ -9,12 +9,10 @@ import { getSessionName, getSessionAvatarId, formatPathRelativeToHome } from '@/
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
-import { useAllMachines, useSetting } from '@/sync/storage';
+import { useAllMachines } from '@/sync/storage';
 import { StyleSheet } from 'react-native-unistyles';
-import { isMachineOnline } from '@/utils/machineUtils';
-import { machineSpawnNewSession, sessionKill } from '@/sync/ops';
+import { sessionKill } from '@/sync/ops';
 import { storage } from '@/sync/storage';
-import { CompactGitStatus } from './CompactGitStatus';
 import { ProjectGitStatus } from './ProjectGitStatus';
 import { t } from '@/text';
 import { useNavigateDirectlyToSession, useNavigateToSession } from '@/hooks/useNavigateToSession';
@@ -22,6 +20,7 @@ import { useOrbitAction } from '@/hooks/useOrbitAction';
 import { OrbitError } from '@/utils/errors';
 import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPopover';
 import { useSessionControlState } from '@/utils/sessionControlState';
+import { useShallow } from 'zustand/react/shallow';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -214,6 +213,13 @@ interface ActiveSessionsGroupProps {
 export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessionsGroupProps) {
     const styles = stylesheet;
     const machines = useAllMachines();
+    const projectGitStatusBySessionId = storage(useShallow((state) => {
+        const next: Record<string, ReturnType<typeof state.getSessionProjectGitStatus>> = {};
+        for (const session of sessions) {
+            next[session.id] = state.getSessionProjectGitStatus(session.id) ?? state.sessionGitStatus[session.id] ?? null;
+        }
+        return next;
+    }));
     const machinesMap = React.useMemo(() => {
         const map: Record<string, Machine> = {};
         machines.forEach(machine => {
@@ -310,8 +316,17 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                             {(() => {
                                 // Get the first session from any machine in this project
                                 const firstSession = Array.from(projectGroup.machines.values())[0]?.sessions[0];
+                                const gitStatus = firstSession
+                                    ? projectGitStatusBySessionId[firstSession.id] ?? null
+                                    : null;
                                 return firstSession ? (
-                                    <ProjectGitStatus sessionId={firstSession.id} />
+                                    gitStatus ? (
+                                        <ProjectGitStatus gitStatus={gitStatus} />
+                                    ) : (
+                                        <Text style={styles.sectionHeaderMachine} numberOfLines={1}>
+                                            {machineName}
+                                        </Text>
+                                    )
                                 ) : (
                                     <Text style={styles.sectionHeaderMachine} numberOfLines={1}>
                                         {machineName}
@@ -355,7 +370,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
     const navigateToSession = useNavigateToSession();
     const navigateDirectlyToSession = useNavigateDirectlyToSession();
     const swipeableRef = React.useRef<Swipeable | null>(null);
-    const swipeEnabled = Platform.OS !== 'web';
+    const swipeEnabled = true;
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
 
     const [archivingSession, performArchive] = useOrbitAction(async () => {
@@ -392,10 +407,6 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
         });
     }, []);
 
-    const webMenuProps = Platform.OS === 'web' ? {
-        onContextMenu: handleContextMenu,
-    } as any : {};
-
     const itemContent = (
         <Pressable
             style={[
@@ -404,7 +415,6 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                 selected && styles.sessionRowSelected
             ]}
             onPress={handlePress}
-            {...webMenuProps}
         >
             <View style={styles.avatarContainer}>
                 <Avatar id={avatarId} size={48} monochrome={!sessionControlState.isConnected} flavor={session.metadata?.flavor} />

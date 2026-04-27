@@ -458,7 +458,7 @@ export class ApiSessionClient extends EventEmitter {
     } | {
         type: 'message', message: string
     } | {
-        type: 'permission-mode-changed', mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'
+        type: 'permission-mode-changed', mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'auto' | 'dontAsk'
     } | {
         type: 'ready'
     }, id?: string) {

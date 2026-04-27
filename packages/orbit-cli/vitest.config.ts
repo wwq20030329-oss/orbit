@@ -66,9 +66,26 @@ export default defineConfig({
                     testTimeout: 60_000,
                     include: [
                         'src/daemon/daemon.integration.test.ts',
-                        'src/openclaw/openclaw.integration.test.ts',
                     ],
                     setupFiles: ['./src/testing/integration.setup.authenticated.ts'],
+                    sequence: {
+                        groupOrder: 2,
+                    },
+                },
+            },
+            {
+                extends: true,
+                test: {
+                    name: 'integration-openclaw',
+                    fileParallelism: false,
+                    hookTimeout: 120_000,
+                    maxWorkers: 1,
+                    minWorkers: 1,
+                    testTimeout: 90_000,
+                    include: [
+                        'src/openclaw/openclaw.integration.test.ts',
+                    ],
+                    setupFiles: ['./src/testing/integration.setup.openclaw.ts'],
                     sequence: {
                         groupOrder: 2,
                     },

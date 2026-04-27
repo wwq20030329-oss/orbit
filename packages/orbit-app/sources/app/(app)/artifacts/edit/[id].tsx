@@ -265,12 +265,6 @@ export default function EditArtifactScreen() {
                                 style={[
                                     styles.input,
                                     titleFocused && styles.inputFocused,
-                                    Platform.OS === 'web' && { 
-                                        outlineStyle: 'none',
-                                        outline: 'none',
-                                        outlineWidth: 0,
-                                        outlineColor: 'transparent'
-                                    } as any
                                 ]}
                                 value={title}
                                 onChangeText={setTitle}
@@ -291,12 +285,6 @@ export default function EditArtifactScreen() {
                                     styles.input,
                                     styles.textArea,
                                     bodyFocused && styles.inputFocused,
-                                    Platform.OS === 'web' && { 
-                                        outlineStyle: 'none',
-                                        outline: 'none',
-                                        outlineWidth: 0,
-                                        outlineColor: 'transparent'
-                                    } as any
                                 ]}
                                 value={body}
                                 onChangeText={setBody}

@@ -3,8 +3,8 @@ import { View, Text, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ToolViewProps } from './_all';
 import { ToolSectionView } from '../ToolSectionView';
-import { sessionAllow } from '@/sync/ops';
-import { sync } from '@/sync/sync';
+import { useOrbitRemoteSessionManager } from '@/hooks/useOrbitRemoteSessionManager';
+import { OrbitSessionControlChannel } from '@/remote/OrbitSessionControlChannel';
 import { t } from '@/text';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -170,6 +170,11 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     const [selections, setSelections] = React.useState<Map<number, Set<number>>>(new Map());
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const [isSubmitted, setIsSubmitted] = React.useState(false);
+    const controlChannel = React.useMemo(
+        () => sessionId ? new OrbitSessionControlChannel(sessionId) : null,
+        [sessionId],
+    );
+    const remoteSessionManager = useOrbitRemoteSessionManager(sessionId ?? null);
 
     // Parse input
     const input = tool.input as AskUserQuestionInput | undefined;
@@ -241,17 +246,22 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
 
         try {
             // 1. Approve the permission (like PermissionFooter.handleApprove does)
-            if (tool.permission?.id) {
-                await sessionAllow(sessionId, tool.permission.id);
+            if (tool.permission?.id && controlChannel) {
+                await controlChannel.allowPermission(tool.permission.id);
             }
             // 2. Send the answer as a message
-            await sync.sendMessage(sessionId, responseText, { source: 'question' });
+            if (remoteSessionManager) {
+                await remoteSessionManager.sendCurrentSessionMessage({
+                    content: responseText,
+                    source: 'question',
+                });
+            }
         } catch (error) {
             console.error('Failed to submit answer:', error);
         } finally {
             setIsSubmitting(false);
         }
-    }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
+    }, [allQuestionsAnswered, controlChannel, isSubmitting, questions, remoteSessionManager, selections, sessionId, tool.permission?.id]);
 
     // Show submitted state
     if (isSubmitted || tool.state === 'completed') {

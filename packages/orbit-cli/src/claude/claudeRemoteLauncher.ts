@@ -20,7 +20,7 @@ import { getAskUserQuestionToolCallIds } from "./utils/questionNotification";
 interface PermissionsField {
     date: number;
     result: 'approved' | 'denied';
-    mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+    mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'auto' | 'dontAsk';
     allowedTools?: string[];
 }
 

@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { sessionAllow, sessionDeny } from '@/sync/ops';
 import { useUnistyles } from 'react-native-unistyles';
 import { storage } from '@/sync/storage';
 import { t } from '@/text';
+import { OrbitSessionControlChannel } from '@/remote/OrbitSessionControlChannel';
 
 interface PermissionFooterProps {
     permission: {
@@ -23,6 +23,7 @@ interface PermissionFooterProps {
 
 export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, sessionId, toolName, toolInput, metadata }) => {
     const { theme } = useUnistyles();
+    const controlChannel = React.useMemo(() => new OrbitSessionControlChannel(sessionId), [sessionId]);
     const [loadingButton, setLoadingButton] = useState<'allow' | 'deny' | 'abort' | null>(null);
     const [loadingAllEdits, setLoadingAllEdits] = useState(false);
     const [loadingForSession, setLoadingForSession] = useState(false);
@@ -35,7 +36,7 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
 
         setLoadingButton('allow');
         try {
-            await sessionAllow(sessionId, permission.id);
+            await controlChannel.allowPermission(permission.id);
         } catch (error) {
             console.error('Failed to approve permission:', error);
         } finally {
@@ -48,7 +49,7 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
 
         setLoadingAllEdits(true);
         try {
-            await sessionAllow(sessionId, permission.id, 'acceptEdits');
+            await controlChannel.allowPermission(permission.id, { mode: 'acceptEdits' });
             // Update the session permission mode to 'acceptEdits' for future permissions
             storage.getState().updateSessionPermissionMode(sessionId, 'acceptEdits');
         } catch (error) {
@@ -70,7 +71,7 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
                 toolIdentifier = `Bash(${command})`;
             }
             
-            await sessionAllow(sessionId, permission.id, undefined, [toolIdentifier]);
+            await controlChannel.allowPermission(permission.id, { allowedTools: [toolIdentifier] });
         } catch (error) {
             console.error('Failed to approve for session:', error);
         } finally {
@@ -83,7 +84,7 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
 
         setLoadingButton('deny');
         try {
-            await sessionDeny(sessionId, permission.id);
+            await controlChannel.denyPermission(permission.id);
         } catch (error) {
             console.error('Failed to deny permission:', error);
         } finally {
@@ -97,7 +98,7 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
         
         setLoadingButton('allow');
         try {
-            await sessionAllow(sessionId, permission.id, undefined, undefined, 'approved');
+            await controlChannel.allowPermission(permission.id, { decision: 'approved' });
         } catch (error) {
             console.error('Failed to approve permission:', error);
         } finally {
@@ -110,7 +111,7 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
         
         setLoadingForSession(true);
         try {
-            await sessionAllow(sessionId, permission.id, undefined, undefined, 'approved_for_session');
+            await controlChannel.allowPermission(permission.id, { decision: 'approved_for_session' });
         } catch (error) {
             console.error('Failed to approve for session:', error);
         } finally {
@@ -123,7 +124,7 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
         
         setLoadingButton('abort');
         try {
-            await sessionDeny(sessionId, permission.id, undefined, undefined, 'abort');
+            await controlChannel.denyPermission(permission.id, { decision: 'abort' });
         } catch (error) {
             console.error('Failed to abort permission:', error);
         } finally {

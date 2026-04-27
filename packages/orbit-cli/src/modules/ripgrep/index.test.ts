@@ -27,6 +27,7 @@ describe('ripgrep low-level wrapper', () => {
     it('should handle JSON output', async () => {
         const result = await run(['--json', 'describe', 'src/modules/ripgrep/index.test.ts'])
         expect(result.exitCode).toBe(0)
+        expect(result.stderr).toBe('')
         
         // Parse first line to check it's valid JSON
         const lines = result.stdout.trim().split('\n')

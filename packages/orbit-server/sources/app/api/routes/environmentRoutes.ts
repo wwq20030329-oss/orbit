@@ -19,7 +19,6 @@ interface EnvironmentConfig {
     template: string;
     projectTemplate: string;
     projectPath: string;
-    authenticatedWebUrl?: string;
     cliCommand?: string;
 }
 

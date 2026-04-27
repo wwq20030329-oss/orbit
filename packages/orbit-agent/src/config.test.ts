@@ -9,8 +9,6 @@ describe('config', () => {
     beforeEach(() => {
         delete process.env.ORBIT_SERVER_URL;
         delete process.env.ORBIT_HOME_DIR;
-        delete process.env.HAPPY_SERVER_URL;
-        delete process.env.HAPPY_HOME_DIR;
     });
 
     afterEach(() => {
@@ -20,7 +18,7 @@ describe('config', () => {
     describe('defaults', () => {
         it('uses default server URL', () => {
             const config = loadConfig();
-            expect(config.serverUrl).toBe('https://api.cluster-fluster.com');
+            expect(config.serverUrl).toBe('https://api.2003383.xyz');
         });
 
         it('uses default home directory', () => {
@@ -35,15 +33,13 @@ describe('config', () => {
     });
 
     describe('env var overrides', () => {
-        it('prefers ORBIT_SERVER_URL over legacy server envs', () => {
-            process.env.HAPPY_SERVER_URL = 'https://legacy-server.example.com';
+        it('uses ORBIT_SERVER_URL when set', () => {
             process.env.ORBIT_SERVER_URL = 'https://custom-server.example.com';
             const config = loadConfig();
             expect(config.serverUrl).toBe('https://custom-server.example.com');
         });
 
-        it('prefers ORBIT_HOME_DIR over legacy home envs', () => {
-            process.env.HAPPY_HOME_DIR = '/tmp/legacy-happy';
+        it('uses ORBIT_HOME_DIR when set', () => {
             process.env.ORBIT_HOME_DIR = '/tmp/custom-orbit';
             const config = loadConfig();
             expect(config.homeDir).toBe('/tmp/custom-orbit');
@@ -62,15 +58,6 @@ describe('config', () => {
             expect(config.serverUrl).toBe('https://other.example.com');
             expect(config.homeDir).toBe('/opt/orbit');
             expect(config.credentialPath).toBe('/opt/orbit/agent.key');
-        });
-
-        it('still supports legacy HAPPY_* overrides for backwards compatibility', () => {
-            process.env.HAPPY_SERVER_URL = 'https://legacy.example.com';
-            process.env.HAPPY_HOME_DIR = '/opt/happy';
-            const config = loadConfig();
-            expect(config.serverUrl).toBe('https://legacy.example.com');
-            expect(config.homeDir).toBe('/opt/happy');
-            expect(config.credentialPath).toBe('/opt/happy/agent.key');
         });
     });
 });

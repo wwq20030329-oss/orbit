@@ -119,6 +119,25 @@ describe('presence', () => {
     ).toBe(false);
   });
 
+  it('treats sessions with an attached live runtime as online even when persisted presence is stale', () => {
+    const staleAt = now - LIVE_ACTIVITY_GRACE_MS - 1;
+
+    expect(
+      isSessionLikelyOnline({
+        active: false,
+        activeAt: staleAt,
+        liveRuntime: {
+          status: 'connected',
+        },
+        metadata: {
+          lifecycleState: 'running',
+          nativeHistorySourceTool: 'claude',
+          nativeHistorySourceBackendId: 'session-123',
+        },
+      }, now),
+    ).toBe(true);
+  });
+
   it('keeps non-native sessions online when storage already resolved their presence to online', () => {
     const staleAt = now - LIVE_ACTIVITY_GRACE_MS - 1;
 
@@ -142,6 +161,9 @@ describe('presence', () => {
         active: false,
         activeAt: staleAt,
         presence: 'online',
+        liveRuntime: {
+          status: 'connected',
+        },
         metadata: {
           lifecycleState: 'running',
           sessionRole: 'native-live-mirror',

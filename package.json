@@ -4,7 +4,6 @@
     "scripts": {
         "cli": "yarn workspace orbit cli",
         "release": "node ./scripts/release.cjs",
-        "web": "yarn workspace orbit-app web",
         "app-logs": "yarn workspace orbit-app-logs start",
         "postinstall": "node ./scripts/postinstall.cjs",
         "env:new": "tsx environments/environments.ts new",
@@ -13,7 +12,6 @@
         "env:remove": "tsx environments/environments.ts remove",
         "env:current": "tsx environments/environments.ts current",
         "env:server": "tsx environments/environments.ts run server",
-        "env:web": "tsx environments/environments.ts run web",
         "env:ios": "tsx environments/environments.ts run ios",
         "env:ios:sim": "tsx environments/environments.ts run ios",
         "env:ios:rebuild": "tsx environments/environments.ts run ios --rebuild",
@@ -37,7 +35,6 @@
         "nohoist": [
             "**/zod",
             "**/react",
-            "**/react-dom",
             "**/react-native",
             "**/react-native/**",
             "**/react-native-edge-to-edge/**",

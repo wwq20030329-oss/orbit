@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { LiveMirrorDetach } from '@orbit/wire';
 import { useShallow } from 'zustand/react/shallow'
 import { Session, Machine, GitStatus, NativeCliHistoryEntry } from "./storageTypes";
 import type { GitStatusFiles } from "./gitStatusFiles";
@@ -11,7 +12,11 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes,
+    loadSessionMessagesCache,
+    saveSessionMessagesCache,
+    clearSessionMessagesCache
+} from "./persistence";
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
 import { sync } from "./sync";
@@ -31,6 +36,15 @@ import {
 import { buildLegacySessionListData } from './legacySessionListData';
 import { clearRealtimeModeDebounce, scheduleRealtimeModeUpdate } from './realtimeModeController';
 import { areNativeCliEntriesEqual } from './nativeCliHistoryEntries';
+import { deleteSessionState } from './deleteSessionState';
+import type { PhoneCliTool } from '@/utils/phoneCli';
+import { getSessionControlState } from '@/utils/sessionControlState';
+import {
+    applyLiveRuntimeFrameToSessions,
+    connectSessionsToLiveRuntime,
+    detachAllConnectedLiveRuntimeSessions,
+    detachSessionsFromLiveRuntime,
+} from '@/utils/sessionLiveRuntime';
 
 /**
  * Centralized session online state resolver
@@ -55,7 +69,20 @@ interface SessionMessages {
     messagesMap: Record<string, Message>;
     reducerState: ReducerState;
     isLoaded: boolean;
+    lastSeq: number | null;
 }
+
+type PendingPhoneConversationSeed = {
+    optimisticPendingUserMessage?: string | null;
+    optimisticCli?: PhoneCliTool | null;
+    createdAt: number;
+};
+
+type LiveRuntimeStorageUpdate = {
+    runtimeId: string;
+    sessionId: string;
+    machineId: string;
+};
 
 // Machine type is now imported from storageTypes - represents persisted machine data
 
@@ -82,6 +109,10 @@ interface StorageState {
     sessions: Record<string, Session>;
     sessionsData: SessionListItem[] | null;  // Legacy - to be removed
     sessionListViewData: SessionListViewItem[] | null;
+    cliListSessions: Session[];
+    listMachines: Machine[];
+    phoneWorkspaceSessionId: string | null;
+    pendingPhoneConversationSeeds: Record<string, PendingPhoneConversationSeed>;
     sessionMessages: Record<string, SessionMessages>;
     sessionGitStatus: Record<string, GitStatus | null>;
     sessionGitStatusFiles: Record<string, GitStatusFiles | null>;
@@ -120,6 +151,11 @@ interface StorageState {
     applyFileCache: (sessionId: string, filePath: string, content: string | null, diff: string | null, isBinary: boolean) => void;
     applyNativeCliHistory: (machineId: string, entries: NativeCliHistoryEntry[]) => void;
     applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => void;
+    applySessionLastSeq: (sessionId: string, lastSeq: number) => void;
+    applyLiveRuntimeConnected: (payload: LiveRuntimeStorageUpdate & { connectedAt: number; lastFrameAt: number | null }) => void;
+    applyLiveRuntimeFrame: (payload: LiveRuntimeStorageUpdate & { frameAt: number }) => void;
+    applyLiveRuntimeDetached: (payload: LiveRuntimeStorageUpdate & { detachedAt: number; reason: LiveMirrorDetach['reason'] }) => void;
+    detachAllLiveRuntimeConnections: (reason: LiveMirrorDetach['reason'], detachedAt: number) => void;
     isMutableToolCall: (sessionId: string, callId: string) => boolean;
     setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     setRealtimeMode: (mode: 'idle' | 'agent-speaking' | 'user-speaking', immediate?: boolean) => void;
@@ -130,6 +166,8 @@ interface StorageState {
     updateSessionPermissionMode: (sessionId: string, mode: string) => void;
     updateSessionModelMode: (sessionId: string, mode: string) => void;
     updateSessionEffortLevel: (sessionId: string, level: string) => void;
+    setPhoneWorkspaceSessionId: (sessionId: string | null) => void;
+    setPendingPhoneConversationSeed: (sessionId: string, seed: Omit<PendingPhoneConversationSeed, 'createdAt'>) => void;
     // Artifact methods
     applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
     addArtifact: (artifact: DecryptedArtifact) => void;
@@ -255,6 +293,17 @@ function buildSessionListViewData(
     return listData;
 }
 
+function buildCliListSessions(sessions: Record<string, Session>): Session[] {
+    return Object.values(sessions)
+        .filter(isCliSessionRelevantForList)
+        .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function buildListMachines(machines: Record<string, Machine>): Machine[] {
+    return Object.values(machines)
+        .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
 export const storage = create<StorageState>()((set, get) => {
     let { settings, version } = loadSettings();
     let localSettings = loadLocalSettings();
@@ -282,6 +331,10 @@ export const storage = create<StorageState>()((set, get) => {
         friendsLoaded: false,  // Initialize as false
         sessionsData: null,  // Legacy - to be removed
         sessionListViewData: null,
+        cliListSessions: [],
+        listMachines: [],
+        phoneWorkspaceSessionId: null,
+        pendingPhoneConversationSeeds: {},
         sessionMessages: {},
         sessionGitStatus: {},
         sessionGitStatusFiles: {},
@@ -344,6 +397,8 @@ export const storage = create<StorageState>()((set, get) => {
             });
 
             const listData: SessionListItem[] = buildLegacySessionListData(Object.values(mergedSessions));
+            const sessionListViewData = buildSessionListViewData(mergedSessions);
+            const cliListSessions = buildCliListSessions(mergedSessions);
 
             // Process AgentState updates for sessions that already have messages loaded
             const updatedSessionMessages = { ...state.sessionMessages };
@@ -405,7 +460,8 @@ export const storage = create<StorageState>()((set, get) => {
                         messages: messagesArray,
                         messagesMap: mergedMessagesMap,
                         reducerState: existingSessionMessages.reducerState, // The reducer modifies state in-place, so this has the updates
-                        isLoaded: existingSessionMessages.isLoaded
+                        isLoaded: existingSessionMessages.isLoaded,
+                        lastSeq: existingSessionMessages.lastSeq,
                     };
 
                     // IMPORTANT: Copy latestUsage from reducerState to Session for immediate availability
@@ -431,13 +487,16 @@ export const storage = create<StorageState>()((set, get) => {
                 ...state,
                 sessions: mergedSessions,
                 sessionsData: listData,  // Legacy - to be removed
+                sessionListViewData,
+                cliListSessions,
                 sessionMessages: updatedSessionMessages
             };
         }),
         applyLoaded: () => set((state) => {
             const result = {
                 ...state,
-                sessionsData: []
+                sessionsData: [],
+                sessionListViewData: [],
             };
             return result;
         }),
@@ -476,7 +535,8 @@ export const storage = create<StorageState>()((set, get) => {
                     messages: [],
                     messagesMap: {},
                     reducerState: createReducer(),
-                    isLoaded: false
+                    isLoaded: false,
+                    lastSeq: null,
                 };
 
                 // Get the session's agentState if available
@@ -538,7 +598,8 @@ export const storage = create<StorageState>()((set, get) => {
                             messages: messagesArray,
                             messagesMap: mergedMessagesMap,
                             reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
-                            isLoaded: true
+                            isLoaded: true,
+                            lastSeq: existingSession.lastSeq,
                         }
                     }
                 };
@@ -602,7 +663,8 @@ export const storage = create<StorageState>()((set, get) => {
                             reducerState,
                             messages,
                             messagesMap,
-                            isLoaded: true
+                            isLoaded: true,
+                            lastSeq: null,
                         } satisfies SessionMessages
                     }
                 };
@@ -613,7 +675,8 @@ export const storage = create<StorageState>()((set, get) => {
                         ...state.sessionMessages,
                         [sessionId]: {
                             ...existingSession,
-                            isLoaded: true
+                            isLoaded: true,
+                            lastSeq: existingSession.lastSeq,
                         } satisfies SessionMessages
                     }
                 };
@@ -700,6 +763,90 @@ export const storage = create<StorageState>()((set, get) => {
             ...state,
             nativeUpdateStatus: status
         })),
+        applySessionLastSeq: (sessionId: string, lastSeq: number) => set((state) => {
+            const existingSession = state.sessionMessages[sessionId] || {
+                messages: [],
+                messagesMap: {},
+                reducerState: createReducer(),
+                isLoaded: false,
+                lastSeq: null,
+            };
+            if (existingSession.lastSeq !== null && existingSession.lastSeq >= lastSeq) {
+                return state;
+            }
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: {
+                        ...existingSession,
+                        lastSeq,
+                    },
+                },
+            };
+        }),
+        applyLiveRuntimeConnected: (payload) => set((state) => {
+            const sessions = connectSessionsToLiveRuntime(
+                state.sessions,
+                payload,
+                payload.connectedAt,
+                payload.lastFrameAt,
+            );
+            if (sessions === state.sessions) {
+                return state;
+            }
+            return {
+                ...state,
+                sessions,
+                cliListSessions: buildCliListSessions(sessions),
+                sessionListViewData: buildSessionListViewData(sessions),
+            };
+        }),
+        applyLiveRuntimeFrame: (payload) => set((state) => {
+            const sessions = applyLiveRuntimeFrameToSessions(
+                state.sessions,
+                payload,
+                payload.frameAt,
+            );
+            if (sessions === state.sessions) {
+                return state;
+            }
+            return {
+                ...state,
+                sessions,
+                cliListSessions: buildCliListSessions(sessions),
+                sessionListViewData: buildSessionListViewData(sessions),
+            };
+        }),
+        applyLiveRuntimeDetached: (payload) => set((state) => {
+            const sessions = detachSessionsFromLiveRuntime(
+                state.sessions,
+                payload,
+                payload.detachedAt,
+                payload.reason,
+            );
+            if (sessions === state.sessions) {
+                return state;
+            }
+            return {
+                ...state,
+                sessions,
+                cliListSessions: buildCliListSessions(sessions),
+                sessionListViewData: buildSessionListViewData(sessions),
+            };
+        }),
+        detachAllLiveRuntimeConnections: (reason, detachedAt) => set((state) => {
+            const sessions = detachAllConnectedLiveRuntimeSessions(state.sessions, detachedAt, reason);
+            if (sessions === state.sessions) {
+                return state;
+            }
+            return {
+                ...state,
+                sessions,
+                cliListSessions: buildCliListSessions(sessions),
+                sessionListViewData: buildSessionListViewData(sessions),
+            };
+        }),
         setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => set((state) => ({
             ...state,
             realtimeStatus: status
@@ -714,6 +861,20 @@ export const storage = create<StorageState>()((set, get) => {
             });
         },
         clearRealtimeModeDebounce,
+        setPhoneWorkspaceSessionId: (sessionId: string | null) => set((state) => ({
+            ...state,
+            phoneWorkspaceSessionId: sessionId,
+        })),
+        setPendingPhoneConversationSeed: (sessionId: string, seed: Omit<PendingPhoneConversationSeed, 'createdAt'>) => set((state) => ({
+            ...state,
+            pendingPhoneConversationSeeds: {
+                ...state.pendingPhoneConversationSeeds,
+                [sessionId]: {
+                    ...seed,
+                    createdAt: Date.now(),
+                },
+            },
+        })),
         setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => set((state) => {
             const now = Date.now();
             const updates: Partial<StorageState> = {
@@ -843,6 +1004,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 machines: mergedMachines,
+                listMachines: buildListMachines(mergedMachines),
             };
         }),
         applyNativeCliHistory: (machineId: string, entries: NativeCliHistoryEntry[]) => set((state) => {
@@ -904,27 +1066,17 @@ export const storage = create<StorageState>()((set, get) => {
             };
         }),
         deleteSession: (sessionId: string) => set((state) => {
-            // Remove session from sessions
-            const { [sessionId]: deletedSession, ...remainingSessions } = state.sessions;
-            
-            // Remove session messages if they exist
-            const { [sessionId]: deletedMessages, ...remainingSessionMessages } = state.sessionMessages;
-            
-            // Remove session git status if it exists
-            const { [sessionId]: deletedGitStatus, ...remainingGitStatus } = state.sessionGitStatus;
-            const { [sessionId]: _gitStatusFiles, ...remainingGitStatusFiles } = state.sessionGitStatusFiles;
-            const { [sessionId]: _fileCache, ...remainingFileCache } = state.sessionFileCache;
+            const next = deleteSessionState(state, sessionId);
 
-            saveSessionDrafts(buildPersistedSessionDrafts(remainingSessions));
-            saveSessionPermissionModes(buildPersistedSessionPermissionModes(remainingSessions));
+            saveSessionDrafts(buildPersistedSessionDrafts(next.sessions));
+            saveSessionPermissionModes(buildPersistedSessionPermissionModes(next.sessions));
+            projectManager.removeSession(sessionId);
             
             return {
                 ...state,
-                sessions: remainingSessions,
-                sessionMessages: remainingSessionMessages,
-                sessionGitStatus: remainingGitStatus,
-                sessionGitStatusFiles: remainingGitStatusFiles,
-                sessionFileCache: remainingFileCache,
+                ...next,
+                sessionsData: buildLegacySessionListData(Object.values(next.sessions)),
+                sessionListViewData: buildSessionListViewData(next.sessions),
             };
         }),
         // Friend management methods
@@ -979,10 +1131,7 @@ export const storage = create<StorageState>()((set, get) => {
             return get().users[userId];  // Returns UserProfile | null | undefined
         },
         assumeUsers: async (userIds: string[]) => {
-            // This will be implemented in sync.ts as it needs access to credentials
-            // Just a placeholder here for the interface
-            const { sync } = await import('./sync');
-            return sync.assumeUsers(userIds);
+            void userIds;
         },
         // Feed methods
         applyFeedItems: (items: FeedItem[]) => set((state) => {
@@ -1053,6 +1202,14 @@ export const storage = create<StorageState>()((set, get) => {
     }
 });
 
+export function retainVisibleSessionListObserver(): () => void {
+    return () => {
+        // The visible list currently derives directly from the store. Keeping
+        // this retain/release hook preserves the observer contract for callers
+        // without adding another subscription layer.
+    };
+}
+
 export function useSessions() {
     return storage(useShallow((state) => state.isDataReady ? state.sessionsData : null));
 }
@@ -1110,9 +1267,15 @@ export function useLocalSettings(): LocalSettings {
 export function useAllMachines(options?: { includeOffline?: boolean }): Machine[] {
     const includeOffline = options?.includeOffline ?? false;
     return storage(useShallow((state) => {
-        const machines = Object.values(state.machines).sort((a, b) => b.createdAt - a.createdAt);
+        const machines = state.listMachines.length > 0
+            ? state.listMachines
+            : buildListMachines(state.machines);
         return includeOffline ? machines : machines.filter((v) => v.active);
     }));
+}
+
+export function useHasOnlineMachines(): boolean {
+    return storage(useShallow((state) => state.listMachines.some(isMachineOnline)));
 }
 
 export function useMachine(machineId: string): Machine | null {
@@ -1183,6 +1346,53 @@ export function useLocalSetting<K extends keyof LocalSettings>(name: K): LocalSe
     return storage(useShallow((state) => state.localSettings[name]));
 }
 
+export function usePhoneWorkspaceSessionIdMutable(): [string | null, (sessionId: string | null) => void] {
+    const sessionId = storage(useShallow((state) => state.phoneWorkspaceSessionId));
+    const setSessionId = React.useCallback((nextSessionId: string | null) => {
+        storage.getState().setPhoneWorkspaceSessionId(nextSessionId);
+    }, []);
+    return React.useMemo(
+        () => [sessionId, setSessionId],
+        [sessionId, setSessionId],
+    );
+}
+
+export function useRemoteSessionView(
+    sessionId: string,
+    options: { nativeConnectionPending?: boolean } = {},
+) {
+    const nativeConnectionPending = options.nativeConnectionPending ?? false;
+    const remoteSessionView = storage(useShallow((state) => {
+        const session = state.sessions[sessionId] ?? null;
+        const sessionMessages = state.sessionMessages[sessionId];
+
+        return {
+            session,
+            messages: sessionMessages?.messages ?? (emptyArray as Message[]),
+            isLoaded: sessionMessages?.isLoaded ?? false,
+            pendingSeed: state.pendingPhoneConversationSeeds[sessionId] ?? null,
+        };
+    }));
+    const sessionControlState = React.useMemo(
+        () => remoteSessionView.session
+            ? getSessionControlState(remoteSessionView.session, { sessionId })
+            : null,
+        [remoteSessionView.session, sessionId],
+    );
+    const isDisconnected = nativeConnectionPending
+        ? true
+        : (sessionControlState?.isDisconnected ?? true);
+
+    return React.useMemo(
+        () => ({
+            ...remoteSessionView,
+            isDisconnected,
+            sessionControlState,
+        }),
+        [isDisconnected, remoteSessionView, sessionControlState],
+    );
+}
+
 // Artifact hooks
 export function useArtifacts(): DecryptedArtifact[] {
     return storage(useShallow((state) => {
@@ -1241,6 +1451,10 @@ export function useSocketStatus() {
         lastConnectedAt: state.socketLastConnectedAt,
         lastDisconnectedAt: state.socketLastDisconnectedAt
     })));
+}
+
+export function useSocketConnectionStatus(): 'disconnected' | 'connecting' | 'connected' | 'error' {
+    return storage(useShallow((state) => state.socketStatus));
 }
 
 export function useSessionGitStatus(sessionId: string): GitStatus | null {

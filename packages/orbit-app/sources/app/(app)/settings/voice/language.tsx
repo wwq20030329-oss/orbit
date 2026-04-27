@@ -1,17 +1,41 @@
 import React, { useState, useMemo } from 'react';
-import { View, TextInput, FlatList } from 'react-native';
+import { View, TextInput, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useSettingMutable } from '@/sync/storage';
-import { useUnistyles } from 'react-native-unistyles';
-import { LANGUAGES, getLanguageDisplayName, type Language } from '@/constants/Languages';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { LANGUAGES, getLanguageDisplayName } from '@/constants/Languages';
 import { t } from '@/text';
+
+const stylesheet = StyleSheet.create((theme) => ({
+    searchWrap: {
+        paddingHorizontal: 16,
+        marginTop: 4,
+    },
+    searchCard: {
+        borderRadius: 16,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
+        backgroundColor: theme.colors.surface,
+        paddingHorizontal: 14,
+        paddingVertical: 12,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+    },
+    searchInput: {
+        flex: 1,
+        fontSize: 16,
+        color: theme.colors.input.text,
+    },
+}));
 
 export default function LanguageSelectionScreen() {
     const { theme } = useUnistyles();
+    const styles = stylesheet;
     const router = useRouter();
     const [voiceAssistantLanguage, setVoiceAssistantLanguage] = useSettingMutable('voiceAssistantLanguage');
     const [searchQuery, setSearchQuery] = useState('');
@@ -37,34 +61,15 @@ export default function LanguageSelectionScreen() {
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
-            {/* Search Header */}
-            <View style={{
-                backgroundColor: theme.colors.surface,
-                paddingHorizontal: 16,
-                paddingVertical: 12,
-                borderBottomWidth: 1,
-                borderBottomColor: theme.colors.divider
-            }}>
-                <View style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    backgroundColor: theme.colors.input.background,
-                    borderRadius: 10,
-                    paddingHorizontal: 12,
-                    paddingVertical: 8,
-                }}>
+            <View style={styles.searchWrap}>
+                <View style={styles.searchCard}>
                     <Ionicons 
                         name="search-outline" 
                         size={20} 
                         color={theme.colors.textSecondary} 
-                        style={{ marginRight: 8 }}
                     />
                     <TextInput
-                        style={{
-                            flex: 1,
-                            fontSize: 16,
-                            color: theme.colors.input.text,
-                        }}
+                        style={styles.searchInput}
                         placeholder={t('settingsVoice.language.searchPlaceholder')}
                         placeholderTextColor={theme.colors.input.placeholder}
                         value={searchQuery}
@@ -73,30 +78,27 @@ export default function LanguageSelectionScreen() {
                         autoCorrect={false}
                     />
                     {searchQuery.length > 0 && (
-                        <Ionicons 
-                            name="close-circle" 
-                            size={20} 
-                            color={theme.colors.textSecondary}
-                            onPress={() => setSearchQuery('')}
-                            style={{ marginLeft: 8 }}
-                        />
+                        <Pressable onPress={() => setSearchQuery('')}>
+                            <Ionicons
+                                name="close-circle"
+                                size={20}
+                                color={theme.colors.textSecondary}
+                            />
+                        </Pressable>
                     )}
                 </View>
             </View>
 
-            {/* Language List */}
             <ItemGroup 
                 title={t('settingsVoice.language.title')} 
                 footer={t('settingsVoice.language.footer', { count: filteredLanguages.length })}
             >
-                <FlatList
-                    data={filteredLanguages}
-                    keyExtractor={(item) => item.code || 'autodetect'}
-                    renderItem={({ item }) => (
+                {filteredLanguages.length > 0 ? (
+                    filteredLanguages.map((item) => (
                         <Item
+                            key={item.code || 'autodetect'}
                             title={getLanguageDisplayName(item)}
                             subtitle={item.code || t('settingsVoice.language.autoDetect')}
-                            icon={<Ionicons name="language-outline" size={29} color="#007AFF" />}
                             rightElement={
                                 voiceAssistantLanguage === item.code ? (
                                     <Ionicons name="checkmark-circle" size={24} color="#007AFF" />
@@ -105,9 +107,14 @@ export default function LanguageSelectionScreen() {
                             onPress={() => handleLanguageSelect(item.code)}
                             showChevron={false}
                         />
-                    )}
-                    scrollEnabled={false}
-                />
+                    ))
+                ) : (
+                    <Item
+                        title={t('settingsVoice.language.noResults')}
+                        subtitle={searchQuery || undefined}
+                        showChevron={false}
+                    />
+                )}
             </ItemGroup>
         </ItemList>
     );

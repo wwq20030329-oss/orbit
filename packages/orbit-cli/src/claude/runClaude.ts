@@ -1,11 +1,9 @@
-import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
 import { loop } from '@/claude/loop';
-import { AgentState, Metadata } from '@/api/types';
-import packageJson from '../../package.json';
+import { AgentState } from '@/api/types';
 import { Credentials, readSettings } from '@/persistence';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
@@ -21,15 +19,23 @@ import { startOrbitMcpServer } from '@/claude/utils/startOrbitMcpServer';
 import { startHookServer } from '@/claude/utils/startHookServer';
 import { generateHookSettingsFile, cleanupHookSettingsFile } from '@/claude/utils/generateHookSettings';
 import { registerKillSessionHandler } from './registerKillSessionHandler';
-import { projectPath } from '../projectPath';
-import { resolve } from 'node:path';
 import { startOfflineReconnection, connectionState } from '@/utils/serverConnectionErrors';
 import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
 import { Session } from './session';
 import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode } from './utils/permissionMode';
 import { sanitizeInheritedClaudeEnv } from './utils/sanitizeInheritedClaudeEnv';
-import { getRequestedNativeCliHistoryReplay, replayNativeCliHistoryIfRequested } from '@/history/nativeCliHistoryReplay';
+import { withControlledByUser } from '@/utils/agentState';
+import { createBaseSessionMetadata } from '@/utils/createSessionMetadata';
+import { shouldReportSessionStartToDaemon } from '@/utils/shouldReportSessionStartToDaemon';
+import { applyClaudeSessionConfigMetadata, hasClaudeSessionConfigChange } from './sessionConfigMetadata';
+import {
+    buildNativeCliResumeSessionTag,
+    getRequestedNativeCliHistoryReplay,
+    markNativeCliHistoryImported,
+    replayNativeCliHistoryIfRequested,
+    shouldReplayNativeCliHistory,
+} from '@/history/nativeCliHistoryReplay';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -57,10 +63,16 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             strippedInheritedEnv,
         });
     }
+
+    const baseClaudeEnvVars = process.env.CLAUDE_CODE_EFFORT_LEVEL !== undefined
+        && options.claudeEnvVars?.CLAUDE_CODE_EFFORT_LEVEL === undefined
+        ? {
+            ...options.claudeEnvVars,
+            CLAUDE_CODE_EFFORT_LEVEL: process.env.CLAUDE_CODE_EFFORT_LEVEL,
+        }
+        : options.claudeEnvVars;
     
     const workingDirectory = process.cwd();
-    const sessionTag = randomUUID();
-
     // Log environment info at startup
     logger.debugLargeJson('[START] Orbit process started', getEnvironmentInfo());
     logger.debug(`[START] Options: startedBy=${options.startedBy}, startingMode=${options.startingMode}`);
@@ -76,6 +88,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Create session service
     const api = await ApiClient.create(credentials);
     const startupRequestTimeoutMs = configuration.startupRequestTimeoutMs;
+    const nativeReplayRequest = getRequestedNativeCliHistoryReplay();
+    const sessionTag = nativeReplayRequest
+        ? buildNativeCliResumeSessionTag(nativeReplayRequest)
+        : randomUUID();
 
     // Create a new session
     let state: AgentState = {};
@@ -111,33 +127,24 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         logger.debug('[START] Machine registration deferred/failed during startup:', error);
     });
 
-    const nativeReplayRequest = getRequestedNativeCliHistoryReplay();
-    let metadata: Metadata = {
-        path: workingDirectory,
-        host: os.hostname(),
-        version: packageJson.version,
-        os: os.platform(),
-        machineId: machineId,
-        homeDir: os.homedir(),
-        orbitHomeDir: configuration.orbitHomeDir,
-        orbitLibDir: projectPath(),
-        orbitToolsDir: resolve(projectPath(), 'tools', 'unpacked'),
-        startedFromDaemon: options.startedBy === 'daemon',
-        hostPid: process.pid,
-        startedBy: options.startedBy || 'terminal',
-        // Initialize lifecycle state
-        lifecycleState: 'running',
-        lifecycleStateSince: Date.now(),
+    const metadata = applyClaudeSessionConfigMetadata(createBaseSessionMetadata({
         flavor: 'claude',
-        sandbox: sandboxConfig?.enabled ? sandboxConfig : null,
+        machineId,
+        startedBy: options.startedBy,
+        sandbox: sandboxConfig,
         dangerouslySkipPermissions,
-        ...(nativeReplayRequest?.summary || nativeReplayRequest?.title ? {
-            summary: {
-                text: nativeReplayRequest.summary ?? nativeReplayRequest.title!,
-                updatedAt: Date.now(),
-            },
-        } : {}),
-    };
+        summaryText: nativeReplayRequest?.summary ?? nativeReplayRequest?.title ?? null,
+        nativeHistorySource: nativeReplayRequest
+            ? {
+                tool: nativeReplayRequest.tool,
+                backendId: nativeReplayRequest.backendId,
+            }
+            : null,
+    }), {
+        model: options.model,
+        permissionMode: initialPermissionMode,
+        effortLevel: baseClaudeEnvVars?.CLAUDE_CODE_EFFORT_LEVEL,
+    });
     const response = await api.getOrCreateSession({
         tag: sessionTag,
         metadata,
@@ -154,7 +161,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         const reconnection = startOfflineReconnection({
             serverUrl: configuration.serverUrl,
             onReconnected: async () => {
-                const resp = await api.getOrCreateSession({ tag: randomUUID(), metadata, state });
+                const resp = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
                 if (!resp) throw new Error('Server unavailable');
                 const session = api.sessionSyncClient(resp);
                 const scanner = await createSessionScanner({
@@ -178,7 +185,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 onSessionFound: (id) => { offlineSessionId = id; },
                 onThinkingChange: () => {},
                 abort: new AbortController().signal,
-                claudeEnvVars: options.claudeEnvVars,
+                claudeEnvVars: baseClaudeEnvVars,
                 claudeArgs: options.claudeArgs,
                 mcpServers: {},
                 allowedTools: [],
@@ -193,16 +200,20 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     logger.debug(`Session created: ${response.id}`);
 
-    // Report to the daemon in the background so local startup stays snappy even
-    // if the daemon is still booting or its control port is stale.
-    void (async () => {
+    if (shouldReportSessionStartToDaemon({
+        startedBy: options.startedBy,
+        startingMode: options.startingMode,
+    })) {
+        // Daemon-spawned remote sessions must synchronously report their session id
+        // back to the daemon; otherwise the mobile client stays stuck waiting for a
+        // webhook even though the session already exists.
         for (let attempt = 1; attempt <= 5; attempt++) {
             try {
                 logger.debug(`[START] Reporting session ${response.id} to daemon (attempt ${attempt})`);
                 const result = await notifyDaemonSessionStarted(response.id, metadata);
                 if (!result.error) {
                     logger.debug(`[START] Reported session ${response.id} to daemon`);
-                    return;
+                    break;
                 }
                 logger.debug(`[START] Failed to report to daemon (attempt ${attempt}):`, result.error);
             } catch (error) {
@@ -211,7 +222,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
             await new Promise((resolve) => setTimeout(resolve, 250));
         }
-    })();
+    }
 
     // Extract SDK metadata in background and update session when ready
     extractSDKMetadataAsync(async (sdkMetadata) => {
@@ -231,6 +242,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     // Create realtime session
     const session = api.sessionSyncClient(response);
+    const shouldImportNativeHistory = shouldReplayNativeCliHistory(response.metadata, nativeReplayRequest);
+
+    if (nativeReplayRequest && shouldImportNativeHistory) {
+        await replayNativeCliHistoryIfRequested(session, 'claude', workingDirectory);
+        session.updateMetadata((currentMetadata) => markNativeCliHistoryImported(currentMetadata, nativeReplayRequest));
+    }
 
     // Start Orbit MCP server
     const orbitServer = await startOrbitMcpServer(session);
@@ -267,12 +284,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     logger.infoDeveloper(`Logs: ${logPath}`);
 
     // Set initial agent state
-    session.updateAgentState((currentState) => ({
-        ...currentState,
-        controlledByUser: options.startingMode !== 'remote'
-    }));
-
-    await replayNativeCliHistoryIfRequested(session, 'claude', workingDirectory);
+    session.updateAgentState((currentState) => withControlledByUser(currentState, options.startingMode !== 'remote'));
 
     // Start caffeinate to prevent sleep on macOS
     const caffeinateStarted = startCaffeinate();
@@ -284,6 +296,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const messageQueue = new MessageQueue2<EnhancedMode>(mode => hashObject({
         isPlan: mode.permissionMode === 'plan',
         model: mode.model,
+        effortLevel: mode.effortLevel,
         fallbackModel: mode.fallbackModel,
         customSystemPrompt: mode.customSystemPrompt,
         appendSystemPrompt: mode.appendSystemPrompt,
@@ -295,12 +308,16 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Permission modes: Use the unified 7-mode type, mapping happens at SDK boundary in claudeRemote.ts
     let currentPermissionMode: PermissionMode | undefined = initialPermissionMode;
     let currentModel = options.model; // Track current model state
+    let currentEffortLevel: string | undefined = baseClaudeEnvVars?.CLAUDE_CODE_EFFORT_LEVEL; // Track current effort level
     let currentFallbackModel: string | undefined = undefined; // Track current fallback model
     let currentCustomSystemPrompt: string | undefined = undefined; // Track current custom system prompt
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
     session.onUserMessage((message) => {
+        const previousPermissionMode = currentPermissionMode;
+        const previousModel = currentModel;
+        const previousEffortLevel = currentEffortLevel;
 
         // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
         let messagePermissionMode: PermissionMode | undefined = currentPermissionMode;
@@ -320,6 +337,16 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] Model updated from user message: ${messageModel || 'reset to default'}`);
         } else {
             logger.debug(`[loop] User message received with no model override, using current: ${currentModel || 'default'}`);
+        }
+
+        // Resolve effort level - use message.meta.effortLevel if provided, otherwise use current
+        let messageEffortLevel = currentEffortLevel;
+        if (typeof message.meta?.effortLevel === 'string' && message.meta.effortLevel.length > 0) {
+            messageEffortLevel = message.meta.effortLevel;
+            currentEffortLevel = messageEffortLevel;
+            logger.debug(`[loop] Effort level updated from user message: ${messageEffortLevel}`);
+        } else {
+            logger.debug(`[loop] User message received with no effort level override, using current: ${currentEffortLevel || 'none'}`);
         }
 
         // Resolve custom system prompt - use message.meta.customSystemPrompt if provided, otherwise use current
@@ -380,6 +407,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             const enhancedMode: EnhancedMode = {
                 permissionMode: messagePermissionMode || 'default',
                 model: messageModel,
+                effortLevel: messageEffortLevel,
                 fallbackModel: messageFallbackModel,
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
@@ -396,6 +424,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             const enhancedMode: EnhancedMode = {
                 permissionMode: messagePermissionMode || 'default',
                 model: messageModel,
+                effortLevel: messageEffortLevel,
                 fallbackModel: messageFallbackModel,
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
@@ -411,12 +440,31 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
             model: messageModel,
+            effortLevel: messageEffortLevel,
             fallbackModel: messageFallbackModel,
             customSystemPrompt: messageCustomSystemPrompt,
             appendSystemPrompt: messageAppendSystemPrompt,
             allowedTools: messageAllowedTools,
             disallowedTools: messageDisallowedTools
         };
+        if (hasClaudeSessionConfigChange(
+            {
+                model: previousModel,
+                permissionMode: previousPermissionMode,
+                effortLevel: previousEffortLevel,
+            },
+            {
+                model: messageModel,
+                permissionMode: messagePermissionMode,
+                effortLevel: messageEffortLevel,
+            },
+        )) {
+            session.updateMetadata((currentMetadata) => applyClaudeSessionConfigMetadata(currentMetadata, {
+                model: messageModel,
+                permissionMode: messagePermissionMode,
+                effortLevel: messageEffortLevel,
+            }));
+        }
         messageQueue.push(message.content.text, enhancedMode);
         logger.debugLargeJson('User message pushed to queue:', message)
     });
@@ -491,10 +539,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         allowedTools: orbitServer.toolNames.map(toolName => `mcp__orbit__${toolName}`),
         onModeChange: (newMode) => {
             session.sendSessionEvent({ type: 'switch', mode: newMode });
-            session.updateAgentState((currentState) => ({
-                ...currentState,
-                controlledByUser: newMode === 'local'
-            }));
+            session.updateAgentState((currentState) => withControlledByUser(currentState, newMode === 'local'));
         },
         onSessionReady: (sessionInstance) => {
             // Store reference for hook server callback
@@ -507,7 +552,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             }
         },
         session,
-        claudeEnvVars: options.claudeEnvVars,
+        claudeEnvVars: baseClaudeEnvVars,
         claudeArgs: options.claudeArgs,
         sandboxConfig,
         hookSettingsPath,

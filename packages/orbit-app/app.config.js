@@ -45,7 +45,7 @@ const consoleLoggingDefault = {
     preview: true,
     production: false,
 }[variant];
-const publicAppUrl = process.env.ORBIT_PUBLIC_APP_URL || process.env.ORBIT_WEBAPP_URL || (variant === 'production' ? 'https://app.orbit.engineering' : '');
+const publicAppUrl = process.env.ORBIT_PUBLIC_APP_URL || '';
 const publicSiteUrl = process.env.ORBIT_PUBLIC_SITE_URL || (variant === 'production' ? 'https://orbit.engineering' : '');
 const defaultServerUrl =
     process.env.EXPO_PUBLIC_SERVER_URL ||
@@ -182,7 +182,7 @@ export default {
             adaptiveIcon: {
                 foregroundImage: "./sources/assets/images/icon-adaptive.png",
                 monochromeImage: "./sources/assets/images/icon-monochrome.png",
-                backgroundColor: "#18171C"
+                backgroundColor: "#0B0F14"
             },
             permissions: [
                 "android.permission.RECORD_AUDIO",
@@ -202,13 +202,9 @@ export default {
             googleServicesFile: "./google-services.json",
             intentFilters
         },
-        web: {
-            bundler: "metro",
-            output: "single",
-            favicon: "./sources/assets/images/favicon.png"
-        },
         plugins: [
             require("./plugins/withEinkCompatibility.js"),
+            require("./plugins/withIosWarningHygiene.js"),
             ...devClientPlugin,
             [
                 "expo-router",

@@ -5,6 +5,99 @@ import { db } from "@/storage/db";
 import { auth } from "@/app/auth/auth";
 import { log } from "@/utils/log";
 
+const appSchemeSchema = z.string()
+    .trim()
+    .min(1)
+    .max(64)
+    .regex(/^[a-zA-Z][a-zA-Z0-9+.-]*$/, "Invalid app scheme")
+    .transform((value) => value.toLowerCase())
+    .refine((value) => !["http", "https", "javascript", "data", "file"].includes(value), {
+        message: "Invalid app scheme",
+    });
+
+function resolveAccountLinkScheme(query: { scheme?: string; appScheme?: string }): string {
+    return query.appScheme ?? query.scheme ?? "orbit";
+}
+
+function renderAccountLinkBridgePage(deepLink: string) {
+    const escapedDeepLink = JSON.stringify(deepLink);
+
+    return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Open Orbit</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #111015;
+        color: #f5f5f7;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      }
+      .card {
+        width: min(92vw, 420px);
+        padding: 28px 24px;
+        border-radius: 24px;
+        background: #1a1920;
+        border: 1px solid rgba(255,255,255,.08);
+        box-shadow: 0 18px 48px rgba(0,0,0,.35);
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 28px;
+        line-height: 1.1;
+      }
+      p {
+        margin: 0 0 18px;
+        color: rgba(255,255,255,.72);
+        line-height: 1.5;
+      }
+      a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-height: 48px;
+        border-radius: 14px;
+        background: #f5f5f7;
+        color: #111015;
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .hint {
+        margin-top: 12px;
+        font-size: 13px;
+        color: rgba(255,255,255,.52);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Open Orbit</h1>
+      <p>Continue restoring your account in Orbit. If the app does not open automatically, tap the button below.</p>
+      <a id="open-link" href=${escapedDeepLink}>Open Orbit</a>
+      <p class="hint">This page is only used to hand the restore request over to the Orbit app.</p>
+    </main>
+    <script>
+      const deepLink = ${escapedDeepLink};
+      window.location.replace(deepLink);
+      setTimeout(() => {
+        const button = document.getElementById('open-link');
+        if (button) {
+          button.setAttribute('href', deepLink);
+        }
+      }, 400);
+    </script>
+  </body>
+</html>`;
+}
+
 export function authRoutes(app: Fastify) {
     app.post('/v1/auth', {
         schema: {
@@ -208,6 +301,29 @@ export function authRoutes(app: Fastify) {
         }
 
         return reply.send({ state: 'requested' });
+    });
+
+    app.get('/link/account', {
+        schema: {
+            querystring: z.object({
+                publicKey: z.string().min(1),
+                scheme: appSchemeSchema.optional(),
+                appScheme: appSchemeSchema.optional(),
+            }).superRefine((value, ctx) => {
+                if (value.scheme && value.appScheme && value.scheme !== value.appScheme) {
+                    ctx.addIssue({
+                        code: z.ZodIssueCode.custom,
+                        message: 'appScheme must match scheme when both are provided',
+                        path: ['appScheme'],
+                    });
+                }
+            }),
+        },
+    }, async (request, reply) => {
+        const deepLink = `${resolveAccountLinkScheme(request.query)}://account?${encodeURIComponent(request.query.publicKey)}`;
+        return reply
+            .type('text/html; charset=utf-8')
+            .send(renderAccountLinkBridgePage(deepLink));
     });
 
     // Approve account auth request

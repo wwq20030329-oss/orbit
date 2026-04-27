@@ -1,3 +1,4 @@
+import type { LiveMirrorDetach } from '@orbit/wire';
 import { z } from "zod";
 
 //
@@ -122,6 +123,18 @@ export interface Session {
         contextSize: number;
         timestamp: number;
     } | null;
+    liveRuntime?: SessionLiveRuntimeState | null;
+}
+
+export interface SessionLiveRuntimeState {
+    runtimeId: string;
+    sessionId: string;
+    machineId: string;
+    status: 'connected' | 'detached';
+    connectedAt: number;
+    lastFrameAt: number | null;
+    lastDetachAt: number | null;
+    detachReason: LiveMirrorDetach['reason'] | null;
 }
 
 export interface DecryptedMessage {

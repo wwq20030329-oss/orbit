@@ -3,7 +3,7 @@ import { authAccountApprove } from '@/auth/authAccountApprove';
 import { decodeBase64 } from '@/encryption/base64';
 import { encryptBox } from '@/encryption/libsodium';
 import { getServerUrl } from '@/sync/serverConfig';
-import { buildLegacyAccountAuthUrl, getAccountAuthPrefixes } from '@/utils/appUrlScheme';
+import { buildLegacyAccountAuthUrl, getAccountAuthPrefixes, getAppUrlScheme } from '@/utils/appUrlScheme';
 
 export const ACCOUNT_AUTH_BRIDGE_PATH = '/link/account';
 
@@ -25,6 +25,7 @@ export function buildAccountLinkUrl(publicKey: string): string {
     try {
         const bridgeUrl = new URL(ACCOUNT_AUTH_BRIDGE_PATH, getServerUrl());
         bridgeUrl.searchParams.set('publicKey', publicKey);
+        bridgeUrl.searchParams.set('scheme', getAppUrlScheme());
         return bridgeUrl.toString();
     } catch {
         return buildLegacyAccountAuthUrl(publicKey);

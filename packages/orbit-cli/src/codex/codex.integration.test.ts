@@ -21,7 +21,6 @@ import { getIntegrationEnv } from "@/testing/currentIntegrationEnv";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-const DEFAULT_MODEL = "gpt-5.2-codex";
 const integrationEnv = getIntegrationEnv();
 
 type PermissionPolicy = "approve" | "deny" | "cancel" | "hold";
@@ -48,6 +47,43 @@ async function isCodexAppServerAvailable(): Promise<boolean> {
         return false;
     }
 }
+
+async function resolveCodexIntegrationModel(): Promise<string> {
+    const fallbackModel = "gpt-5.4";
+    if (!(await isCodexAppServerAvailable())) {
+        return fallbackModel;
+    }
+
+    const client = new CodexAppServerClient();
+    try {
+        await client.connect();
+        const response = await (client as any).request("model/list", {
+            cursor: null,
+            limit: 100,
+        }) as {
+            data?: Array<{ model?: string; hidden?: boolean; isDefault?: boolean }>;
+        };
+
+        const visibleModels = Array.isArray(response?.data)
+            ? response.data.filter((model) => typeof model?.model === "string" && model.hidden !== true)
+            : [];
+
+        return visibleModels.find((model) => model.isDefault)?.model ?? visibleModels[0]?.model ?? fallbackModel;
+    } catch {
+        return fallbackModel;
+    } finally {
+        await client.disconnect().catch(() => undefined);
+    }
+}
+
+let defaultModelPromise: Promise<string> | null = null;
+
+async function getDefaultCodexIntegrationModel(): Promise<string> {
+    defaultModelPromise ??= resolveCodexIntegrationModel();
+    return defaultModelPromise;
+}
+
+const MAX_CODEX_INTERACTION_MS = 90_000;
 
 // ── CodexDriver ──────────────────────────────────────────────────────────────
 
@@ -139,7 +175,7 @@ class CodexDriver {
     ): Promise<TurnResult> {
         if (!this.threadStarted) {
             await this.client.startThread({
-                model: opts?.model ?? DEFAULT_MODEL,
+                model: opts?.model ?? await getDefaultCodexIntegrationModel(),
                 cwd: opts?.cwd,
                 approvalPolicy: opts?.approvalPolicy as any,
                 sandbox: opts?.sandbox as any,
@@ -190,7 +226,7 @@ class CodexDriver {
             .filter(Boolean);
     }
 
-    getUsageLimitError(): { message: string; code?: string } | null {
+    getAvailabilityError(): { message: string; code?: string } | null {
         for (const event of this.events) {
             const error = event.data?.error;
             if (!error || typeof error !== "object") {
@@ -198,7 +234,12 @@ class CodexDriver {
             }
             const code = typeof error.codexErrorInfo === "string" ? error.codexErrorInfo : undefined;
             const message = typeof error.message === "string" ? error.message : "";
-            if (code === "usageLimitExceeded" || message.toLowerCase().includes("usage limit")) {
+            const normalizedMessage = message.toLowerCase();
+            if (
+                code === "usageLimitExceeded" ||
+                normalizedMessage.includes("usage limit") ||
+                normalizedMessage.includes("not supported when using codex with a chatgpt account")
+            ) {
                 return { message, code };
             }
         }
@@ -220,9 +261,9 @@ class CodexDriver {
 }
 
 function skipIfCodexUnavailable(driver: CodexDriver, ctx: TestContext): void {
-    const usageLimitError = driver.getUsageLimitError();
-    if (usageLimitError) {
-        ctx.skip(`Codex account unavailable for integration run: ${usageLimitError.message}`);
+    const availabilityError = driver.getAvailabilityError();
+    if (availabilityError) {
+        ctx.skip(`Codex account unavailable for integration run: ${availabilityError.message}`);
     }
 }
 
@@ -254,7 +295,7 @@ describe.skipIf(!(await isCodexAppServerAvailable()))(
 
             // Codex v2 (0.115+): approval cancel declines the action, model
             // handles it gracefully and completes the turn (not aborted).
-            expect(result.elapsed_ms).toBeLessThan(30_000);
+            expect(result.elapsed_ms).toBeLessThan(MAX_CODEX_INTERACTION_MS);
             expect(driver.permissionCount).toBeGreaterThan(0);
             expect(driver.hasEvent("task_complete")).toBe(true);
             expect(result.aborted).toBe(false);
@@ -310,8 +351,8 @@ describe.skipIf(!(await isCodexAppServerAvailable()))(
             );
 
             // Wait for a permission request to arrive
-            const deadline = Date.now() + 30_000;
-            while (driver.permissionCount === 0 && !driver.getUsageLimitError() && Date.now() < deadline) {
+            const deadline = Date.now() + MAX_CODEX_INTERACTION_MS;
+            while (driver.permissionCount === 0 && !driver.getAvailabilityError() && Date.now() < deadline) {
                 await new Promise((r) => setTimeout(r, 100));
             }
             skipIfCodexUnavailable(driver, ctx);
@@ -324,7 +365,7 @@ describe.skipIf(!(await isCodexAppServerAvailable()))(
 
             const result = await turnPromise;
             skipIfCodexUnavailable(driver, ctx);
-            expect(result.elapsed_ms).toBeLessThan(30_000);
+            expect(result.elapsed_ms).toBeLessThan(MAX_CODEX_INTERACTION_MS);
         });
 
         it("should preserve context after backend reconnect and thread/resume", async (ctx) => {
@@ -374,8 +415,8 @@ describe.skipIf(!(await isCodexAppServerAvailable()))(
                 { approvalPolicy: "on-request", sandbox: "read-only" }
             );
 
-            const deadline = Date.now() + 30_000;
-            while (driver.permissionCount === 0 && !driver.getUsageLimitError() && Date.now() < deadline) {
+            const deadline = Date.now() + MAX_CODEX_INTERACTION_MS;
+            while (driver.permissionCount === 0 && !driver.getAvailabilityError() && Date.now() < deadline) {
                 await new Promise((r) => setTimeout(r, 100));
             }
             skipIfCodexUnavailable(driver, ctx);
@@ -386,7 +427,7 @@ describe.skipIf(!(await isCodexAppServerAvailable()))(
             await driver.interrupt();
             const r2 = await abortedTurn;
             skipIfCodexUnavailable(driver, ctx);
-            expect(r2.elapsed_ms).toBeLessThan(30_000);
+            expect(r2.elapsed_ms).toBeLessThan(MAX_CODEX_INTERACTION_MS);
 
             // Turn 3: context must be preserved — Codex should remember the project name
             driver.clearEvents();

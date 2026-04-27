@@ -124,6 +124,7 @@ export function artifactsRoutes(app: Fastify) {
     // POST /v1/artifacts - Create new artifact
     app.post('/v1/artifacts', {
         preHandler: app.authenticate,
+        bodyLimit: 25 * 1024 * 1024, // 25MB for large encrypted artifact payloads
         schema: {
             body: z.object({
                 id: z.string().uuid(),
@@ -228,6 +229,7 @@ export function artifactsRoutes(app: Fastify) {
     // POST /v1/artifacts/:id - Update artifact with version control
     app.post('/v1/artifacts/:id', {
         preHandler: app.authenticate,
+        bodyLimit: 25 * 1024 * 1024, // 25MB for large encrypted artifact payloads
         schema: {
             params: z.object({
                 id: z.string()

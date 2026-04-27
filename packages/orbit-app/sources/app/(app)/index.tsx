@@ -16,22 +16,28 @@ import { MainView } from "@/components/MainView";
 import { t } from '@/text';
 import { BrandWordmark } from '@/components/BrandLogo';
 import { Modal } from '@/modal';
+import { useIsTablet } from '@/utils/responsive';
+import { PhoneSessionHome } from '@/components/PhoneSessionHome';
 
 export default function Home() {
     const auth = useAuth();
     if (!auth.isAuthenticated) {
-        return <NotAuthenticated />;
+        return <UnauthenticatedHome />;
     }
     return (
-        <Authenticated />
+        <AuthenticatedHome />
     )
 }
 
-function Authenticated() {
-    return <MainView variant="phone" />;
-}
+export const AuthenticatedHome = React.memo(function AuthenticatedHome() {
+    const isTablet = useIsTablet();
+    if (isTablet) {
+        return <MainView variant="phone" />;
+    }
+    return <PhoneSessionHome />;
+});
 
-function NotAuthenticated() {
+const UnauthenticatedHome = React.memo(function UnauthenticatedHome() {
     useUnistyles();
     const auth = useAuth();
     const router = useRouter();
@@ -172,7 +178,7 @@ function NotAuthenticated() {
             {isLandscape ? landscapeLayout : portraitLayout}
         </>
     )
-}
+});
 
 const styles = StyleSheet.create((theme) => ({
     // NotAuthenticated styles

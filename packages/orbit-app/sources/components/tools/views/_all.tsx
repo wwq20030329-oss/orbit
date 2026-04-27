@@ -23,6 +23,7 @@ export type ToolViewProps = {
     metadata: Metadata | null;
     messages: Message[];
     sessionId?: string;
+    wrapLinesInDiffs?: boolean;
 }
 
 // Type for tool view components

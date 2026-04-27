@@ -6,7 +6,6 @@ type ShouldStartBackgroundSendWatchdogArgs = {
     appState: AppStateStatus;
     hasPendingMessages: boolean;
     hasWatchdog: boolean;
-    isWeb: boolean;
 };
 
 type DidBackgroundSendTimeoutExpireOnResumeArgs = {
@@ -41,9 +40,9 @@ export function hasPendingOutboxMessages<T>(
 export function shouldStartBackgroundSendWatchdog(
     args: ShouldStartBackgroundSendWatchdogArgs,
 ): boolean {
-    const { appState, hasPendingMessages, hasWatchdog, isWeb } = args;
+    const { appState, hasPendingMessages, hasWatchdog } = args;
 
-    return !isWeb && appState !== 'active' && hasPendingMessages && !hasWatchdog;
+    return appState !== 'active' && hasPendingMessages && !hasWatchdog;
 }
 
 export function didBackgroundSendTimeoutExpireOnResume(

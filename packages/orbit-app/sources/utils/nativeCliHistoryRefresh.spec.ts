@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Machine, NativeCliHistoryEntry } from '@/sync/storageTypes';
 
@@ -98,8 +98,16 @@ describe('nativeCliHistoryRefresh', () => {
     hoisted.state.nativeCliHistoryByMachine = {};
   });
 
-  it('keeps using cached history until invalidated', async () => {
-    hoisted.machineListNativeCliHistory.mockResolvedValueOnce(firstEntries);
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keeps using fresh cached history and refreshes stale history', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    hoisted.machineListNativeCliHistory
+      .mockResolvedValueOnce(firstEntries)
+      .mockResolvedValueOnce(secondEntries);
 
     const initial = await refreshNativeCliHistoryForMachine(machineId);
     const cached = await refreshNativeCliHistoryForMachine(machineId);
@@ -108,6 +116,13 @@ describe('nativeCliHistoryRefresh', () => {
     expect(cached[0]?.updatedAt).toBe(100);
     expect(hoisted.machineListNativeCliHistory).toHaveBeenCalledTimes(1);
     expect(hasLoadedNativeCliHistoryForMachine(machineId)).toBe(true);
+
+    vi.advanceTimersByTime(30_001);
+    const refreshed = await refreshNativeCliHistoryForMachine(machineId);
+
+    expect(refreshed[0]?.updatedAt).toBe(200);
+    expect(refreshed[0]?.isLive).toBe(true);
+    expect(hoisted.machineListNativeCliHistory).toHaveBeenCalledTimes(2);
   });
 
   it('reloads machine history after invalidation', async () => {

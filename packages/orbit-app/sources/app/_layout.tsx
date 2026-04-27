@@ -20,8 +20,6 @@ import { tracking } from '@/track/tracking';
 import { syncRestore } from '@/sync/sync';
 import { useTrackScreens } from '@/track/useTrackScreens';
 import { RealtimeProvider } from '@/realtime/RealtimeProvider';
-import { FaviconPermissionIndicator } from '@/components/web/FaviconPermissionIndicator';
-import { CommandPaletteProvider } from '@/components/CommandPalette/CommandPaletteProvider';
 import { StatusBarProvider } from '@/components/StatusBarProvider';
 // import * as SystemUI from 'expo-system-ui';
 import { initConsoleLogging, setConsoleOutputEnabled } from '@/utils/consoleLogging';
@@ -107,61 +105,17 @@ async function loadFonts() {
             return;
         }
         loaded = true;
-        // Check if running in Tauri
-        const isTauri = Platform.OS === 'web' &&
-            typeof window !== 'undefined' &&
-            (window as any).__TAURI_INTERNALS__ !== undefined;
-
-        if (!isTauri) {
-            // Normal font loading for non-Tauri environments (native and regular web)
-            await Fonts.loadAsync({
-                // Keep existing font
-                SpaceMono: require('@/assets/fonts/SpaceMono-Regular.ttf'),
-
-                // IBM Plex Sans family
-                'IBMPlexSans-Regular': require('@/assets/fonts/IBMPlexSans-Regular.ttf'),
-                'IBMPlexSans-Italic': require('@/assets/fonts/IBMPlexSans-Italic.ttf'),
-                'IBMPlexSans-SemiBold': require('@/assets/fonts/IBMPlexSans-SemiBold.ttf'),
-
-                // IBM Plex Mono family  
-                'IBMPlexMono-Regular': require('@/assets/fonts/IBMPlexMono-Regular.ttf'),
-                'IBMPlexMono-Italic': require('@/assets/fonts/IBMPlexMono-Italic.ttf'),
-                'IBMPlexMono-SemiBold': require('@/assets/fonts/IBMPlexMono-SemiBold.ttf'),
-
-                // Bricolage Grotesque  
-                'BricolageGrotesque-Bold': require('@/assets/fonts/BricolageGrotesque-Bold.ttf'),
-
-                ...FontAwesome.font,
-            });
-        } else {
-            // For Tauri, skip Font Face Observer as fonts are loaded via CSS
-            console.log('Do not wait for fonts to load');
-            (async () => {
-                try {
-                    await Fonts.loadAsync({
-                        // Keep existing font
-                        SpaceMono: require('@/assets/fonts/SpaceMono-Regular.ttf'),
-
-                        // IBM Plex Sans family
-                        'IBMPlexSans-Regular': require('@/assets/fonts/IBMPlexSans-Regular.ttf'),
-                        'IBMPlexSans-Italic': require('@/assets/fonts/IBMPlexSans-Italic.ttf'),
-                        'IBMPlexSans-SemiBold': require('@/assets/fonts/IBMPlexSans-SemiBold.ttf'),
-
-                        // IBM Plex Mono family  
-                        'IBMPlexMono-Regular': require('@/assets/fonts/IBMPlexMono-Regular.ttf'),
-                        'IBMPlexMono-Italic': require('@/assets/fonts/IBMPlexMono-Italic.ttf'),
-                        'IBMPlexMono-SemiBold': require('@/assets/fonts/IBMPlexMono-SemiBold.ttf'),
-
-                        // Bricolage Grotesque  
-                        'BricolageGrotesque-Bold': require('@/assets/fonts/BricolageGrotesque-Bold.ttf'),
-
-                        ...FontAwesome.font,
-                    });
-                } catch (e) {
-                    // Ignore
-                }
-            })();
-        }
+        await Fonts.loadAsync({
+            SpaceMono: require('@/assets/fonts/SpaceMono-Regular.ttf'),
+            'IBMPlexSans-Regular': require('@/assets/fonts/IBMPlexSans-Regular.ttf'),
+            'IBMPlexSans-Italic': require('@/assets/fonts/IBMPlexSans-Italic.ttf'),
+            'IBMPlexSans-SemiBold': require('@/assets/fonts/IBMPlexSans-SemiBold.ttf'),
+            'IBMPlexMono-Regular': require('@/assets/fonts/IBMPlexMono-Regular.ttf'),
+            'IBMPlexMono-Italic': require('@/assets/fonts/IBMPlexMono-Italic.ttf'),
+            'IBMPlexMono-SemiBold': require('@/assets/fonts/IBMPlexMono-SemiBold.ttf'),
+            'BricolageGrotesque-Bold': require('@/assets/fonts/BricolageGrotesque-Bold.ttf'),
+            ...FontAwesome.font,
+        });
     });
 }
 
@@ -172,21 +126,6 @@ function getDevEnvironmentCredentials(): AuthCredentials | null {
 
     const token = process.env.EXPO_PUBLIC_DEV_TOKEN;
     const secret = process.env.EXPO_PUBLIC_DEV_SECRET;
-    if (!token || !secret) {
-        return null;
-    }
-
-    return { token, secret };
-}
-
-function getDevWebQueryCredentials(): AuthCredentials | null {
-    if (!__DEV__ || Platform.OS !== 'web' || typeof window === 'undefined') {
-        return null;
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('dev_token');
-    const secret = params.get('dev_secret');
     if (!token || !secret) {
         return null;
     }
@@ -274,11 +213,13 @@ export default function RootLayout() {
         (async () => {
             let credentials: AuthCredentials | null = null;
             try {
-                await loadFonts();
-                await sodium.ready;
+                await Promise.all([
+                    loadFonts(),
+                    sodium.ready,
+                ]);
 
                 credentials = await TokenStorage.getCredentials();
-                const devCredentials = getDevWebQueryCredentials() ?? getDevEnvironmentCredentials();
+                const devCredentials = getDevEnvironmentCredentials();
 
                 if (devCredentials) {
                     const credentialsChanged = credentials?.token !== devCredentials.token
@@ -291,23 +232,17 @@ export default function RootLayout() {
                         }
                     }
 
-                    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-                        window.history.replaceState({}, '', window.location.pathname);
-                    }
-                }
-
-                console.log('credentials', credentials);
-                if (credentials) {
-                    try {
-                        await syncRestore(credentials);
-                    } catch (error) {
-                        // Restoring cached sync state should not block the app from opening.
-                        console.error('Sync restore failed during startup:', error);
-                    }
                 }
 
                 if (isMounted) {
                     setInitState({ credentials });
+                }
+
+                if (credentials) {
+                    void syncRestore(credentials).catch((error) => {
+                        // Restoring cached sync state should not block the app from opening.
+                        console.error('Sync restore failed during startup:', error);
+                    });
                 }
             } catch (error) {
                 console.error('Error initializing:', error);
@@ -324,9 +259,7 @@ export default function RootLayout() {
 
     React.useEffect(() => {
         if (initState) {
-            setTimeout(() => {
-                SplashScreen.hideAsync();
-            }, 100);
+            void SplashScreen.hideAsync();
         }
     }, [initState]);
 
@@ -442,13 +375,11 @@ export default function RootLayout() {
                             <StatusBarProvider />
                             <ModalProvider>
                                 <AccountLinkHandler />
-                                <CommandPaletteProvider>
-                                    <RealtimeProvider>
-                                        <HorizontalSafeAreaWrapper>
-                                            <SidebarNavigator />
-                                        </HorizontalSafeAreaWrapper>
-                                    </RealtimeProvider>
-                                </CommandPaletteProvider>
+                                <RealtimeProvider>
+                                    <HorizontalSafeAreaWrapper>
+                                        <SidebarNavigator />
+                                    </HorizontalSafeAreaWrapper>
+                                </RealtimeProvider>
                             </ModalProvider>
                         </ThemeProvider>
                     </AuthProvider>
@@ -464,10 +395,5 @@ export default function RootLayout() {
         );
     }
 
-    return (
-        <>
-            <FaviconPermissionIndicator />
-            {providers}
-        </>
-    );
+    return providers;
 }

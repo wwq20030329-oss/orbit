@@ -78,10 +78,26 @@ export class ApiClient {
 
       logger.debug(`Session created/loaded: ${response.data.session.id} (tag: ${opts.tag})`)
       let raw = response.data.session;
+      const decryptedMetadata = decrypt(encryptionKey, encryptionVariant, decodeBase64(raw.metadata));
+      const normalizedMetadata = (
+        decryptedMetadata
+        && typeof decryptedMetadata === 'object'
+        && typeof (decryptedMetadata as Metadata).path === 'string'
+      )
+        ? decryptedMetadata as Metadata
+        : opts.metadata;
+
+      if (normalizedMetadata !== decryptedMetadata) {
+        logger.debug('[API] Loaded session metadata was missing or invalid, falling back to startup metadata', {
+          sessionId: raw.id,
+          tag: opts.tag,
+        });
+      }
+
       let session: Session = {
         id: raw.id,
         seq: raw.seq,
-        metadata: decrypt(encryptionKey, encryptionVariant, decodeBase64(raw.metadata)),
+        metadata: normalizedMetadata,
         metadataVersion: raw.metadataVersion,
         agentState: raw.agentState ? decrypt(encryptionKey, encryptionVariant, decodeBase64(raw.agentState)) : null,
         agentStateVersion: raw.agentStateVersion,
@@ -305,7 +321,7 @@ export class ApiClient {
    * Register a vendor API token with the server
    * The token is sent as a JSON string - server handles encryption
    */
-  async registerVendorToken(vendor: 'openai' | 'anthropic' | 'gemini', apiKey: any): Promise<void> {
+  async registerVendorToken(vendor: 'openai' | 'gemini', apiKey: any): Promise<void> {
     try {
       const response = await axios.post(
         `${configuration.serverUrl}/v1/connect/${vendor}/register`,
@@ -336,7 +352,7 @@ export class ApiClient {
    * Get vendor API token from the server
    * Returns the token if it exists, null otherwise
    */
-  async getVendorToken(vendor: 'openai' | 'anthropic' | 'gemini'): Promise<any | null> {
+  async getVendorToken(vendor: 'openai' | 'gemini'): Promise<any | null> {
     try {
       const response = await axios.get(
         `${configuration.serverUrl}/v1/connect/${vendor}/token`,

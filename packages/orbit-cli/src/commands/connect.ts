@@ -4,9 +4,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { readCredentials } from '@/persistence';
 import { ApiClient } from '@/api/api';
-import { configuration } from '@/configuration';
 import { authenticateCodex } from './connect/authenticateCodex';
-import { authenticateClaude } from './connect/authenticateClaude';
 import { authenticateGemini } from './connect/authenticateGemini';
 import { decodeJwtPayload } from './connect/utils';
 
@@ -15,7 +13,6 @@ import { decodeJwtPayload } from './connect/utils';
  * 
  * Implements connect subcommands for storing AI vendor API keys:
  * - connect codex: Store OpenAI API key in Orbit cloud
- * - connect claude: Store Anthropic API key in Orbit cloud
  * - connect gemini: Store Gemini API key in Orbit cloud
  * - connect help: Show help for connect command
  */
@@ -30,9 +27,6 @@ export async function handleConnectCommand(args: string[]): Promise<void> {
     switch (subcommand.toLowerCase()) {
         case 'codex':
             await handleConnectVendor('codex', 'OpenAI');
-            break;
-        case 'claude':
-            await handleConnectVendor('claude', 'Anthropic');
             break;
         case 'gemini':
             await handleConnectVendor('gemini', 'Gemini');
@@ -53,7 +47,6 @@ ${chalk.bold('orbit connect')} - Connect AI vendor API keys to Orbit cloud
 
 ${chalk.bold('Usage:')}
   orbit connect codex        Store your Codex API key in Orbit cloud
-  orbit connect claude       Store your Anthropic API key in Orbit cloud
   orbit connect gemini       Store your Gemini API key in Orbit cloud
   orbit connect status       Show connection status for all vendors
   orbit connect help         Show this help message
@@ -65,18 +58,17 @@ ${chalk.bold('Description:')}
 
 ${chalk.bold('Examples:')}
   orbit connect codex
-  orbit connect claude
   orbit connect gemini
   orbit connect status
 
 ${chalk.bold('Notes:')}
   • You must be authenticated with Orbit first (run 'orbit auth login')
   • API keys are encrypted and stored securely in Orbit cloud
-  • You can manage your stored keys in the Orbit web app: ${configuration.webappUrl}
+  • You can manage your stored keys from the Orbit mobile app.
 `);
 }
 
-async function handleConnectVendor(vendor: 'codex' | 'claude' | 'gemini', displayName: string): Promise<void> {
+async function handleConnectVendor(vendor: 'codex' | 'gemini', displayName: string): Promise<void> {
     console.log(chalk.bold(`\n🔌 Connecting ${displayName} to Orbit cloud\n`));
 
     // Check if authenticated
@@ -96,12 +88,6 @@ async function handleConnectVendor(vendor: 'codex' | 'claude' | 'gemini', displa
         const codexAuthTokens = await authenticateCodex();
         await api.registerVendorToken('openai', { oauth: codexAuthTokens });
         console.log('✅ Codex token registered with server');
-        process.exit(0);
-    } else if (vendor === 'claude') {
-        console.log('🚀 Registering Anthropic token with server');
-        const anthropicAuthTokens = await authenticateClaude();
-        await api.registerVendorToken('anthropic', { oauth: anthropicAuthTokens });
-        console.log('✅ Anthropic token registered with server');
         process.exit(0);
     } else if (vendor === 'gemini') {
         console.log('🚀 Registering Gemini token with server');
@@ -136,10 +122,9 @@ async function handleConnectStatus(): Promise<void> {
     const api = await ApiClient.create(credentials);
 
     // Check each vendor
-    const vendors: Array<{ key: 'openai' | 'anthropic' | 'gemini'; name: string; display: string }> = [
+    const vendors: Array<{ key: 'openai' | 'gemini'; name: string; display: string }> = [
         { key: 'gemini', name: 'Gemini', display: 'Google Gemini' },
         { key: 'openai', name: 'Codex', display: 'OpenAI Codex' },
-        { key: 'anthropic', name: 'Claude', display: 'Anthropic Claude' },
     ];
 
     for (const vendor of vendors) {

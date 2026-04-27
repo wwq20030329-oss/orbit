@@ -16,7 +16,12 @@ export function useDraft(
     const { autoSaveInterval = 2000 } = options;
     const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastSavedValue = useRef<string>('');
+    const latestValueRef = useRef<string>(value);
     const isFocused = useIsFocused();
+
+    useEffect(() => {
+        latestValueRef.current = value;
+    }, [value]);
 
     // Save draft to storage
     const saveDraft = useCallback((draft: string) => {
@@ -97,16 +102,22 @@ export function useDraft(
     // Save on unmount
     useEffect(() => {
         return () => {
-            if (sessionId && value !== lastSavedValue.current) {
-                saveDraft(value);
+            if (!sessionId) {
+                return;
+            }
+
+            const latestValue = latestValueRef.current;
+            if (latestValue !== lastSavedValue.current) {
+                saveDraft(latestValue);
             }
         };
-    }, [sessionId, value, saveDraft]);
+    }, [sessionId, saveDraft]);
 
     // Clear draft (used after message is sent)
     const clearDraft = useCallback(() => {
         if (!sessionId) return;
         
+        latestValueRef.current = '';
         storage.getState().updateSessionDraft(sessionId, null);
         lastSavedValue.current = '';
     }, [sessionId]);

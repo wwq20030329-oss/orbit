@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AppState, AppStateStatus, Platform } from 'react-native';
+import { AppState, AppStateStatus } from 'react-native';
 import { trackOtaUpdateAvailable, trackOtaUpdateApplied } from '@/track';
 import {
     checkForExpoUpdateAsync,
@@ -73,14 +73,10 @@ export function useUpdates() {
 
     const reloadApp = async () => {
         trackOtaUpdateApplied(pendingUpdate ?? undefined);
-        if (Platform.OS === 'web') {
-            window.location.reload();
-        } else {
-            try {
-                await reloadFromExpoUpdatesAsync();
-            } catch (error) {
-                console.error('Error reloading app:', error);
-            }
+        try {
+            await reloadFromExpoUpdatesAsync();
+        } catch (error) {
+            console.error('Error reloading app:', error);
         }
     };
 

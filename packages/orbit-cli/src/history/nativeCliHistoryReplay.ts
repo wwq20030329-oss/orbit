@@ -1,4 +1,5 @@
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -6,10 +7,12 @@ import { join } from 'node:path';
 
 import type { SessionEnvelope } from '@orbit/wire';
 
+import type { Metadata } from '@/api/types';
 import type { RawJSONLines } from '@/claude/types';
 import { RawJSONLinesSchema } from '@/claude/types';
 import { getProjectPath } from '@/claude/utils/path';
 import type { ApiSessionClient } from '@/api/apiSession';
+import { applyNativeHistorySourceMetadata } from '@/utils/createSessionMetadata';
 
 import type { NativeCliTool } from './nativeCliHistory';
 
@@ -23,7 +26,7 @@ const MAX_IMPORTED_HISTORY_MESSAGES = 200;
 
 type ReplayableSession = Pick<ApiSessionClient, 'sendClaudeSessionMessage' | 'sendSessionProtocolMessage' | 'flush'>;
 
-type ReplayTextMessage = {
+export type ReplayTextMessage = {
   role: 'user' | 'agent';
   text: string;
   timestamp: number;
@@ -34,7 +37,56 @@ type NativeReplayRequest = {
   backendId: string;
   title: string | null;
   summary: string | null;
+  updatedAt: number | null;
 };
+
+export function buildNativeCliResumeSessionTag(request: Pick<NativeReplayRequest, 'tool' | 'backendId'>): string {
+  // Native CLI history restore is linked through metadata/native identifiers, not
+  // through the Orbit session tag itself. Reusing a fixed tag after a daemon or
+  // CLI restart can reattach a fresh wrapper process to an older encrypted Orbit
+  // session that this process cannot decrypt.
+  return `native-history-import:${request.tool}:${request.backendId}:${randomUUID()}`;
+}
+
+export function shouldReplayNativeCliHistory(
+  metadata: Metadata | null | undefined,
+  request: NativeReplayRequest | null,
+): boolean {
+  if (!request) {
+    return false;
+  }
+
+  if (
+    metadata?.nativeHistorySourceTool !== request.tool
+    || metadata?.nativeHistorySourceBackendId !== request.backendId
+  ) {
+    return true;
+  }
+
+  if (typeof metadata?.nativeHistoryImportedAt !== 'number') {
+    return true;
+  }
+
+  if (typeof request.updatedAt === 'number') {
+    return metadata.nativeHistoryImportedAt < request.updatedAt;
+  }
+
+  return false;
+}
+
+export function markNativeCliHistoryImported(
+  metadata: Metadata,
+  request: NativeReplayRequest,
+  importedAt: number = Date.now(),
+): Metadata {
+  return {
+    ...applyNativeHistorySourceMetadata(metadata, {
+      tool: request.tool,
+      backendId: request.backendId,
+    }),
+    nativeHistoryImportedAt: importedAt,
+  };
+}
 
 export function getRequestedNativeCliHistoryReplay(): NativeReplayRequest | null {
   if (process.env.ORBIT_IMPORT_NATIVE_HISTORY !== '1') {
@@ -49,8 +101,18 @@ export function getRequestedNativeCliHistoryReplay(): NativeReplayRequest | null
 
   const title = process.env.ORBIT_NATIVE_HISTORY_TITLE?.trim() || null;
   const summary = process.env.ORBIT_NATIVE_HISTORY_SUMMARY?.trim() || null;
+  const updatedAtRaw = process.env.ORBIT_NATIVE_HISTORY_UPDATED_AT;
+  const updatedAt = typeof updatedAtRaw === 'string' && updatedAtRaw.trim().length > 0
+    ? Number(updatedAtRaw)
+    : null;
 
-  return { tool, backendId, title, summary };
+  return {
+    tool,
+    backendId,
+    title,
+    summary,
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : null,
+  };
 }
 
 export async function replayNativeCliHistoryIfRequested(
@@ -124,13 +186,38 @@ export async function loadClaudeReplayMessages(workingDirectory: string, backend
   return parsedMessages.slice(-MAX_IMPORTED_HISTORY_MESSAGES);
 }
 
+export function extractClaudeReplayMessages(messages: RawJSONLines[]): ReplayTextMessage[] {
+  const replayMessages: ReplayTextMessage[] = [];
+
+  for (const message of messages) {
+    const timestamp = parseTimestamp((message as { timestamp?: unknown }).timestamp, replayMessages.length);
+
+    if (message.type === 'user') {
+      const text = cleanReplayText(normalizeClaudeContent(message.message?.content));
+      if (text) {
+        replayMessages.push({ role: 'user', text, timestamp });
+      }
+      continue;
+    }
+
+    if (message.type === 'assistant') {
+      const text = cleanReplayText(normalizeClaudeContent(message.message?.content));
+      if (text) {
+        replayMessages.push({ role: 'agent', text, timestamp });
+      }
+    }
+  }
+
+  return replayMessages.sort((left, right) => left.timestamp - right.timestamp);
+}
+
 export async function loadCodexReplayMessages(backendId: string): Promise<ReplayTextMessage[]> {
-  const archivePath = findCodexArchivePath(backendId);
-  if (!archivePath) {
+  const sessionPath = findCodexSessionPath(backendId);
+  if (!sessionPath) {
     return [];
   }
 
-  return extractCodexReplayMessages(await readFile(archivePath, 'utf8'))
+  return extractCodexReplayMessages(await readFile(sessionPath, 'utf8'))
     .slice(-MAX_IMPORTED_HISTORY_MESSAGES);
 }
 
@@ -248,16 +335,39 @@ function isNativeCliTool(value: unknown): value is NativeCliTool {
   return value === 'claude' || value === 'codex' || value === 'gemini';
 }
 
-function findCodexArchivePath(backendId: string): string | null {
+function findCodexSessionPath(backendId: string): string | null {
+  const sessionsDir = join(os.homedir(), '.codex', 'sessions');
+  const liveSessionPath = findJsonlFileContainingId(sessionsDir, backendId);
+  if (liveSessionPath) {
+    return liveSessionPath;
+  }
+
   const archiveDir = join(os.homedir(), '.codex', 'archived_sessions');
-  if (!existsSync(archiveDir)) {
+  return findJsonlFileContainingId(archiveDir, backendId);
+}
+
+function findJsonlFileContainingId(rootDir: string, backendId: string): string | null {
+  if (!existsSync(rootDir)) {
     return null;
   }
 
-  const match = readdirSync(archiveDir)
-    .find((entry) => entry.endsWith('.jsonl') && entry.includes(backendId));
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const currentDirectory = stack.pop()!;
+    for (const entry of readdirSync(currentDirectory, { withFileTypes: true })) {
+      const fullPath = join(currentDirectory, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
 
-  return match ? join(archiveDir, match) : null;
+      if (entry.isFile() && entry.name.endsWith('.jsonl') && entry.name.includes(backendId)) {
+        return fullPath;
+      }
+    }
+  }
+
+  return null;
 }
 
 function findGeminiHistoryPath(backendId: string): string | null {
@@ -314,6 +424,68 @@ function flattenTextParts(parts: unknown[]): string {
 
       return '';
     })
+    .join('\n')
+    .trim();
+}
+
+function normalizeClaudeContent(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .map((part) => {
+      if (typeof part === 'string') {
+        return part;
+      }
+
+      if (!part || typeof part !== 'object') {
+        return '';
+      }
+
+      const typedPart = part as {
+        text?: unknown;
+        content?: unknown;
+        input?: unknown;
+        name?: unknown;
+        type?: unknown;
+      };
+
+      if (typeof typedPart.text === 'string') {
+        return typedPart.text;
+      }
+
+      if (typeof typedPart.content === 'string') {
+        return typedPart.content;
+      }
+
+      if (Array.isArray(typedPart.content)) {
+        return flattenTextParts(typedPart.content);
+      }
+
+      if (typedPart.type === 'tool_use' && typeof typedPart.name === 'string') {
+        return `[tool:${typedPart.name}]`;
+      }
+
+      if (typedPart.type === 'tool_result' && typeof typedPart.content === 'string') {
+        return typedPart.content;
+      }
+
+      if (typedPart.input && typeof typedPart.input === 'object') {
+        try {
+          return JSON.stringify(typedPart.input);
+        } catch {
+          return '';
+        }
+      }
+
+      return '';
+    })
+    .filter((part) => part.length > 0)
     .join('\n')
     .trim();
 }

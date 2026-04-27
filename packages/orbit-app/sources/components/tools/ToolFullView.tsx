@@ -6,9 +6,10 @@ import { CodeView } from '../CodeView';
 import { Metadata } from '@/sync/storageTypes';
 import { getToolFullViewComponent } from './views/_all';
 import { layout } from '../layout';
-import { useLocalSetting } from '@/sync/storage';
+import { storage } from '@/sync/storage';
 import { StyleSheet } from 'react-native-unistyles';
 import { t } from '@/text';
+import { useShallow } from 'zustand/react/shallow';
 
 interface ToolFullViewProps {
     tool: ToolCall;
@@ -20,15 +21,23 @@ export function ToolFullView({ tool, metadata, messages = [] }: ToolFullViewProp
     // Check if there's a specialized content view for this tool
     const SpecializedFullView = getToolFullViewComponent(tool.name);
     const screenWidth = useWindowDimensions().width;
-    const devModeEnabled = (useLocalSetting('devModeEnabled') || __DEV__);
-    console.log('ToolFullView', devModeEnabled);
+    const toolViewSettings = storage(useShallow((state) => ({
+        devModeEnabled: __DEV__ || state.localSettings.devModeEnabled,
+        wrapLinesInDiffs: state.settings.wrapLinesInDiffs,
+    })));
+    const { devModeEnabled, wrapLinesInDiffs } = toolViewSettings;
 
     return (
         <ScrollView style={[styles.container, { paddingHorizontal: screenWidth > 700 ? 16 : 0 }]}>
             <View style={styles.contentWrapper}>
                 {/* Tool-specific content or generic fallback */}
                 {SpecializedFullView ? (
-                    <SpecializedFullView tool={tool} metadata={metadata || null} messages={messages} />
+                    <SpecializedFullView
+                        tool={tool}
+                        metadata={metadata || null}
+                        messages={messages}
+                        wrapLinesInDiffs={wrapLinesInDiffs}
+                    />
                 ) : (
                     <>
                     {/* Generic fallback for tools without specialized views */}

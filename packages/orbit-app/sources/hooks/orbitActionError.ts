@@ -7,7 +7,7 @@ function normalizeKnownOrbitActionErrorMessage(message: string): string {
         || normalizedMessage.includes('rpc method not available')
         || normalizedMessage.includes('method not available')
     ) {
-        return 'Native CLI resume is unavailable on this machine. Restart Orbit CLI on the computer and try again.';
+        return 'This Orbit CLI version does not support native resume yet. Update or restart Orbit CLI on the computer and try again.';
     }
 
     return message;

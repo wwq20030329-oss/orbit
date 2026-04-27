@@ -24,23 +24,7 @@ class ModalManagerClass implements IModal {
     }
 
     alert(title: string, message?: string, buttons?: AlertButton[]): void {
-        if (Platform.OS === 'web') {
-            // Show custom web modal
-            if (!this.showModalFn) {
-                console.error('ModalManager not initialized. Make sure ModalProvider is mounted.');
-                return;
-            }
-
-            this.showModalFn({
-                type: 'alert',
-                title,
-                message,
-                buttons: buttons || [{ text: t('common.ok') }]
-            } as Omit<ModalConfig, 'id'>);
-        } else {
-            // Use native alert
-            Alert.alert(title, message, buttons);
-        }
+        Alert.alert(title, message, buttons);
     }
 
     async confirm(
@@ -52,47 +36,25 @@ class ModalManagerClass implements IModal {
             destructive?: boolean;
         }
     ): Promise<boolean> {
-        if (Platform.OS === 'web') {
-            // Show custom web modal
-            if (!this.showModalFn) {
-                console.error('ModalManager not initialized. Make sure ModalProvider is mounted.');
-                return false;
-            }
-
-            const modalId = this.showModalFn({
-                type: 'confirm',
+        return new Promise<boolean>((resolve) => {
+            Alert.alert(
                 title,
                 message,
-                cancelText: options?.cancelText,
-                confirmText: options?.confirmText,
-                destructive: options?.destructive
-            } as Omit<ModalConfig, 'id'>);
-
-            return new Promise<boolean>((resolve) => {
-                this.confirmResolvers.set(modalId, resolve);
-            });
-        } else {
-            // Use native alert
-            return new Promise<boolean>((resolve) => {
-                Alert.alert(
-                    title,
-                    message,
-                    [
-                        {
-                            text: options?.cancelText || t('common.cancel'),
-                            style: 'cancel',
-                            onPress: () => resolve(false)
-                        },
-                        {
-                            text: options?.confirmText || t('common.ok'),
-                            style: options?.destructive ? 'destructive' : 'default',
-                            onPress: () => resolve(true)
-                        }
-                    ],
-                    { cancelable: false }
-                );
-            });
-        }
+                [
+                    {
+                        text: options?.cancelText || t('common.cancel'),
+                        style: 'cancel',
+                        onPress: () => resolve(false)
+                    },
+                    {
+                        text: options?.confirmText || t('common.ok'),
+                        style: options?.destructive ? 'destructive' : 'default',
+                        onPress: () => resolve(true)
+                    }
+                ],
+                { cancelable: false }
+            );
+        });
     }
 
     show(config: Omit<CustomModalConfig, 'id' | 'type'>): string {
@@ -152,8 +114,11 @@ class ModalManagerClass implements IModal {
             inputType?: 'default' | 'secure-text' | 'email-address' | 'numeric' | 'url';
         }
     ): Promise<string | null> {
-        if (Platform.OS === 'ios' && !options?.inputType) {
-            // Use native Alert.prompt on iOS (only supports basic text input)
+        if (Platform.OS === 'ios') {
+            const promptType = options?.inputType === 'secure-text' ? 'secure-text' : 'plain-text';
+            const keyboardType = options?.inputType === 'secure-text'
+                ? 'default'
+                : (options?.inputType || 'default');
             return new Promise<string | null>((resolve) => {
                 // @ts-ignore - Alert.prompt is iOS only
                 Alert.prompt(
@@ -170,13 +135,13 @@ class ModalManagerClass implements IModal {
                             onPress: (text?: string) => resolve(text || null)
                         }
                     ],
-                    'plain-text',
+                    promptType,
                     options?.defaultValue,
-                    'default'
+                    keyboardType
                 );
             });
         } else {
-            // Use custom modal for web and Android
+            // Android does not provide Alert.prompt, so keep the custom native modal.
             if (!this.showModalFn) {
                 console.error('ModalManager not initialized. Make sure ModalProvider is mounted.');
                 return null;

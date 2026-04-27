@@ -11,7 +11,6 @@ import {
 } from '@/track';
 import { sync } from '@/sync/sync';
 import { storage as syncStorage } from '@/sync/storage';
-import { Platform } from 'react-native';
 
 const localStorage = new MMKV();
 
@@ -26,10 +25,6 @@ const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const lock = new AsyncLock();
 
 export function requestReview() {
-    if (Platform.OS === 'web') {
-        return;
-    }
-
     lock.inLock(async () => {
         try {
 

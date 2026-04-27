@@ -66,6 +66,7 @@ export function getSessionStatus(
     options: SessionStatusOptions = {},
 ): SessionStatus {
     const isOnline = !isSessionInteractionBlocked(session, options) && isSessionLikelyOnline(session);
+    const lastSeenAt = Math.max(session.activeAt, session.liveRuntime?.lastDetachAt ?? 0);
     const hasPermissions = Boolean(
         session.agentState?.requests && Object.keys(session.agentState.requests).length > 0,
     );
@@ -74,7 +75,7 @@ export function getSessionStatus(
         return {
             state: 'disconnected',
             isConnected: false,
-            statusText: t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }),
+            statusText: t('status.lastSeen', { time: formatLastSeen(lastSeenAt, false) }),
             shouldShowStatus: true,
             statusColor: '#999',
             statusDotColor: '#999',

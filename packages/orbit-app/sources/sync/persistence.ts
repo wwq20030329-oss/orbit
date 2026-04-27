@@ -364,6 +364,20 @@ export function resetVoiceLocalCounters() {
     mmkv.delete(VOICE_MESSAGE_COUNT_KEY);
 }
 
+const SESSION_MESSAGES_CACHE_PREFIX = 'session-messages-v1:';
+
+export function loadSessionMessagesCache(sessionId: string): string | null {
+    return mmkv.getString(`${SESSION_MESSAGES_CACHE_PREFIX}${sessionId}`) ?? null;
+}
+
+export function saveSessionMessagesCache(sessionId: string, messagesJson: string) {
+    mmkv.set(`${SESSION_MESSAGES_CACHE_PREFIX}${sessionId}`, messagesJson);
+}
+
+export function clearSessionMessagesCache(sessionId: string) {
+    mmkv.delete(`${SESSION_MESSAGES_CACHE_PREFIX}${sessionId}`);
+}
+
 export function clearPersistence() {
     mmkv.clearAll();
 }

@@ -48,11 +48,12 @@ type PendingRequest = {
 type LegacyPatchChanges = Record<string, Record<string, unknown>>;
 
 export type ApprovalHandler = (params: {
-    type: 'exec' | 'patch' | 'mcp';
+    type: 'exec' | 'patch' | 'mcp' | 'permissions';
     callId: string;
     command?: string[];
     cwd?: string;
     fileChanges?: Record<string, unknown>;
+    permissions?: unknown;
     reason?: string | null;
     toolName?: string;
     input?: unknown;
@@ -142,6 +143,7 @@ export class CodexAppServerClient {
     private notificationProtocol: 'unknown' | 'legacy' | 'raw' = 'unknown';
     private completedTurnIds = new Set<string>();
     private rawFileChangesByItemId = new Map<string, LegacyPatchChanges>();
+    private rawAgentMessagesByItemId = new Map<string, string>();
 
     // Handlers set by the consumer (runCodex.ts)
     private eventHandler: ((msg: EventMsg) => void) | null = null;
@@ -208,12 +210,13 @@ export class CodexAppServerClient {
     ): void {
         const aborted = status === 'cancelled' || status === 'canceled' || status === 'aborted' || status === 'interrupted';
 
-        this.tryResolvePendingTurn(aborted, turnId, source);
-        this._turnId = null;
-
         if (turnId && this.completedTurnIds.has(turnId)) {
             return;
         }
+
+        this.tryResolvePendingTurn(aborted, turnId, source);
+        this._turnId = null;
+
         if (turnId) {
             this.completedTurnIds.add(turnId);
         }
@@ -285,6 +288,18 @@ export class CodexAppServerClient {
 
         const item = params?.item;
         if (!item || typeof item !== 'object') {
+            if (method === 'item/agentMessage/delta') {
+                const itemId = typeof params?.itemId === 'string' ? params.itemId : null;
+                const delta = typeof params?.delta === 'string' ? params.delta : '';
+                if (!itemId || delta.length === 0) {
+                    return true;
+                }
+
+                const nextMessage = `${this.rawAgentMessagesByItemId.get(itemId) ?? ''}${delta}`;
+                this.rawAgentMessagesByItemId.set(itemId, nextMessage);
+                return true;
+            }
+
             return method.startsWith('item/');
         }
 
@@ -351,12 +366,18 @@ export class CodexAppServerClient {
         }
 
         if (method === 'item/completed' && item.type === 'agentMessage') {
-            const text = typeof item.text === 'string' ? item.text : '';
+            const itemId = typeof item.id === 'string' ? item.id : null;
+            const completedText = typeof item.text === 'string' ? item.text : '';
+            const bufferedText = itemId ? this.rawAgentMessagesByItemId.get(itemId) ?? '' : '';
+            const text = completedText || bufferedText;
+            if (itemId) {
+                this.rawAgentMessagesByItemId.delete(itemId);
+            }
             if (text.length > 0) {
                 this.eventHandler?.({
                     type: 'agent_message',
                     message: text,
-                    item_id: item.id,
+                    item_id: itemId,
                     phase: item.phase,
                 });
             }
@@ -519,6 +540,7 @@ export class CodexAppServerClient {
         this._turnId = null;
         this.notificationProtocol = 'unknown';
         this.completedTurnIds.clear();
+        this.rawAgentMessagesByItemId.clear();
         if (!opts?.preserveThreadState) {
             this._threadId = null;
             this.threadDefaults = null;
@@ -1074,6 +1096,34 @@ export class CodexAppServerClient {
         };
     }
 
+    private mapDecisionToPermissionsResponse(
+        decision: ReviewDecision,
+        permissions: unknown,
+    ): { permissions: Record<string, unknown>; scope: 'turn' | 'session' } {
+        if (decision === 'approved' || decision === 'approved_for_session') {
+            const grantedPermissions: Record<string, unknown> = {};
+            if (permissions && typeof permissions === 'object' && !Array.isArray(permissions)) {
+                const requestedPermissions = permissions as Record<string, unknown>;
+                if (requestedPermissions.network !== undefined && requestedPermissions.network !== null) {
+                    grantedPermissions.network = requestedPermissions.network;
+                }
+                if (requestedPermissions.fileSystem !== undefined && requestedPermissions.fileSystem !== null) {
+                    grantedPermissions.fileSystem = requestedPermissions.fileSystem;
+                }
+            }
+
+            return {
+                permissions: grantedPermissions,
+                scope: decision === 'approved_for_session' ? 'session' : 'turn',
+            };
+        }
+
+        return {
+            permissions: {},
+            scope: 'turn',
+        };
+    }
+
     private async handleServerRequest(id: number, method: string, params: any): Promise<void> {
         if (method === 'mcpServer/elicitation/request') {
             const toolName = this.parseToolNameFromElicitationMessage(params?.message) ?? params?.serverName ?? 'McpTool';
@@ -1086,6 +1136,17 @@ export class CodexAppServerClient {
                 message: params?.message,
             });
             this.respond(id, this.mapDecisionToMcpElicitationResponse(decision, params));
+            return;
+        }
+
+        if (method === 'item/permissions/requestApproval') {
+            const decision = await this.handleApproval({
+                type: 'permissions',
+                callId: params.itemId ?? String(id),
+                permissions: params.permissions,
+                reason: params.reason,
+            });
+            this.respond(id, this.mapDecisionToPermissionsResponse(decision, params.permissions));
             return;
         }
 

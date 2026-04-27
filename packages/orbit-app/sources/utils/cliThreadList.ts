@@ -4,10 +4,12 @@ type CliThreadSourceItem =
     | { type: 'native-cli-session'; entry: NativeCliHistoryEntry; displayTitle?: string }
     | { type: 'session'; session: Session; displayTitle?: string };
 
+export type CliThreadDisplayTool = NativeCliTool | 'openclaw';
+
 export interface CliThreadListItem {
     id: string;
     source: 'native' | 'session';
-    tool: NativeCliTool;
+    tool: CliThreadDisplayTool;
     title: string;
     updatedAt: number;
     projectPath: string | null;
@@ -16,7 +18,7 @@ export interface CliThreadListItem {
 }
 
 export interface CliThreadToolSection {
-    tool: NativeCliTool;
+    tool: CliThreadDisplayTool;
     title: string;
     count: number;
     projectCount: number;
@@ -27,7 +29,7 @@ export interface CliThreadToolSection {
 
 export interface CliThreadProjectGroup {
     id: string;
-    tool: NativeCliTool;
+    tool: CliThreadDisplayTool;
     machineId: string | null;
     title: string;
     projectPath: string | null;
@@ -38,7 +40,12 @@ export interface CliThreadProjectGroup {
     items: CliThreadListItem[];
 }
 
-export const CLI_THREAD_TOOL_ORDER: NativeCliTool[] = ['claude', 'codex', 'gemini'];
+export interface CliThreadToolSectionsState {
+    sections: CliThreadToolSection[];
+    sectionsByTool: Record<CliThreadDisplayTool, CliThreadToolSection>;
+}
+
+export const CLI_THREAD_TOOL_ORDER: CliThreadDisplayTool[] = ['claude', 'codex', 'gemini', 'openclaw'];
 const GENERIC_PROJECT_DIRECTORY_NAMES = new Set(['project', 'workspace', 'repo']);
 export type CliThreadScope = 'current-project' | 'all-projects';
 
@@ -50,76 +57,134 @@ export interface CliThreadScopedProjectsView {
     threadCount: number;
 }
 
-export function buildCliThreadToolSections(data: readonly CliThreadSourceItem[]): CliThreadToolSection[] {
-    const nativeItemsByTool = new Map<NativeCliTool, CliThreadListItem[]>();
-    const sessionItemsByTool = new Map<NativeCliTool, CliThreadListItem[]>();
+type CliThreadItemsBySource = {
+    native: CliThreadListItem[];
+    session: CliThreadListItem[];
+};
 
-    for (const tool of CLI_THREAD_TOOL_ORDER) {
-        nativeItemsByTool.set(tool, []);
-        sessionItemsByTool.set(tool, []);
+type CliThreadBucketsByTool = Record<CliThreadDisplayTool, CliThreadItemsBySource>;
+
+const cliThreadToolSectionsStateCache = new WeakMap<readonly CliThreadSourceItem[], CliThreadToolSectionsState>();
+const CLI_THREAD_TOOL_RANK: Record<CliThreadDisplayTool, number> = {
+    claude: 0,
+    codex: 1,
+    gemini: 2,
+    openclaw: 3,
+};
+
+export function buildCliThreadToolSections(data: readonly CliThreadSourceItem[]): CliThreadToolSection[] {
+    return buildCliThreadToolSectionsState(data).sections;
+}
+
+export function buildCliThreadToolSection(
+    data: readonly CliThreadSourceItem[],
+    tool: CliThreadDisplayTool,
+): CliThreadToolSection {
+    return buildCliThreadToolSectionsState(data).sectionsByTool[tool];
+}
+
+export function buildCliThreadToolSectionsState(data: readonly CliThreadSourceItem[]): CliThreadToolSectionsState {
+    const cachedState = cliThreadToolSectionsStateCache.get(data);
+    if (cachedState) {
+        return cachedState;
     }
 
+    const bucketsByTool = createCliThreadBucketsByTool();
     for (const item of data) {
         const threadItem = toCliThreadListItem(item);
         if (!threadItem) {
             continue;
         }
 
-        const targetCollection = threadItem.source === 'native'
-            ? nativeItemsByTool.get(threadItem.tool)
-            : sessionItemsByTool.get(threadItem.tool);
-        if (!targetCollection) {
-            continue;
-        }
-
-        targetCollection.push(threadItem);
+        bucketsByTool[threadItem.tool][threadItem.source].push(threadItem);
     }
 
-    return CLI_THREAD_TOOL_ORDER.map((tool) => {
-        const nativeItems = nativeItemsByTool.get(tool) ?? [];
-        const sessionItems = sessionItemsByTool.get(tool) ?? [];
-        const preferredItems = nativeItems.length > 0 ? nativeItems : sessionItems;
-        const dedupedItems = new Map<string, CliThreadListItem>();
-
-        for (const threadItem of preferredItems) {
-            const existing = dedupedItems.get(threadItem.id);
-            if (!existing || compareCliThreadItemsForDedup(threadItem, existing) < 0) {
-                dedupedItems.set(threadItem.id, threadItem);
-            }
-        }
-
-        const items = Array.from(dedupedItems.values()).sort(compareCliThreadItemsForDisplay);
-        const projects = buildCliThreadProjectGroups(tool, items);
-        return {
-            tool,
-            title: getCliSectionTitle(tool),
-            count: items.length,
-            projectCount: projects.length,
-            newestUpdatedAt: items[0]?.updatedAt ?? null,
-            items,
-            projects,
-        };
+    const sections = CLI_THREAD_TOOL_ORDER.map((tool) => {
+        const buckets = bucketsByTool[tool];
+        return buildCliThreadToolSectionFromItems(tool, buckets.native, buckets.session);
     });
+    const sectionsByTool = {
+        claude: sections[0],
+        codex: sections[1],
+        gemini: sections[2],
+        openclaw: sections[3],
+    };
+    const state = {
+        sections,
+        sectionsByTool,
+    };
+    cliThreadToolSectionsStateCache.set(data, state);
+    return state;
+}
+
+function createCliThreadBucketsByTool(): CliThreadBucketsByTool {
+    return {
+        claude: { native: [], session: [] },
+        codex: { native: [], session: [] },
+        gemini: { native: [], session: [] },
+        openclaw: { native: [], session: [] },
+    };
+}
+
+function buildCliThreadToolSectionFromItems(
+    tool: CliThreadDisplayTool,
+    nativeItems: readonly CliThreadListItem[],
+    sessionItems: readonly CliThreadListItem[],
+): CliThreadToolSection {
+    const preferredItems = nativeItems.length > 0 ? nativeItems : sessionItems;
+    const dedupedItems = new Map<string, CliThreadListItem>();
+
+    for (const threadItem of preferredItems) {
+        const existing = dedupedItems.get(threadItem.id);
+        if (!existing || compareCliThreadItemsForDedup(threadItem, existing) < 0) {
+            dedupedItems.set(threadItem.id, threadItem);
+        }
+    }
+
+    const items = Array.from(dedupedItems.values()).sort(compareCliThreadItemsForDisplay);
+    const projects = buildCliThreadProjectGroups(tool, items);
+    return {
+        tool,
+        title: getCliSectionTitle(tool),
+        count: items.length,
+        projectCount: projects.length,
+        newestUpdatedAt: items[0]?.updatedAt ?? null,
+        items,
+        projects,
+    };
 }
 
 export function pickPreferredCliThreadTool(
     sections: CliThreadToolSection[],
-    preferredTool: NativeCliTool | null | undefined,
-): NativeCliTool {
+    preferredTool: CliThreadDisplayTool | null | undefined,
+): CliThreadDisplayTool {
     if (preferredTool) {
         return preferredTool;
     }
 
-    const mostRecentSection = [...sections]
-        .filter((section) => section.newestUpdatedAt !== null)
-        .sort((left, right) => {
-            const leftUpdatedAt = left.newestUpdatedAt ?? 0;
-            const rightUpdatedAt = right.newestUpdatedAt ?? 0;
-            if (leftUpdatedAt !== rightUpdatedAt) {
-                return rightUpdatedAt - leftUpdatedAt;
-            }
-            return CLI_THREAD_TOOL_ORDER.indexOf(left.tool) - CLI_THREAD_TOOL_ORDER.indexOf(right.tool);
-        })[0];
+    let mostRecentSection: CliThreadToolSection | null = null;
+    for (const section of sections) {
+        if (section.newestUpdatedAt === null) {
+            continue;
+        }
+
+        if (!mostRecentSection) {
+            mostRecentSection = section;
+            continue;
+        }
+
+        if (section.newestUpdatedAt > (mostRecentSection.newestUpdatedAt ?? 0)) {
+            mostRecentSection = section;
+            continue;
+        }
+
+        if (
+            section.newestUpdatedAt === mostRecentSection.newestUpdatedAt
+            && CLI_THREAD_TOOL_RANK[section.tool] < CLI_THREAD_TOOL_RANK[mostRecentSection.tool]
+        ) {
+            mostRecentSection = section;
+        }
+    }
 
     return mostRecentSection?.tool ?? 'claude';
 }
@@ -207,7 +272,7 @@ function toCliThreadListItem(item: CliThreadSourceItem): CliThreadListItem | nul
     return null;
 }
 
-function getCliSectionTitle(tool: NativeCliTool): string {
+export function getCliSectionTitle(tool: CliThreadDisplayTool): string {
     switch (tool) {
         case 'claude':
             return 'Claude';
@@ -215,10 +280,16 @@ function getCliSectionTitle(tool: NativeCliTool): string {
             return 'Codex';
         case 'gemini':
             return 'Gemini';
+        case 'openclaw':
+            return 'OpenClaw';
     }
 }
 
-function getSessionCliTool(session: Session): NativeCliTool | 'other' {
+export function getSessionCliTool(session: Session): CliThreadDisplayTool | 'other' {
+    if (session.metadata?.flavor === 'openclaw') {
+        return 'openclaw';
+    }
+
     if (session.metadata?.codexThreadId || session.metadata?.flavor === 'codex') {
         return 'codex';
     }
@@ -238,7 +309,7 @@ function getSessionCliTool(session: Session): NativeCliTool | 'other' {
     return 'other';
 }
 
-function getCliThreadItemIdForSession(session: Session, tool: NativeCliTool): string {
+function getCliThreadItemIdForSession(session: Session, tool: CliThreadDisplayTool): string {
     const backendId = session.metadata?.claudeSessionId
         ?? session.metadata?.codexThreadId
         ?? session.metadata?.geminiSessionId
@@ -249,7 +320,7 @@ function getCliThreadItemIdForSession(session: Session, tool: NativeCliTool): st
 }
 
 function buildCliThreadProjectGroups(
-    tool: NativeCliTool,
+    tool: CliThreadDisplayTool,
     items: CliThreadListItem[],
 ): CliThreadProjectGroup[] {
     const groups = new Map<string, CliThreadProjectGroup>();

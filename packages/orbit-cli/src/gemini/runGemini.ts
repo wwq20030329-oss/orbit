@@ -27,6 +27,7 @@ import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import { withRemoteControl } from '@/utils/agentState';
+import { shouldReportSessionStartToDaemon } from '@/utils/shouldReportSessionStartToDaemon';
 import type { ApiSessionClient } from '@/api/apiSession';
 
 import { createGeminiBackend } from '@/agent/factories/gemini';
@@ -217,8 +218,7 @@ export async function runGemini(opts: {
   session = initialSession;
   session.updateAgentState((currentState) => withRemoteControl(currentState));
 
-  // Report to daemon (only if we have a real session)
-  if (response) {
+  if (response && shouldReportSessionStartToDaemon({ startedBy: opts.startedBy })) {
     try {
       logger.debug(`[START] Reporting session ${response.id} to daemon`);
       const result = await notifyDaemonSessionStarted(response.id, metadata);

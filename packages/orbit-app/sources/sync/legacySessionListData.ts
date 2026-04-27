@@ -22,8 +22,8 @@ function partitionLegacySessions(sessions: Session[]): PartitionedLegacySessions
         inactiveSessions.push(session);
     });
 
-    activeSessions.sort((left, right) => right.createdAt - left.createdAt);
-    inactiveSessions.sort((left, right) => right.createdAt - left.createdAt);
+    activeSessions.sort((left, right) => right.updatedAt - left.updatedAt);
+    inactiveSessions.sort((left, right) => right.updatedAt - left.updatedAt);
 
     return {
         activeSessions,

@@ -150,7 +150,7 @@ export function SessionActionsPopover({
             items.push({
                 id: 'archive',
                 icon: 'archive-outline',
-                label: 'Archive',
+                label: t('sessionInfo.archiveSession'),
                 onPress: archiveSession,
             });
         }
@@ -219,9 +219,7 @@ export function SessionActionsPopover({
 
     const content = (
         <View style={[styles.card, { backgroundColor: theme.colors.header.background }]}>
-            {Platform.OS !== 'web' && (
-                <View style={[styles.handle, { backgroundColor: theme.colors.textSecondary }]} />
-            )}
+            <View style={[styles.handle, { backgroundColor: theme.colors.textSecondary }]} />
             {actions.map((action, index) => {
                 const isLast = index === actions.length - 1;
                 const color = action.destructive ? theme.colors.status.error : theme.colors.text;
@@ -250,32 +248,6 @@ export function SessionActionsPopover({
             })}
         </View>
     );
-
-    if (Platform.OS === 'web' && position) {
-        return (
-            <RNModal
-                animationType="none"
-                onRequestClose={onClose}
-                transparent
-                visible={visible}
-            >
-                <View style={styles.webContainer}>
-                    <Pressable onPress={onClose} style={styles.backdrop} />
-                    <View
-                        style={[
-                            styles.webMenu,
-                            {
-                                left: position.left,
-                                top: position.top,
-                            },
-                        ]}
-                    >
-                        {content}
-                    </View>
-                </View>
-            </RNModal>
-        );
-    }
 
     return (
         <RNModal

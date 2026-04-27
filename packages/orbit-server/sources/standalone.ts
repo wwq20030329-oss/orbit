@@ -25,7 +25,10 @@ const dataDir = process.env.DATA_DIR || "./data";
 const pgliteDir = process.env.PGLITE_DIR || path.join(dataDir, "pglite");
 
 async function migrate() {
-    console.log(`Migrating database in ${pgliteDir}...`);
+    // standalone.ts runs before the main logger is initialised (it bootstraps
+    // the migration step prior to `serve`), so raw console output is the
+    // correct channel here. Kept intentionally without the pino logger.
+    console.log(`[migrate] database in ${pgliteDir}...`);
     fs.mkdirSync(pgliteDir, { recursive: true });
 
     const pg = createPGlite(pgliteDir);
@@ -82,7 +85,7 @@ async function migrate() {
             continue;
         }
 
-        console.log(`  Applying ${dir}...`);
+        console.log(`[migrate]   Applying ${dir}...`);
         const sql = fs.readFileSync(sqlFile, "utf-8");
 
         try {
@@ -99,9 +102,9 @@ async function migrate() {
     }
 
     if (appliedCount === 0) {
-        console.log("No new migrations to apply.");
+        console.log("[migrate] No new migrations to apply.");
     } else {
-        console.log(`Applied ${appliedCount} migration(s).`);
+        console.log(`[migrate] Applied ${appliedCount} migration(s).`);
     }
 
     await pg.close();

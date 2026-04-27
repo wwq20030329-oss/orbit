@@ -27,9 +27,7 @@ Relevant files:
 - Server token route: `packages/orbit-server/sources/app/api/routes/voiceRoutes.ts`
 - Client token fetch: `packages/orbit-app/sources/sync/apiVoice.ts`
 - Voice start decision: `packages/orbit-app/sources/realtime/RealtimeSession.ts`
-- ElevenLabs client session start:
-  - `packages/orbit-app/sources/realtime/RealtimeVoiceSession.tsx`
-  - `packages/orbit-app/sources/realtime/RealtimeVoiceSession.web.tsx`
+- ElevenLabs client session start: `packages/orbit-app/sources/realtime/RealtimeVoiceSession.tsx`
 
 ## Existing Secret Assumptions
 
@@ -208,7 +206,6 @@ Update:
 
 - `packages/orbit-app/sources/realtime/types.ts`
 - `packages/orbit-app/sources/realtime/RealtimeVoiceSession.tsx`
-- `packages/orbit-app/sources/realtime/RealtimeVoiceSession.web.tsx`
 - `packages/orbit-app/sources/realtime/RealtimeSession.ts`
 - `packages/orbit-app/sources/sync/apiVoice.ts`
 

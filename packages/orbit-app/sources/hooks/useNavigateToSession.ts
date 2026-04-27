@@ -1,14 +1,28 @@
 import type { Router } from 'expo-router';
 import { useRouter } from 'expo-router';
+import { OrbitSessionHistoryLoader } from '@/remote/OrbitSessionHistoryLoader';
 import { storage } from '@/sync/storage';
-import { sync } from '@/sync/sync';
 import { trackSessionSwitched } from '@/track';
 import { clearSessionOpenedAsHistoryOnly, isNativeCliResumeUnavailableError, isNativeCliSessionMissingError, openNativeCliSessionFromIdentifier, openNativeCliSessionFromSession, rememberNativeCliHintsForSession } from '@/utils/openNativeCliSession';
 import { getNativeCliSessionTarget } from '@/utils/nativeCliSessionResolver';
+import {
+    navigateToPhoneWorkspaceSession,
+    rememberLastOpenedSessionIdentifier,
+    replaceToPhoneWorkspaceSession,
+    shouldUsePhoneWorkspaceNavigation,
+} from '@/utils/phoneWorkspaceNavigation';
 import { getInitialSessionRouteResolution, resolveSessionRoute } from '@/utils/sessionRouteResolution';
 
 const SESSION_NAVIGATION_HYDRATION_ATTEMPTS = 8;
 const SESSION_NAVIGATION_HYDRATION_DELAY_MS = 150;
+
+export interface NavigateToSessionOptions {
+    preferHistoryEntry?: boolean;
+}
+
+type DirectSessionNavigationOptions = {
+    history?: boolean;
+};
 
 function trackSession(sessionId: string) {
     const session = storage.getState().sessions[sessionId];
@@ -17,9 +31,53 @@ function trackSession(sessionId: string) {
     }
 }
 
-export function navigateDirectlyToSession(router: Router, sessionId: string) {
+function shouldPreserveArchivedHistorySession(sessionId: string, options: NavigateToSessionOptions = {}): boolean {
+    if (options.preferHistoryEntry !== true) {
+        return false;
+    }
+
+    const session = storage.getState().sessions[sessionId];
+    if (!session || session.metadata?.lifecycleState !== 'archived') {
+        return false;
+    }
+
+    return getNativeCliSessionTarget(session) !== null;
+}
+
+function openPhoneWorkspaceSession(
+    router: Router,
+    sessionId: string,
+    method: 'navigate' | 'replace',
+) {
+    clearSessionOpenedAsHistoryOnly(sessionId);
     trackSession(sessionId);
-    router.navigate(`/session/${encodeURIComponent(sessionId)}`, {
+
+    if (method === 'replace') {
+        replaceToPhoneWorkspaceSession(router, sessionId);
+        return;
+    }
+
+    navigateToPhoneWorkspaceSession(router, sessionId);
+}
+
+function buildSessionRoute(sessionId: string, options: DirectSessionNavigationOptions = {}): string {
+    const baseRoute = `/session/${encodeURIComponent(sessionId)}`;
+    return options.history ? `${baseRoute}?history=1` : baseRoute;
+}
+
+export function navigateDirectlyToSession(
+    router: Router,
+    sessionId: string,
+    options: DirectSessionNavigationOptions = {},
+) {
+    if (shouldUsePhoneWorkspaceNavigation() && storage.getState().sessions[sessionId]) {
+        openPhoneWorkspaceSession(router, sessionId, 'navigate');
+        return;
+    }
+
+    rememberLastOpenedSessionIdentifier(sessionId);
+    trackSession(sessionId);
+    router.navigate(buildSessionRoute(sessionId, options) as never, {
         dangerouslySingular() {
             return 'session';
         },
@@ -38,7 +96,7 @@ function shouldPreferNativeCliNavigation(sessionId: string): boolean {
         return false;
     }
 
-    return session.metadata?.lifecycleState !== 'archived';
+    return true;
 }
 
 async function waitForSessionToHydrate(sessionId: string): Promise<boolean> {
@@ -46,15 +104,24 @@ async function waitForSessionToHydrate(sessionId: string): Promise<boolean> {
         return true;
     }
 
-    return sync.waitForSessionReady(sessionId, {
+    return new OrbitSessionHistoryLoader(sessionId).waitUntilReady({
         timeoutMs: SESSION_NAVIGATION_HYDRATION_ATTEMPTS * SESSION_NAVIGATION_HYDRATION_DELAY_MS,
         pollMs: SESSION_NAVIGATION_HYDRATION_DELAY_MS,
         allowFallbackRefresh: true,
     });
 }
 
-export function navigateToSession(router: Router, sessionId: string): Promise<void> {
+export function navigateToSession(
+    router: Router,
+    sessionId: string,
+    options: NavigateToSessionOptions = {},
+): Promise<void> {
     clearSessionOpenedAsHistoryOnly(sessionId);
+    if (shouldPreserveArchivedHistorySession(sessionId, options)) {
+        navigateDirectlyToSession(router, sessionId, { history: true });
+        return Promise.resolve();
+    }
+
     const session = storage.getState().sessions[sessionId];
     if (session && shouldPreferNativeCliNavigation(sessionId)) {
         rememberNativeCliHintsForSession(session);
@@ -126,21 +193,30 @@ export function navigateToSession(router: Router, sessionId: string): Promise<vo
 }
 
 export function replaceToSession(router: Router, sessionId: string) {
+    if (shouldUsePhoneWorkspaceNavigation() && storage.getState().sessions[sessionId]) {
+        openPhoneWorkspaceSession(router, sessionId, 'replace');
+        return;
+    }
+
+    rememberLastOpenedSessionIdentifier(sessionId);
     clearSessionOpenedAsHistoryOnly(sessionId);
     trackSession(sessionId);
     router.replace(`/session/${encodeURIComponent(sessionId)}`);
 }
 
-export function useNavigateToSession(): (sessionId: string) => Promise<void> {
+export function useNavigateToSession(): (
+    sessionId: string,
+    options?: NavigateToSessionOptions,
+) => Promise<void> {
     const router = useRouter();
-    return (sessionId: string) => {
-        return navigateToSession(router, sessionId);
+    return (sessionId: string, options?: NavigateToSessionOptions) => {
+        return navigateToSession(router, sessionId, options);
     };
 }
 
 export function useNavigateDirectlyToSession() {
     const router = useRouter();
-    return (sessionId: string) => {
-        navigateDirectlyToSession(router, sessionId);
+    return (sessionId: string, options?: DirectSessionNavigationOptions) => {
+        navigateDirectlyToSession(router, sessionId, options);
     };
 }

@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { Text, useInput, Box } from 'ink';
 
-export type AuthMethod = 'mobile' | 'web';
+export type AuthMethod = 'mobile';
 
 interface AuthSelectorProps {
     onSelect: (method: AuthMethod) => void;
@@ -9,8 +9,6 @@ interface AuthSelectorProps {
 }
 
 export const AuthSelector: React.FC<AuthSelectorProps> = ({ onSelect, onCancel }) => {
-    const [selectedIndex, setSelectedIndex] = useState(0);
-    
     const options: Array<{ 
         method: AuthMethod; 
         label: string; 
@@ -18,28 +16,16 @@ export const AuthSelector: React.FC<AuthSelectorProps> = ({ onSelect, onCancel }
         {
             method: 'mobile',
             label: 'Mobile App'
-        },
-        {
-            method: 'web',
-            label: 'Web Browser'
         }
     ];
 
     useInput((input, key) => {
-        if (key.upArrow) {
-            setSelectedIndex(prev => Math.max(0, prev - 1));
-        } else if (key.downArrow) {
-            setSelectedIndex(prev => Math.min(options.length - 1, prev + 1));
-        } else if (key.return) {
-            onSelect(options[selectedIndex].method);
+        if (key.return) {
+            onSelect('mobile');
         } else if (key.escape || (key.ctrl && input === 'c')) {
             onCancel();
         } else if (input === '1') {
-            setSelectedIndex(0);
             onSelect('mobile');
-        } else if (input === '2') {
-            setSelectedIndex(1);
-            onSelect('web');
         }
     });
 
@@ -51,12 +37,10 @@ export const AuthSelector: React.FC<AuthSelectorProps> = ({ onSelect, onCancel }
 
             <Box flexDirection="column">
                 {options.map((option, index) => {
-                    const isSelected = selectedIndex === index;
-                    
                     return (
                         <Box key={option.method} marginY={0}>
-                            <Text color={isSelected ? "cyan" : "gray"}>
-                                {isSelected ? '› ' : '  '}
+                            <Text color="cyan">
+                                › {' '}
                                 {index + 1}. {option.label}
                             </Text>
                         </Box>
@@ -65,7 +49,7 @@ export const AuthSelector: React.FC<AuthSelectorProps> = ({ onSelect, onCancel }
             </Box>
 
             <Box marginTop={1}>
-                <Text dimColor>Use arrows or 1-2 to select, Enter to confirm</Text>
+                <Text dimColor>Press Enter or 1 to confirm, Esc to cancel</Text>
             </Box>
         </Box>
     );

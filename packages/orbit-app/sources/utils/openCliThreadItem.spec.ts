@@ -93,7 +93,41 @@ describe('openCliThreadItem', () => {
             navigateDirectlyToSession,
         });
 
-        expect(navigateToSession).toHaveBeenCalledWith('session-1');
+        expect(navigateToSession).toHaveBeenCalledWith('session-1', undefined);
+        expect(navigateDirectlyToSession).not.toHaveBeenCalled();
+    });
+
+    it('preserves archived session-backed history items instead of re-opening a live CLI session', async () => {
+        const navigateToSession = vi.fn(async () => undefined);
+        const navigateDirectlyToSession = vi.fn();
+        const item: CliThreadListItem = {
+            id: 'codex:session-1',
+            source: 'session',
+            tool: 'codex',
+            title: 'Archived Session',
+            updatedAt: 1,
+            projectPath: '/Users/test/project',
+            session: createSession({
+                metadata: {
+                    machineId: 'machine-1',
+                    codexThreadId: 'thread-1',
+                    path: '/Users/test/project',
+                    host: 'wwq-mac',
+                    flavor: 'codex',
+                    lifecycleState: 'archived',
+                },
+            }),
+            entry: null,
+        };
+
+        await openCliThreadItem(item, {
+            navigateToSession,
+            navigateDirectlyToSession,
+        });
+
+        expect(navigateToSession).toHaveBeenCalledWith('session-1', {
+            preferHistoryEntry: true,
+        });
         expect(navigateDirectlyToSession).not.toHaveBeenCalled();
     });
 

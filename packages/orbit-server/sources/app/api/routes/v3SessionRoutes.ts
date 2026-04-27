@@ -6,8 +6,26 @@ import { z } from "zod";
 import { type Fastify } from "../types";
 
 const getMessagesQuerySchema = z.object({
-    after_seq: z.coerce.number().int().min(0).default(0),
+    after_seq: z.coerce.number().int().min(0).optional(),
+    before_seq: z.coerce.number().int().min(1).optional(),
+    tail: z.coerce.boolean().default(false),
     limit: z.coerce.number().int().min(1).max(500).default(100)
+}).superRefine((value, ctx) => {
+    if (value.after_seq !== undefined && value.before_seq !== undefined) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'after_seq and before_seq cannot be used together',
+            path: ['before_seq'],
+        });
+    }
+
+    if (value.tail && (value.after_seq !== undefined || value.before_seq !== undefined)) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'tail cannot be combined with after_seq or before_seq',
+            path: ['tail'],
+        });
+    }
 });
 
 const sendMessagesBodySchema = z.object({
@@ -59,7 +77,7 @@ export function v3SessionRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { sessionId } = request.params;
-        const { after_seq, limit } = request.query;
+        const { after_seq, before_seq, tail, limit } = request.query;
 
         const session = await db.session.findFirst({
             where: {
@@ -76,9 +94,13 @@ export function v3SessionRoutes(app: Fastify) {
         const messages = await db.sessionMessage.findMany({
             where: {
                 sessionId,
-                seq: { gt: after_seq }
+                ...(typeof before_seq === 'number'
+                    ? { seq: { lt: before_seq } }
+                    : typeof after_seq === 'number'
+                        ? { seq: { gt: after_seq } }
+                        : {}),
             },
-            orderBy: { seq: 'asc' },
+            orderBy: { seq: tail || typeof before_seq === 'number' ? 'desc' : 'asc' },
             take: limit + 1,
             select: {
                 id: true,
@@ -91,7 +113,8 @@ export function v3SessionRoutes(app: Fastify) {
         });
 
         const hasMore = messages.length > limit;
-        const page = hasMore ? messages.slice(0, limit) : messages;
+        const page = (hasMore ? messages.slice(0, limit) : messages)
+            .sort((left, right) => left.seq - right.seq);
 
         return reply.send({
             messages: page.map(toResponseMessage),

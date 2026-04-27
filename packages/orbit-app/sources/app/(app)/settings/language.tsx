@@ -4,7 +4,6 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useSettingMutable } from '@/sync/storage';
-import { useUnistyles } from 'react-native-unistyles';
 import { t, getLanguageNativeName, SUPPORTED_LANGUAGES, SUPPORTED_LANGUAGE_CODES, type SupportedLanguage } from '@/text';
 import { Modal } from '@/modal';
 import { useUpdates } from '@/hooks/useUpdates';
@@ -19,7 +18,6 @@ interface LanguageItem {
 }
 
 export default function LanguageSettingsScreen() {
-    const { theme } = useUnistyles();
     const [preferredLanguage, setPreferredLanguage] = useSettingMutable('preferredLanguage');
     const { reloadApp } = useUpdates();
 
@@ -82,11 +80,6 @@ export default function LanguageSettingsScreen() {
                         key={option.key}
                         title={option.title}
                         subtitle={option.subtitle}
-                        icon={<Ionicons 
-                            name="language-outline" 
-                            size={29} 
-                            color="#007AFF" 
-                        />}
                         rightElement={
                             currentSelection === option.key ? (
                                 <Ionicons 

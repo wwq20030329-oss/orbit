@@ -7,6 +7,7 @@ import { ItemList } from '@/components/ItemList';
 import { Item } from '@/components/Item';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
+import { t } from '@/text';
 
 export default function LogsScreen() {
     const [logs, setLogs] = React.useState<string[]>([]);
@@ -43,9 +44,9 @@ export default function LogsScreen() {
 
     const handleClear = async () => {
         const confirmed = await Modal.confirm(
-            'Clear Logs',
-            'Are you sure you want to clear all logs?',
-            { confirmText: 'Clear', destructive: true }
+            t('devTools.clearLogsConfirmTitle'),
+            t('devTools.clearLogsConfirmBody'),
+            { confirmText: t('devTools.clearLogsConfirmAction'), destructive: true }
         );
         if (confirmed) {
             log.clear();
@@ -54,13 +55,13 @@ export default function LogsScreen() {
 
     const handleCopyAll = async () => {
         if (logs.length === 0) {
-            Modal.alert('No Logs', 'There are no logs to copy');
+            Modal.alert(t('devTools.noLogsTitle'), t('devTools.noLogsToCopy'));
             return;
         }
 
         const allLogs = logs.join('\n');
         await Clipboard.setStringAsync(allLogs);
-        Modal.alert('Copied', `${logs.length} log entries copied to clipboard`);
+        Modal.alert(t('common.copied'), t('devTools.logsCopied', { count: logs.length }));
     };
 
     const handleAddTestLog = () => {
@@ -91,23 +92,23 @@ export default function LogsScreen() {
             {/* Header with actions */}
             <ItemList>
                 <ItemGroup
-                    title={`Logs (${logs.length})`}
-                    footer={`Stored locally and capped at ${MAX_APP_LOG_ENTRIES.toLocaleString()} entries. Oldest logs are dropped first.`}
+                    title={t('devTools.logsTitle', { count: logs.length })}
+                    footer={t('devTools.logsFooter', { count: MAX_APP_LOG_ENTRIES.toLocaleString() })}
                 >
                     <Item 
-                        title="Add Test Log"
-                        subtitle="Add a test log entry with timestamp"
+                        title={t('devTools.addTestLog')}
+                        subtitle={t('devTools.addTestLogSubtitle')}
                         icon={<Ionicons name="add-circle-outline" size={24} color="#34C759" />}
                         onPress={handleAddTestLog}
                     />
                     <Item 
-                        title="Copy All Logs"
+                        title={t('devTools.copyAllLogs')}
                         icon={<Ionicons name="copy-outline" size={24} color="#007AFF" />}
                         onPress={handleCopyAll}
                         disabled={logs.length === 0}
                     />
                     <Item 
-                        title="Clear All Logs"
+                        title={t('devTools.clearAllLogs')}
                         icon={<Ionicons name="trash-outline" size={24} color="#FF3B30" />}
                         onPress={handleClear}
                         disabled={logs.length === 0}
@@ -132,7 +133,7 @@ export default function LogsScreen() {
                             marginTop: 16,
                             textAlign: 'center'
                         }}>
-                            No logs yet
+                            {t('devTools.noLogsYet')}
                         </Text>
                         <Text style={{
                             fontSize: 14,
@@ -140,7 +141,7 @@ export default function LogsScreen() {
                             marginTop: 8,
                             textAlign: 'center'
                         }}>
-                            Logs will appear here as they are generated
+                            {t('devTools.noLogsYetSubtitle')}
                         </Text>
                     </View>
                 ) : (

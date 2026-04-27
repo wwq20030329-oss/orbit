@@ -150,13 +150,20 @@ function readCodexSessionIndex(sessionIndexPath: string): Map<string, CodexSessi
 }
 
 function collectCodexHistoryFiles(codexDir: string): Array<{ path: string; updatedAt: number; source: 'live' | 'archive' }> {
-  const sessionPaths = collectJsonlFiles(join(codexDir, 'sessions'));
-  return sessionPaths
+  const sessionPaths = collectJsonlFiles(join(codexDir, 'sessions'))
     .map((path) => ({
       path,
       updatedAt: statSync(path).mtimeMs,
       source: 'live' as const,
     }));
+  const archivedSessionPaths = collectJsonlFiles(join(codexDir, 'archived_sessions'))
+    .map((path) => ({
+      path,
+      updatedAt: statSync(path).mtimeMs,
+      source: 'archive' as const,
+    }));
+
+  return [...sessionPaths, ...archivedSessionPaths];
 }
 
 function collectJsonlFiles(directory: string): string[] {

@@ -10,8 +10,6 @@ import { execSync } from 'node:child_process';
 import { logger } from '@/ui/logger';
 import { Credentials, readSettings } from '@/persistence';
 import { initialMachineMetadata } from '@/daemon/run';
-import { configuration } from '@/configuration';
-import packageJson from '../../package.json';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { projectPath } from '@/projectPath';
@@ -27,17 +25,27 @@ import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler"
 import { stopCaffeinate } from "@/utils/caffeinate";
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
+import { withRemoteControl } from '@/utils/agentState';
+import { shouldReportSessionStartToDaemon } from '@/utils/shouldReportSessionStartToDaemon';
 import type { ApiSessionClient } from '@/api/apiSession';
 import { resolveCodexExecutionPolicy } from './executionPolicy';
 import { mapCodexMcpMessageToSessionEnvelopes, mapCodexProcessorMessageToSessionEnvelopes } from './utils/sessionProtocolMapper';
 import { resumeExistingThread } from './resumeExistingThread';
-import { getRequestedNativeCliHistoryReplay, replayNativeCliHistoryIfRequested } from '@/history/nativeCliHistoryReplay';
+import { applyCodexSessionConfigMetadata, hasCodexSessionConfigChange } from './sessionConfigMetadata';
+import {
+    buildNativeCliResumeSessionTag,
+    getRequestedNativeCliHistoryReplay,
+    markNativeCliHistoryImported,
+    replayNativeCliHistoryIfRequested,
+    shouldReplayNativeCliHistory,
+} from '@/history/nativeCliHistoryReplay';
 
 type ReadyEventOptions = {
     pending: unknown;
     queueSize: () => number;
     shouldExit: boolean;
     sendReady: () => void;
+    allowReady?: boolean;
     notify?: () => void;
 };
 
@@ -45,7 +53,7 @@ type ReadyEventOptions = {
  * Notify connected clients when Codex finishes processing and the queue is idle.
  * Returns true when a ready event was emitted.
  */
-export function emitReadyIfIdle({ pending, queueSize, shouldExit, sendReady, notify }: ReadyEventOptions): boolean {
+export function emitReadyIfIdle({ pending, queueSize, shouldExit, sendReady, allowReady = true, notify }: ReadyEventOptions): boolean {
     if (shouldExit) {
         return false;
     }
@@ -55,10 +63,42 @@ export function emitReadyIfIdle({ pending, queueSize, shouldExit, sendReady, not
     if (queueSize() > 0) {
         return false;
     }
+    if (!allowReady) {
+        return false;
+    }
 
     sendReady();
     notify?.();
     return true;
+}
+
+type TurnOutcome = 'completed' | 'failed' | 'cancelled';
+
+function classifyCodexTurnOutcome(msg: Record<string, any>): TurnOutcome {
+    const rawStatus = msg.status;
+    if (rawStatus === 'completed' || rawStatus === 'failed' || rawStatus === 'cancelled') {
+        return rawStatus;
+    }
+    if (rawStatus === 'canceled') {
+        return 'cancelled';
+    }
+
+    if (msg.type === 'turn_aborted') {
+        const reason = typeof msg.reason === 'string' ? msg.reason : '';
+        if (reason && /(fail|error)/i.test(reason)) {
+            return 'failed';
+        }
+        if (msg.error !== undefined && msg.error !== null) {
+            return 'failed';
+        }
+        return 'cancelled';
+    }
+
+    if (msg.error !== undefined && msg.error !== null) {
+        return 'failed';
+    }
+
+    return 'completed';
 }
 
 /**
@@ -87,16 +127,21 @@ export async function runCodex(opts: {
 
     // Use shared PermissionMode type for cross-agent compatibility
     type PermissionMode = import('@/api/types').PermissionMode;
+    type ReasoningEffort = import('./codexAppServerTypes').ReasoningEffort;
     interface EnhancedMode {
         permissionMode: PermissionMode;
         model?: string;
+        effortLevel?: ReasoningEffort;
     }
 
     //
     // Define session
     //
 
-    const sessionTag = randomUUID();
+    const nativeReplayRequest = getRequestedNativeCliHistoryReplay();
+    const sessionTag = nativeReplayRequest
+        ? buildNativeCliResumeSessionTag(nativeReplayRequest)
+        : randomUUID();
 
     // Set backend for offline warnings (before any API calls)
     connectionState.setBackend('Codex');
@@ -127,15 +172,24 @@ export async function runCodex(opts: {
     // Create session
     //
 
-    const nativeReplayRequest = getRequestedNativeCliHistoryReplay();
-    const { state, metadata } = createSessionMetadata({
+    const { state, metadata: baseMetadata } = createSessionMetadata({
         flavor: 'codex',
         machineId,
         startedBy: opts.startedBy,
         sandbox: sandboxConfig,
         summaryText: nativeReplayRequest?.summary ?? nativeReplayRequest?.title ?? null,
+        nativeHistorySource: nativeReplayRequest
+            ? {
+                tool: nativeReplayRequest.tool,
+                backendId: nativeReplayRequest.backendId,
+            }
+            : null,
     });
+    const metadata = applyCodexSessionConfigMetadata(baseMetadata, {});
     const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+    const shouldImportNativeHistory = response
+        ? shouldReplayNativeCliHistory(response.metadata, nativeReplayRequest)
+        : false;
 
     // Handle server unreachable case - create offline stub with hot reconnection
     let session: ApiSessionClient;
@@ -153,6 +207,7 @@ export async function runCodex(opts: {
         response,
         onSessionSwap: (newSession) => {
             session = newSession;
+            session.updateAgentState((currentState) => withRemoteControl(currentState));
             // Update permission handler with new session to avoid stale reference
             if (permissionHandler) {
                 permissionHandler.updateSession(newSession);
@@ -160,9 +215,9 @@ export async function runCodex(opts: {
         }
     });
     session = initialSession;
+    session.updateAgentState((currentState) => withRemoteControl(currentState));
 
-    // Always report to daemon if it exists (skip if offline)
-    if (response) {
+    if (response && shouldReportSessionStartToDaemon({ startedBy: opts.startedBy })) {
         try {
             logger.debug(`[START] Reporting session ${response.id} to daemon`);
             const result = await notifyDaemonSessionStarted(response.id, metadata);
@@ -179,14 +234,20 @@ export async function runCodex(opts: {
     const messageQueue = new MessageQueue2<EnhancedMode>((mode) => hashObject({
         permissionMode: mode.permissionMode,
         model: mode.model,
+        effortLevel: mode.effortLevel,
     }));
 
     // Track current overrides to apply per message
     // Use shared PermissionMode type from api/types for cross-agent compatibility
     let currentPermissionMode: import('@/api/types').PermissionMode | undefined = undefined;
     let currentModel: string | undefined = undefined;
+    let currentEffortLevel: ReasoningEffort | undefined = undefined;
 
     session.onUserMessage((message) => {
+        const previousPermissionMode = currentPermissionMode;
+        const previousModel = currentModel;
+        const previousEffortLevel = currentEffortLevel;
+
         // Resolve permission mode (accept all modes, will be mapped in switch statement)
         let messagePermissionMode = currentPermissionMode;
         if (message.meta?.permissionMode) {
@@ -207,10 +268,36 @@ export async function runCodex(opts: {
             logger.debug(`[Codex] User message received with no model override, using current: ${currentModel || 'default'}`);
         }
 
+        let messageEffortLevel = currentEffortLevel;
+        if (typeof message.meta?.effortLevel === 'string' && message.meta.effortLevel.length > 0) {
+            messageEffortLevel = message.meta.effortLevel as ReasoningEffort;
+            currentEffortLevel = messageEffortLevel;
+            logger.debug(`[Codex] Effort updated from user message: ${messageEffortLevel}`);
+        }
+
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
             model: messageModel,
+            effortLevel: messageEffortLevel,
         };
+        if (hasCodexSessionConfigChange(
+            {
+                model: previousModel,
+                permissionMode: previousPermissionMode,
+                effortLevel: previousEffortLevel,
+            },
+            {
+                model: messageModel,
+                permissionMode: messagePermissionMode,
+                effortLevel: messageEffortLevel,
+            },
+        )) {
+            session.updateMetadata((currentMetadata) => applyCodexSessionConfigMetadata(currentMetadata, {
+                model: messageModel,
+                permissionMode: messagePermissionMode,
+                effortLevel: messageEffortLevel,
+            }));
+        }
         messageQueue.push(message.content.text, enhancedMode);
     });
     let thinking = false;
@@ -218,6 +305,7 @@ export async function runCodex(opts: {
     let codexStartedSubagents = new Set<string>();
     let codexActiveSubagents = new Set<string>();
     let codexProviderSubagentToSessionSubagent = new Map<string, string>();
+    let lastTurnOutcome: TurnOutcome | null = null;
     session.keepAlive(thinking, 'remote');
     // Periodic keep-alive; store handle so we can clear on exit
     const keepAliveInterval = setInterval(() => {
@@ -241,7 +329,10 @@ export async function runCodex(opts: {
         }
     };
 
-    await replayNativeCliHistoryIfRequested(session, 'codex', process.cwd());
+    if (nativeReplayRequest && shouldImportNativeHistory) {
+        await replayNativeCliHistoryIfRequested(session, 'codex', process.cwd());
+        session.updateMetadata((currentMetadata) => markNativeCliHistoryImported(currentMetadata, nativeReplayRequest));
+    }
 
     // Debug helper: log active handles/requests if DEBUG is enabled
     function logActiveHandles(tag: string) {
@@ -440,11 +531,15 @@ export async function runCodex(opts: {
             ? 'CodexBash'
             : params.type === 'patch'
                 ? 'CodexPatch'
-                : (params.toolName ?? 'McpTool');
+                : params.type === 'permissions'
+                    ? 'CodexPermissions'
+                    : (params.toolName ?? 'McpTool');
         const input = params.type === 'exec'
             ? { command: params.command, cwd: params.cwd }
             : params.type === 'patch'
                 ? { changes: params.fileChanges }
+                : params.type === 'permissions'
+                    ? { permissions: params.permissions, reason: params.reason }
                 : (params.input ?? {});
 
         try {
@@ -462,7 +557,7 @@ export async function runCodex(opts: {
         logger.debug(`[Codex] Event: ${JSON.stringify(msg)}`);
 
         // Add messages to the ink UI buffer based on message type
-        if (msg.type === 'agent_message') {
+        if (msg.type === 'agent_message' && msg.partial !== true) {
             messageBuffer.addMessage((msg as any).message, 'assistant');
         } else if (msg.type === 'agent_reasoning_delta') {
             // Skip reasoning deltas in the UI to reduce noise
@@ -488,6 +583,7 @@ export async function runCodex(opts: {
         }
 
         if (msg.type === 'task_started') {
+            lastTurnOutcome = null;
             if (!thinking) {
                 logger.debug('thinking started');
                 thinking = true;
@@ -495,6 +591,7 @@ export async function runCodex(opts: {
             }
         }
         if (msg.type === 'task_complete' || msg.type === 'turn_aborted') {
+            lastTurnOutcome = classifyCodexTurnOutcome(msg as Record<string, any>);
             if (thinking) {
                 logger.debug('thinking completed');
                 thinking = false;
@@ -643,6 +740,7 @@ export async function runCodex(opts: {
                     model: message.mode.model,
                     approvalPolicy: executionPolicy.approvalPolicy,
                     sandbox: executionPolicy.sandbox,
+                    effort: message.mode.effortLevel,
                 });
                 first = false;
 
@@ -668,6 +766,10 @@ export async function runCodex(opts: {
                     queueSize: () => messageQueue.size(),
                     shouldExit,
                     sendReady,
+                    allowReady: lastTurnOutcome !== 'failed' && lastTurnOutcome !== 'cancelled',
+                    notify: lastTurnOutcome === 'completed'
+                        ? undefined
+                        : () => logger.debug(`[Codex] Skipping ready notification because turn ended with status: ${lastTurnOutcome}`),
                 });
                 logActiveHandles('after-turn');
             }

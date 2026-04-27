@@ -3,7 +3,6 @@ import { TokenStorage } from '@/auth/tokenStorage';
 import { handleUnauthorizedResponse } from '@/auth/authRecovery';
 import { Encryption } from './encryption/encryption';
 import { storage } from './storage';
-import { Platform } from 'react-native';
 
 //
 // Types
@@ -65,8 +64,7 @@ class ApiSocket {
                 clientType: 'user-scoped' as const
             },
             // Native clients are more stable with direct WebSocket transport.
-            transports: Platform.OS === 'web' ? ['websocket', 'polling'] : ['websocket'],
-            tryAllTransports: Platform.OS === 'web',
+            transports: ['websocket'],
             reconnection: true,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,

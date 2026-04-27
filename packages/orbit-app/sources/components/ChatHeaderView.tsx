@@ -16,6 +16,8 @@ interface ChatHeaderViewProps {
     title: string;
     subtitle?: string;
     onBackPress?: () => void;
+    leadingIcon?: 'back' | 'menu';
+    rightAccessory?: React.ReactNode;
     onAvatarPress?: () => void;
     avatarId?: string;
     backgroundColor?: string;
@@ -33,6 +35,8 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
     title,
     subtitle,
     onBackPress,
+    leadingIcon = 'back',
+    rightAccessory,
     onAvatarPress,
     avatarId,
     isConnected = true,
@@ -106,12 +110,6 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
         }
     }, [requestAvatarMenuFromTrigger]);
 
-    const webAvatarMenuProps = Platform.OS === 'web' && onAvatarMenuRequest ? {
-        'aria-expanded': avatarMenuExpanded,
-        'aria-haspopup': 'menu',
-        onContextMenu: handleAvatarContextMenu,
-        onKeyDown: handleAvatarKeyDown,
-    } as any : {};
 
     return (
         <View style={[styles.container, { paddingTop: insets.top, backgroundColor: theme.colors.header.background }]}>
@@ -119,7 +117,11 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                 <View style={[styles.content, { height: headerHeight }]}>
                     <Pressable onPress={handleBackPress} style={styles.backButton} hitSlop={15}>
                         <Ionicons
-                            name={Platform.OS === 'ios' ? 'chevron-back' : 'arrow-back'}
+                            name={leadingIcon === 'menu'
+                                ? 'menu-outline'
+                                : Platform.OS === 'ios'
+                                    ? 'chevron-back'
+                                    : 'arrow-back'}
                             size={Platform.select({ ios: 28, default: 24 })}
                             color={theme.colors.header.tint}
                         />
@@ -157,7 +159,11 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                         )}
                     </View>
 
-                    {avatarId && onAvatarPress && (
+                    {rightAccessory ? (
+                        <View style={styles.avatarButtonSlot}>
+                            {rightAccessory}
+                        </View>
+                    ) : avatarId && onAvatarPress && (
                         <View collapsable={false} ref={avatarAnchorRef} style={styles.avatarButtonSlot}>
                             {avatarMenuSession ? (
                                 <SessionActionsNativeMenu
@@ -167,10 +173,8 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                                 >
                                     <Pressable
                                         hitSlop={15}
-                                        onLongPress={Platform.OS === 'web' && onAvatarMenuRequest ? requestAvatarMenuFromTrigger : undefined}
                                         onPress={handleAvatarPress}
                                         style={styles.avatarButton}
-                                        {...webAvatarMenuProps}
                                     >
                                         <Avatar
                                             id={avatarId}
@@ -183,10 +187,8 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                             ) : (
                                 <Pressable
                                     hitSlop={15}
-                                    onLongPress={Platform.OS === 'web' && onAvatarMenuRequest ? requestAvatarMenuFromTrigger : undefined}
                                     onPress={handleAvatarPress}
                                     style={styles.avatarButton}
-                                    {...webAvatarMenuProps}
                                 >
                                     <Avatar
                                         id={avatarId}

@@ -1,9 +1,7 @@
 import * as React from 'react';
-import { ToolSectionView } from '../../tools/ToolSectionView';
 import { ToolViewProps } from './_all';
-import { ToolDiffView } from '@/components/tools/ToolDiffView';
-import { trimIdent } from '@/utils/trimIdent';
-import { useSetting } from '@/sync/storage';
+import { resolvePath } from '@/utils/pathUtils';
+import { FileChangeSummaryView } from './FileChangeSummaryView';
 
 /**
  * Extract edit content from Gemini's nested input format.
@@ -52,24 +50,9 @@ function extractEditContent(input: any): { oldText: string; newText: string; pat
  * - newText (instead of new_string)
  * - path (instead of file_path)
  */
-export const GeminiEditView = React.memo<ToolViewProps>(({ tool }) => {
-    const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
-    
-    const { oldText, newText } = extractEditContent(tool.input);
-    const oldString = trimIdent(oldText);
-    const newString = trimIdent(newText);
+export const GeminiEditView = React.memo<ToolViewProps>(({ tool, metadata, sessionId }) => {
+    const { path } = extractEditContent(tool.input);
+    const filePath = path ? resolvePath(path, metadata) : '';
 
-    return (
-        <>
-            <ToolSectionView fullWidth>
-                <ToolDiffView 
-                    oldText={oldString} 
-                    newText={newString} 
-                    showLineNumbers={showLineNumbersInToolViews}
-                    showPlusMinusSymbols={showLineNumbersInToolViews}
-                />
-            </ToolSectionView>
-        </>
-    );
+    return <FileChangeSummaryView sessionId={sessionId} items={filePath ? [{ path: filePath }] : []} />;
 });
-

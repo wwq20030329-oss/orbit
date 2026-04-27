@@ -12,6 +12,7 @@ import { awaitFileExist } from "@/modules/watcher/awaitFileExist";
 import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
+import { applyClaudeSessionEnv } from "./utils/effortEnv";
 
 export async function claudeRemote(opts: {
 
@@ -74,18 +75,13 @@ export async function claudeRemote(opts: {
         }
     }
 
-    // Set environment variables for Claude Code SDK
-    if (opts.claudeEnvVars) {
-        Object.entries(opts.claudeEnvVars).forEach(([key, value]) => {
-            process.env[key] = value;
-        });
-    }
-
     // Get initial message
     const initial = await opts.nextMessage();
     if (!initial) { // No initial message - exit
         return;
     }
+
+    applyClaudeSessionEnv(process.env, opts.claudeEnvVars, initial.mode.effortLevel);
 
     // Handle special commands
     const specialCommand = parseSpecialCommand(initial.message);
@@ -214,6 +210,7 @@ export async function claudeRemote(opts: {
                         messages.end();
                     } else {
                         mode = next.mode;
+                        applyClaudeSessionEnv(process.env, opts.claudeEnvVars, next.mode.effortLevel);
                         messages.push({ type: 'user', message: { role: 'user', content: next.message } });
                     }
                 }).catch(() => {

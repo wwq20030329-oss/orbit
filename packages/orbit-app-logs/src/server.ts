@@ -7,8 +7,8 @@ const PORT = parseInt(process.env.PORT || '8787');
 
 // Resolve Orbit home dir — same pattern as orbit-cli/src/configuration.ts.
 let orbitHome: string;
-if (process.env.ORBIT_HOME_DIR || process.env.HAPPY_HOME_DIR) {
-    orbitHome = (process.env.ORBIT_HOME_DIR || process.env.HAPPY_HOME_DIR || '').replace(/^~/, homedir());
+if (process.env.ORBIT_HOME_DIR) {
+    orbitHome = process.env.ORBIT_HOME_DIR.replace(/^~/, homedir());
 } else {
     orbitHome = join(homedir(), '.orbit');
 }

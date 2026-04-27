@@ -148,6 +148,25 @@ function patchDescription(changes: unknown): string {
     return `Applying patch to ${fileCount} files`;
 }
 
+function extractLifecycleMessage(value: unknown): string | null {
+    if (typeof value === 'string') {
+        const text = value.trim();
+        return text.length > 0 ? text : null;
+    }
+
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    const record = value as Record<string, unknown>;
+    const directMessage = typeof record.message === 'string' ? record.message.trim() : '';
+    if (directMessage.length > 0) {
+        return directMessage;
+    }
+
+    return extractLifecycleMessage(record.error);
+}
+
 function pickTurnEndStatus(message: Record<string, unknown>, type: unknown): TurnEndStatus {
     const rawStatus = message.status;
     if (rawStatus === 'completed' || rawStatus === 'failed' || rawStatus === 'cancelled') {
@@ -174,6 +193,26 @@ function pickTurnEndStatus(message: Record<string, unknown>, type: unknown): Tur
     }
 
     return 'completed';
+}
+
+function pickTurnEndText(message: Record<string, unknown>, type: unknown, status: TurnEndStatus): string | null {
+    if (type === 'turn_aborted') {
+        return extractLifecycleMessage(message.reason)
+            ?? extractLifecycleMessage(message.error)
+            ?? 'Task cancelled';
+    }
+
+    if (status === 'failed') {
+        return extractLifecycleMessage(message.error) ?? 'Task failed';
+    }
+
+    if (status === 'cancelled') {
+        return extractLifecycleMessage(message.reason)
+            ?? extractLifecycleMessage(message.error)
+            ?? 'Task cancelled';
+    }
+
+    return null;
 }
 
 export function mapCodexMcpMessageToSessionEnvelopes(message: Record<string, unknown>, state: CodexTurnState): CodexMapperResult {
@@ -209,19 +248,27 @@ export function mapCodexMcpMessageToSessionEnvelopes(message: Record<string, unk
         }
 
         const lifecycleOpts = { turn: state.currentTurnId } satisfies CreateEnvelopeOptions;
+        const status = pickTurnEndStatus(message, type);
+        const turnEndText = pickTurnEndText(message, type, status);
         providerSubagentToSessionSubagent.clear();
+        const envelopes: SessionEnvelope[] = [
+            ...emitSubagentStops(lifecycleOpts, startedSubagents, activeSubagents),
+        ];
+        if (turnEndText) {
+            envelopes.push(createEnvelope('agent', { t: 'service', text: turnEndText }, lifecycleOpts));
+        }
+        envelopes.push(
+            createEnvelope('agent', {
+                t: 'turn-end',
+                status,
+            }, lifecycleOpts),
+        );
         return {
             currentTurnId: null,
             startedSubagents,
             activeSubagents,
             providerSubagentToSessionSubagent,
-            envelopes: [
-                ...emitSubagentStops(lifecycleOpts, startedSubagents, activeSubagents),
-                createEnvelope('agent', {
-                    t: 'turn-end',
-                    status: pickTurnEndStatus(message, type),
-                }, lifecycleOpts),
-            ],
+            envelopes,
         };
     }
 
@@ -239,6 +286,16 @@ export function mapCodexMcpMessageToSessionEnvelopes(message: Record<string, unk
     const opts = buildEnvelopeOptions(state.currentTurnId, subagent);
 
     if (type === 'agent_message') {
+        if (message.partial === true) {
+            return {
+                currentTurnId: state.currentTurnId,
+                startedSubagents,
+                activeSubagents,
+                providerSubagentToSessionSubagent,
+                envelopes: [],
+            };
+        }
+
         if (typeof message.message !== 'string') {
             return {
                 currentTurnId: state.currentTurnId,

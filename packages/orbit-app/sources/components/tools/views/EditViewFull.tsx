@@ -10,9 +10,10 @@ import { trimIdent } from '@/utils/trimIdent';
 interface EditViewFullProps {
     tool: ToolCall;
     metadata: Metadata | null;
+    wrapLinesInDiffs?: boolean;
 }
 
-export const EditViewFull = React.memo<EditViewFullProps>(({ tool, metadata }) => {
+export const EditViewFull = React.memo<EditViewFullProps>(({ tool, metadata, wrapLinesInDiffs = false }) => {
     const { input } = tool;
 
     // Parse the input
@@ -29,6 +30,7 @@ export const EditViewFull = React.memo<EditViewFullProps>(({ tool, metadata }) =
             <ToolDiffView 
                 oldText={oldString} 
                 newText={newString} 
+                wrapLines={wrapLinesInDiffs}
                 style={{ width: '100%' }}
                 showLineNumbers={true}
                 showPlusMinusSymbols={true}

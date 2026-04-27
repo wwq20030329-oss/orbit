@@ -39,35 +39,24 @@ describe('outboxSendLifecycle', () => {
             appState: 'background',
             hasPendingMessages: true,
             hasWatchdog: false,
-            isWeb: false,
         })).toBe(true);
 
         expect(shouldStartBackgroundSendWatchdog({
             appState: 'active',
             hasPendingMessages: true,
             hasWatchdog: false,
-            isWeb: false,
         })).toBe(false);
 
         expect(shouldStartBackgroundSendWatchdog({
             appState: 'background',
             hasPendingMessages: false,
             hasWatchdog: false,
-            isWeb: false,
         })).toBe(false);
 
         expect(shouldStartBackgroundSendWatchdog({
             appState: 'background',
             hasPendingMessages: true,
             hasWatchdog: true,
-            isWeb: false,
-        })).toBe(false);
-
-        expect(shouldStartBackgroundSendWatchdog({
-            appState: 'background',
-            hasPendingMessages: true,
-            hasWatchdog: false,
-            isWeb: true,
         })).toBe(false);
     });
 

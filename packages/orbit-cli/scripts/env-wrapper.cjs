@@ -24,13 +24,13 @@ const VARIANTS = {
     homeDir: path.join(os.homedir(), '.orbit'),
     color: '\x1b[32m', // Green
     label: '✅ STABLE',
-    serverUrl: process.env.ORBIT_SERVER_URL || process.env.HAPPY_SERVER_URL || 'https://api.cluster-fluster.com'
+    serverUrl: process.env.ORBIT_SERVER_URL || 'https://api.2003383.xyz'
   },
   dev: {
     homeDir: path.join(os.homedir(), '.orbit-dev'),
     color: '\x1b[33m', // Yellow
     label: '🔧 DEV',
-    serverUrl: process.env.ORBIT_SERVER_URL || process.env.HAPPY_SERVER_URL || 'https://api.cluster-fluster.com'
+    serverUrl: process.env.ORBIT_SERVER_URL || 'https://api.2003383.xyz'
   }
 };
 

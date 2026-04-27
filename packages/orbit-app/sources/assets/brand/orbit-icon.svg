@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="178" y1="84" x2="856" y2="946" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#111821"/>
+      <stop offset="0.58" stop-color="#0B0F14"/>
+      <stop offset="1" stop-color="#06080C"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(594 398) rotate(129) scale(528 506)">
+      <stop offset="0" stop-color="#63E37A" stop-opacity="0.42"/>
+      <stop offset="0.42" stop-color="#55C8FF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#0B0F14" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="260" y1="260" x2="786" y2="788" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF9EE"/>
+      <stop offset="1" stop-color="#DDE6D8"/>
+    </linearGradient>
+    <linearGradient id="arc" x1="290" y1="762" x2="796" y2="270" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#55C8FF"/>
+      <stop offset="1" stop-color="#63E37A"/>
+    </linearGradient>
+    <filter id="shadow" x="128" y="128" width="768" height="768" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="28" stdDeviation="32" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <circle cx="572" cy="430" r="430" fill="url(#halo)"/>
+  <path d="M198 512C198 338 338 198 512 198C686 198 826 338 826 512" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="26" stroke-linecap="round"/>
+  <g filter="url(#shadow)">
+    <circle cx="512" cy="512" r="280" fill="none" stroke="url(#ring)" stroke-width="92"/>
+    <path d="M304 700C221 601 219 446 302 344C403 218 587 198 712 300C816 385 847 529 795 645" fill="none" stroke="url(#arc)" stroke-width="44" stroke-linecap="round"/>
+    <rect x="253" y="596" width="118" height="178" rx="38" fill="#0B0F14" stroke="#F7F2E8" stroke-width="28"/>
+    <rect x="672" y="254" width="156" height="114" rx="34" fill="#F7F2E8"/>
+    <rect x="704" y="286" width="92" height="50" rx="16" fill="#0B0F14"/>
+    <path d="M414 382L552 512L414 642" fill="none" stroke="#F7F2E8" stroke-width="84" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="580" y="615" width="156" height="66" rx="33" fill="#63E37A"/>
+    <circle cx="748" cy="312" r="26" fill="#63E37A" stroke="#0B0F14" stroke-width="12"/>
+    <circle cx="313" cy="716" r="16" fill="#63E37A"/>
+  </g>
+</svg>

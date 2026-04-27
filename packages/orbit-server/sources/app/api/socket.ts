@@ -12,14 +12,33 @@ import { sessionUpdateHandler } from "./socket/sessionUpdateHandler";
 import { machineUpdateHandler } from "./socket/machineUpdateHandler";
 import { artifactUpdateHandler } from "./socket/artifactUpdateHandler";
 import { accessKeyHandler } from "./socket/accessKeyHandler";
+import { liveMirrorHandler } from "./socket/liveMirrorHandler";
+import { liveMirrorRelay } from "@/app/live/liveMirrorRelay";
+import {
+    MACHINE_OFFLINE_GRACE_MS,
+    resolveLiveAttachmentRecoveryGraceMs,
+    resolveMachineRuntimeDetachGraceMs,
+    SOCKET_CONNECTION_STATE_RECOVERY_MS,
+} from "@/app/live/recoveryWindows";
 
 export function startSocket(app: Fastify) {
+    const LIVE_ATTACHMENT_RECOVERY_GRACE_MS = resolveLiveAttachmentRecoveryGraceMs(SOCKET_CONNECTION_STATE_RECOVERY_MS);
+    const MACHINE_RUNTIME_DETACH_GRACE_MS = resolveMachineRuntimeDetachGraceMs({
+        machineOfflineGraceMs: MACHINE_OFFLINE_GRACE_MS,
+        liveAttachmentRecoveryGraceMs: LIVE_ATTACHMENT_RECOVERY_GRACE_MS,
+    });
     const io = new Server(app.server, {
         cors: {
             origin: "*",
             methods: ["GET", "POST", "OPTIONS"],
             credentials: true,
             allowedHeaders: ["*"]
+        },
+        // Recover short disconnects in-memory so mobile clients can continue
+        // without immediately falling back to full refresh / loading flows.
+        connectionStateRecovery: {
+            maxDisconnectionDuration: SOCKET_CONNECTION_STATE_RECOVERY_MS,
+            skipMiddlewares: true,
         },
         transports: ['websocket', 'polling'],
         pingTimeout: 45000,
@@ -32,6 +51,9 @@ export function startSocket(app: Fastify) {
     });
 
     let rpcListeners = new Map<string, Map<string, Socket>>();
+    const pendingMachineOfflineTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const pendingMachineRuntimeDetachTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const pendingLiveAttachmentDetachTimers = new Map<string, ReturnType<typeof setTimeout>>();
     io.on("connection", async (socket) => {
         log({ module: 'websocket' }, `New connection attempt from socket: ${socket.id}`);
         const token = socket.handshake.auth.token as string;
@@ -73,6 +95,12 @@ export function startSocket(app: Fastify) {
         const userId = verified.userId;
         log({ module: 'websocket' }, `Token verified: ${userId}, clientType: ${clientType || 'user-scoped'}, sessionId: ${sessionId || 'none'}, machineId: ${machineId || 'none'}, socketId: ${socket.id}`);
 
+        const pendingAttachmentDetachTimer = pendingLiveAttachmentDetachTimers.get(socket.id);
+        if (pendingAttachmentDetachTimer) {
+            clearTimeout(pendingAttachmentDetachTimer);
+            pendingLiveAttachmentDetachTimers.delete(socket.id);
+        }
+
         // Store connection based on type
         const metadata = { clientType: clientType || 'user-scoped', sessionId, machineId };
         let connection: ClientConnection;
@@ -102,17 +130,40 @@ export function startSocket(app: Fastify) {
 
         // Broadcast daemon online status
         if (connection.connectionType === 'machine-scoped') {
+            const machineConnectionKey = `${userId}:${machineId!}`;
+            const pendingOfflineTimer = pendingMachineOfflineTimers.get(machineConnectionKey);
+            if (pendingOfflineTimer) {
+                clearTimeout(pendingOfflineTimer);
+                pendingMachineOfflineTimers.delete(machineConnectionKey);
+            }
+            const pendingRuntimeDetachTimer = pendingMachineRuntimeDetachTimers.get(machineConnectionKey);
+            if (pendingRuntimeDetachTimer) {
+                clearTimeout(pendingRuntimeDetachTimer);
+                pendingMachineRuntimeDetachTimers.delete(machineConnectionKey);
+            }
+
             // Broadcast daemon online
-            const machineActivity = buildMachineActivityEphemeral(machineId!, true, Date.now());
-            eventRouter.emitEphemeral({
-                userId,
-                payload: machineActivity,
-                recipientFilter: { type: 'user-scoped-only' }
-            });
+            if (!pendingOfflineTimer) {
+                const machineActivity = buildMachineActivityEphemeral(machineId!, true, Date.now());
+                eventRouter.emitEphemeral({
+                    userId,
+                    payload: machineActivity,
+                    recipientFilter: { type: 'user-scoped-only' }
+                });
+            }
         }
 
         socket.on('disconnect', () => {
             websocketEventsCounter.inc({ event_type: 'disconnect' });
+
+            const existingDetachTimer = pendingLiveAttachmentDetachTimers.get(socket.id);
+            if (existingDetachTimer) {
+                clearTimeout(existingDetachTimer);
+            }
+            pendingLiveAttachmentDetachTimers.set(socket.id, setTimeout(() => {
+                pendingLiveAttachmentDetachTimers.delete(socket.id);
+                liveMirrorRelay.detachSocket(socket.id);
+            }, LIVE_ATTACHMENT_RECOVERY_GRACE_MS));
 
             // Cleanup connections
             eventRouter.removeConnection(userId, connection);
@@ -122,12 +173,36 @@ export function startSocket(app: Fastify) {
 
             // Broadcast daemon offline status
             if (connection.connectionType === 'machine-scoped') {
-                const machineActivity = buildMachineActivityEphemeral(connection.machineId, false, Date.now());
-                eventRouter.emitEphemeral({
-                    userId,
-                    payload: machineActivity,
-                    recipientFilter: { type: 'user-scoped-only' }
-                });
+                const machineConnectionKey = `${userId}:${connection.machineId}`;
+                const existingTimer = pendingMachineOfflineTimers.get(machineConnectionKey);
+                if (existingTimer) {
+                    clearTimeout(existingTimer);
+                }
+                const existingRuntimeDetachTimer = pendingMachineRuntimeDetachTimers.get(machineConnectionKey);
+                if (existingRuntimeDetachTimer) {
+                    clearTimeout(existingRuntimeDetachTimer);
+                }
+
+                pendingMachineOfflineTimers.set(machineConnectionKey, setTimeout(() => {
+                    pendingMachineOfflineTimers.delete(machineConnectionKey);
+
+                    const machineActivity = buildMachineActivityEphemeral(connection.machineId, false, Date.now());
+                    eventRouter.emitEphemeral({
+                        userId,
+                        payload: machineActivity,
+                        recipientFilter: { type: 'user-scoped-only' }
+                    });
+                }, MACHINE_OFFLINE_GRACE_MS));
+                pendingMachineRuntimeDetachTimers.set(machineConnectionKey, setTimeout(() => {
+                    pendingMachineRuntimeDetachTimers.delete(machineConnectionKey);
+
+                    const detachedRuntimes = liveMirrorRelay.detachMachineRuntimes(userId, connection.machineId, 'machine-offline');
+                    for (const detached of detachedRuntimes) {
+                        for (const attachedSocketId of detached.socketIds) {
+                            io.to(attachedSocketId).emit('live-detach', detached.event);
+                        }
+                    }
+                }, MACHINE_RUNTIME_DETACH_GRACE_MS));
             }
         });
 
@@ -144,12 +219,25 @@ export function startSocket(app: Fastify) {
         machineUpdateHandler(userId, socket);
         artifactUpdateHandler(userId, socket);
         accessKeyHandler(userId, socket);
+        liveMirrorHandler(userId, socket, connection);
 
         // Ready
         log({ module: 'websocket' }, `User connected: ${userId}`);
     });
 
     onShutdown('api', async () => {
+        for (const timer of pendingMachineOfflineTimers.values()) {
+            clearTimeout(timer);
+        }
+        pendingMachineOfflineTimers.clear();
+        for (const timer of pendingMachineRuntimeDetachTimers.values()) {
+            clearTimeout(timer);
+        }
+        pendingMachineRuntimeDetachTimers.clear();
+        for (const timer of pendingLiveAttachmentDetachTimers.values()) {
+            clearTimeout(timer);
+        }
+        pendingLiveAttachmentDetachTimers.clear();
         await io.close();
     });
 }

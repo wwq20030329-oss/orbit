@@ -41,6 +41,8 @@ interface MultiTextInputProps {
     paddingLeft?: number;
     paddingRight?: number;
     onKeyPress?: OnKeyPressCallback;
+    onFocus?: () => void;
+    onBlur?: () => void;
     onSelectionChange?: (selection: { start: number; end: number }) => void;
     onStateChange?: (state: TextInputState) => void;
 }
@@ -54,6 +56,8 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
         maxHeight = 120,
         lineHeight = MULTI_TEXT_INPUT_LINE_HEIGHT,
         onKeyPress,
+        onFocus,
+        onBlur,
         onSelectionChange,
         onStateChange
     } = props;
@@ -135,12 +139,22 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
     }, [editable, onKeyPress]);
 
     const handleTextChange = React.useCallback((text: string) => {
-        // When text changes, assume cursor moves to end
-        const selection = { start: text.length, end: text.length };
+        // Trust the native selection tracked via `onSelectionChange`
+        // rather than forcing the cursor to the end of the new text.
+        // The old behaviour hard-reset `selection = { start: text.length,
+        // end: text.length }` on every keystroke, which made editing in
+        // the middle of an already-typed message silently jump the caret
+        // to the end and broke autocomplete word detection for mid-text
+        // edits. Clamp to the new text length so we never report a range
+        // past the buffer (can happen during backspace across selection).
+        const prev = selectionRef.current;
+        const clampedStart = Math.min(prev.start, text.length);
+        const clampedEnd = Math.min(Math.max(prev.end, clampedStart), text.length);
+        const selection = { start: clampedStart, end: clampedEnd };
         selectionRef.current = selection;
 
         onChangeText(text);
-        
+
         if (onStateChange) {
             onStateChange({ text, selection });
         }
@@ -211,6 +225,8 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
                     editable={editable}
                     onChangeText={handleTextChange}
                     onKeyPress={handleKeyPress}
+                    onFocus={onFocus}
+                    onBlur={onBlur}
                     onSelectionChange={handleSelectionChange}
                     multiline={true}
                     autoCapitalize="sentences"

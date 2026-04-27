@@ -6,6 +6,13 @@ generator client {
     previewFeatures = ["metrics", "relationJoins", "driverAdapters"]
 }
 
+generator client_pglite {
+    provider        = "prisma-client-js"
+    previewFeatures = ["metrics", "relationJoins", "driverAdapters"]
+    engineType      = "client"
+    output          = "../../../node_modules/.prisma/client-pglite"
+}
+
 generator json {
     provider = "prisma-json-types-generator"
 }

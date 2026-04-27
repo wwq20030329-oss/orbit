@@ -61,6 +61,10 @@ declare global {
                 value: string | null;
                 version: number;
             } | null | undefined;
+            firstName?: string | null | undefined;
+            lastName?: string | null | undefined;
+            username?: string | null | undefined;
+            avatar?: ImageRefType | null | undefined;
             github?: GitHubProfileType | null | undefined;
         } | {
             t: 'new-machine';

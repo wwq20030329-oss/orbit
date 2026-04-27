@@ -1,4 +1,3 @@
-import { Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
@@ -9,31 +8,16 @@ import { t } from '@/text';
 
 export default function FeaturesSettingsScreen() {
     const [experiments, setExperiments] = useSettingMutable('experiments');
-    const [agentInputEnterToSend, setAgentInputEnterToSend] = useSettingMutable('agentInputEnterToSend');
-    const [commandPaletteEnabled, setCommandPaletteEnabled] = useLocalSettingMutable('commandPaletteEnabled');
     const [markdownCopyV2, setMarkdownCopyV2] = useLocalSettingMutable('markdownCopyV2');
     const [hideInactiveSessions, setHideInactiveSessions] = useSettingMutable('hideInactiveSessions');
     const [expResumeSession, setExpResumeSession] = useSettingMutable('expResumeSession');
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
-            {/* Experimental Features */}
-            <ItemGroup 
-                title={t('settingsFeatures.experiments')}
-                footer={t('settingsFeatures.experimentsDescription')}
+            <ItemGroup
+                title={t('settingsFeatures.appExperience')}
+                footer={t('settingsFeatures.appExperienceDescription')}
             >
-                <Item
-                    title={t('settingsFeatures.experimentalFeatures')}
-                    subtitle={experiments ? t('settingsFeatures.experimentalFeaturesEnabled') : t('settingsFeatures.experimentalFeaturesDisabled')}
-                    icon={<Ionicons name="flask-outline" size={29} color="#5856D6" />}
-                    rightElement={
-                        <Switch
-                            value={experiments}
-                            onValueChange={setExperiments}
-                        />
-                    }
-                    showChevron={false}
-                />
                 <Item
                     title={t('settingsFeatures.markdownCopyV2')}
                     subtitle={t('settingsFeatures.markdownCopyV2Subtitle')}
@@ -58,9 +42,27 @@ export default function FeaturesSettingsScreen() {
                     }
                     showChevron={false}
                 />
+            </ItemGroup>
+
+            <ItemGroup
+                title={t('settingsFeatures.experiments')}
+                footer={t('settingsFeatures.experimentsDescription')}
+            >
                 <Item
-                    title="Resume Session"
-                    subtitle="Allow resuming disconnected sessions via the machine daemon"
+                    title={t('settingsFeatures.experimentalFeatures')}
+                    subtitle={experiments ? t('settingsFeatures.experimentalFeaturesEnabled') : t('settingsFeatures.experimentalFeaturesDisabled')}
+                    icon={<Ionicons name="flask-outline" size={29} color="#5856D6" />}
+                    rightElement={
+                        <Switch
+                            value={experiments}
+                            onValueChange={setExperiments}
+                        />
+                    }
+                    showChevron={false}
+                />
+                <Item
+                    title={t('settingsFeatures.sessionReconnect')}
+                    subtitle={t('settingsFeatures.sessionReconnectSubtitle')}
                     icon={<Ionicons name="play-circle-outline" size={29} color="#30D158" />}
                     rightElement={
                         <Switch
@@ -72,38 +74,6 @@ export default function FeaturesSettingsScreen() {
                 />
             </ItemGroup>
 
-            {/* Web-only Features */}
-            {Platform.OS === 'web' && (
-                <ItemGroup 
-                    title={t('settingsFeatures.webFeatures')}
-                    footer={t('settingsFeatures.webFeaturesDescription')}
-                >
-                    <Item
-                        title={t('settingsFeatures.enterToSend')}
-                        subtitle={agentInputEnterToSend ? t('settingsFeatures.enterToSendEnabled') : t('settingsFeatures.enterToSendDisabled')}
-                        icon={<Ionicons name="return-down-forward-outline" size={29} color="#007AFF" />}
-                        rightElement={
-                            <Switch
-                                value={agentInputEnterToSend}
-                                onValueChange={setAgentInputEnterToSend}
-                            />
-                        }
-                        showChevron={false}
-                    />
-                    <Item
-                        title={t('settingsFeatures.commandPalette')}
-                        subtitle={commandPaletteEnabled ? t('settingsFeatures.commandPaletteEnabled') : t('settingsFeatures.commandPaletteDisabled')}
-                        icon={<Ionicons name="keypad-outline" size={29} color="#007AFF" />}
-                        rightElement={
-                            <Switch
-                                value={commandPaletteEnabled}
-                                onValueChange={setCommandPaletteEnabled}
-                            />
-                        }
-                        showChevron={false}
-                    />
-                </ItemGroup>
-            )}
         </ItemList>
     );
 }

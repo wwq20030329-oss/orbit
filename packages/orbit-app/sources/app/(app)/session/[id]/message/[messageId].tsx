@@ -2,7 +2,6 @@ import * as React from 'react';
 import { useLocalSearchParams, Stack, useRouter } from "expo-router";
 import { Text, View, ActivityIndicator } from "react-native";
 import { useMessage, useSession, useSessionMessages } from "@/sync/storage";
-import { sync } from '@/sync/sync';
 import { Deferred } from "@/components/Deferred";
 import { ToolFullView } from '@/components/tools/ToolFullView';
 import { ToolHeader } from '@/components/tools/ToolHeader';
@@ -10,6 +9,7 @@ import { ToolStatusIndicator } from '@/components/tools/ToolStatusIndicator';
 import { Message } from '@/sync/typesMessage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
+import { OrbitSessionConnection } from '@/remote/OrbitSessionConnection';
 
 const stylesheet = StyleSheet.create((theme) => ({
     loadingContainer: {
@@ -37,16 +37,22 @@ export default React.memo(() => {
     const message = useMessage(sessionId!, messageId!);
     const { theme } = useUnistyles();
     const styles = stylesheet;
+    const sessionConnection = React.useMemo(
+        () => (sessionId ? new OrbitSessionConnection(sessionId) : null),
+        [sessionId],
+    );
     
     // Trigger session visibility when component mounts
     React.useEffect(() => {
-        if (sessionId) {
-            sync.onSessionVisible(sessionId);
-            return () => {
-                sync.onSessionHidden(sessionId);
-            };
+        if (!sessionConnection) {
+            return;
         }
-    }, [sessionId]);
+
+        sessionConnection.connect();
+        return () => {
+            sessionConnection.disconnect();
+        };
+    }, [sessionConnection]);
     
     // Navigate back if message doesn't exist after messages are loaded
     React.useEffect(() => {

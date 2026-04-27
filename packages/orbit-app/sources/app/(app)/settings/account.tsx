@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, Pressable, Platform } from 'react-native';
+import { View, Text, Pressable } from 'react-native';
 import { useAuth } from '@/auth/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
@@ -18,52 +18,51 @@ import { useUnistyles } from 'react-native-unistyles';
 import { Switch } from '@/components/Switch';
 import { useConnectAccount } from '@/hooks/useConnectAccount';
 import { getDisplayName } from '@/sync/profile';
-import { Image } from 'expo-image';
 import { useOrbitAction } from '@/hooks/useOrbitAction';
-import { disconnectGitHub } from '@/sync/apiGithub';
 import { disconnectService } from '@/sync/apiServices';
 import { fetchPushTokens, type PushToken } from '@/sync/apiPush';
 import {
     getCurrentExpoPushToken,
     getCurrentPushDeviceMetadata,
     getPushPermissionInfo,
+    type PushPermissionInfo,
     requestPushPermissionOrOpenSettings,
     removePushToken,
     syncCurrentPushToken,
-    type PushPermissionInfo,
 } from '@/sync/pushRegistration';
-import { deleteUserAccount } from '@/sync/apiFriends';
+import { getPushRegistrationFailureReason } from '@/sync/pushRegistrationErrors';
+import { deleteUserAccount } from '@/sync/apiAccount';
 
 function formatPushPermissionLabel(permission: PushPermissionInfo | null): string {
     if (!permission) {
-        return 'Loading';
+        return t('common.loading');
     }
     if (permission.status === 'unsupported') {
-        return 'Unavailable';
+        return t('settingsAccount.pushPermissionUnavailable');
     }
     if (permission.granted) {
-        return 'Allowed';
+        return t('settingsAccount.pushPermissionAllowed');
     }
     if (permission.status === 'denied') {
-        return 'Denied';
+        return t('settingsAccount.pushPermissionDenied');
     }
-    return 'Not requested';
+    return t('settingsAccount.pushPermissionNotRequested');
 }
 
 function formatPushPermissionSubtitle(permission: PushPermissionInfo | null): string {
     if (!permission) {
-        return 'Checking push notification permissions for this device.';
+        return t('settingsAccount.pushPermissionChecking');
     }
     if (permission.status === 'unsupported') {
-        return 'Push notification permissions are only managed on mobile devices.';
+        return t('settingsAccount.pushPermissionUnsupportedDescription');
     }
     if (permission.granted) {
-        return 'This device can receive push notifications.';
+        return t('settingsAccount.pushPermissionGrantedDescription');
     }
     if (permission.canAskAgain) {
-        return 'The system prompt can still be shown again from the app.';
+        return t('settingsAccount.pushPermissionCanAskAgainDescription');
     }
-    return 'iOS has stopped prompting. Open system settings to enable notifications again.';
+    return t('settingsAccount.pushPermissionOpenSettingsDescription');
 }
 
 function formatPushTokenFingerprint(token: string): string {
@@ -91,14 +90,25 @@ function buildPushTokenSubtitle(pushToken: PushToken, options: {
             lines.push(options.currentAppLabel);
         }
     } else {
-        lines.push('Other device or stale registration');
+        lines.push(t('settingsAccount.pushTokenOtherDevice'));
     }
 
-    lines.push(`Registered: ${formatPushTimestamp(pushToken.createdAt)}`);
-    lines.push(`Last seen: ${formatPushTimestamp(pushToken.updatedAt)}`);
-    lines.push(`Server ID: ${pushToken.id}`);
-    lines.push(`Token: ${formatPushTokenFingerprint(pushToken.token)}`);
+    lines.push(t('settingsAccount.pushTokenRegisteredAt', { time: formatPushTimestamp(pushToken.createdAt) }));
+    lines.push(t('settingsAccount.pushTokenLastSeen', { time: formatPushTimestamp(pushToken.updatedAt) }));
+    lines.push(t('settingsAccount.pushTokenServerId', { id: pushToken.id }));
+    lines.push(t('settingsAccount.pushTokenFingerprint', { token: formatPushTokenFingerprint(pushToken.token) }));
     return lines.join('\n');
+}
+
+function getPushRegistrationErrorMessage(error: unknown): string {
+    switch (getPushRegistrationFailureReason(error)) {
+        case 'missingPushCapability':
+            return t('settingsAccount.pushCapabilityMissingBody');
+        case 'missingProjectId':
+            return t('settingsAccount.pushProjectIdMissingBody');
+        default:
+            return t('settingsAccount.pushPermissionRequestFailed');
+    }
 }
 
 export default React.memo(() => {
@@ -124,8 +134,6 @@ export default React.memo(() => {
 
     // Profile display values
     const displayName = getDisplayName(profile);
-    const githubUsername = profile.github?.login;
-
     const loadPushSettings = useCallback(async (showError = false) => {
         if (!auth.credentials) {
             setPushTokens([]);
@@ -147,7 +155,7 @@ export default React.memo(() => {
         } catch (error) {
             console.error('Failed to load push notification settings:', error);
             if (showError) {
-                Modal.alert(t('common.error'), 'Failed to load push notification settings.');
+                Modal.alert(t('common.error'), t('settingsAccount.pushSettingsLoadFailed'));
             }
         } finally {
             setLoadingPushSettings(false);
@@ -163,18 +171,6 @@ export default React.memo(() => {
             void loadPushSettings();
         }, [loadPushSettings])
     );
-
-    // GitHub disconnection
-    const [disconnecting, handleDisconnectGitHub] = useOrbitAction(async () => {
-        const confirmed = await Modal.confirm(
-            t('modals.disconnectGithub'),
-            t('modals.disconnectGithubConfirm'),
-            { confirmText: t('modals.disconnect'), destructive: true }
-        );
-        if (confirmed) {
-            await disconnectGitHub(auth.credentials!);
-        }
-    });
 
     // Service disconnection
     const [disconnectingService, setDisconnectingService] = useState<string | null>(null);
@@ -253,21 +249,21 @@ export default React.memo(() => {
             if (result.granted) {
                 await syncCurrentPushToken(auth.credentials);
                 await loadPushSettings();
-                Modal.alert(t('common.success'), 'Push notifications are enabled for this device.');
+                Modal.alert(t('common.success'), t('settingsAccount.pushPermissionEnabledSuccess'));
                 return;
             }
 
             await loadPushSettings();
 
             if (result.openedSettings) {
-                Modal.alert('Open Settings', 'The system will not show the permission prompt again, so Orbit opened Settings instead.');
+                Modal.alert(t('common.openSettings'), t('settingsAccount.pushPermissionOpenedSettingsBody'));
                 return;
             }
 
-            Modal.alert(t('common.error'), 'Push notification permission was not granted.');
+            Modal.alert(t('common.error'), t('settingsAccount.pushPermissionNotGranted'));
         } catch (error) {
             console.error('Failed to request push permission:', error);
-            Modal.alert(t('common.error'), 'Failed to request push notification permission.');
+            Modal.alert(t('common.error'), getPushRegistrationErrorMessage(error));
         } finally {
             setRequestingPushPermission(false);
         }
@@ -285,14 +281,14 @@ export default React.memo(() => {
             await loadPushSettings();
 
             if (!result.permission.granted) {
-                Modal.alert(t('common.error'), 'Push notifications are not enabled for this device yet.');
+                Modal.alert(t('common.error'), t('settingsAccount.pushRefreshDisabled'));
                 return;
             }
 
-            Modal.alert(t('common.success'), 'This device push token was refreshed.');
+            Modal.alert(t('common.success'), t('settingsAccount.pushRefreshSuccess'));
         } catch (error) {
             console.error('Failed to refresh push token:', error);
-            Modal.alert(t('common.error'), 'Failed to refresh this device push token.');
+            Modal.alert(t('common.error'), getPushRegistrationErrorMessage(error));
         } finally {
             setRefreshingPushToken(false);
         }
@@ -304,8 +300,8 @@ export default React.memo(() => {
         }
 
         const confirmed = await Modal.confirm(
-            'Delete Push Token',
-            `Remove ${formatPushTokenFingerprint(pushToken.token)} from your account?`,
+            t('settingsAccount.pushDeleteTokenTitle'),
+            t('settingsAccount.pushDeleteTokenConfirm', { token: formatPushTokenFingerprint(pushToken.token) }),
             { confirmText: t('common.delete'), destructive: true }
         );
 
@@ -319,7 +315,7 @@ export default React.memo(() => {
             await loadPushSettings();
         } catch (error) {
             console.error('Failed to delete push token:', error);
-            Modal.alert(t('common.error'), 'Failed to delete push token.');
+            Modal.alert(t('common.error'), t('settingsAccount.pushDeleteTokenFailed'));
         } finally {
             setDeletingPushToken(null);
         }
@@ -347,7 +343,7 @@ export default React.memo(() => {
                         showChevron={false}
                         copy={!!sync.serverID}
                     />
-                    {Platform.OS !== 'web' && (
+                    {(
                         <Item
                             title={t('settingsAccount.linkNewDevice')}
                             subtitle={isConnecting ? t('common.scanning') : t('settingsAccount.linkNewDeviceSubtitle')}
@@ -360,35 +356,13 @@ export default React.memo(() => {
                 </ItemGroup>
 
                 {/* Profile Section */}
-                {(displayName || githubUsername || profile.avatar) && (
+                {(displayName || profile.avatar) && (
                     <ItemGroup title={t('settingsAccount.profile')}>
                         {displayName && (
                             <Item
                                 title={t('settingsAccount.name')}
                                 detail={displayName}
                                 showChevron={false}
-                            />
-                        )}
-                        {githubUsername && (
-                            <Item
-                                title={t('settingsAccount.github')}
-                                detail={`@${githubUsername}`}
-                                subtitle={t('settingsAccount.tapToDisconnect')}
-                                onPress={handleDisconnectGitHub}
-                                loading={disconnecting}
-                                showChevron={false}
-                                icon={profile.avatar?.url ? (
-                                    <Image
-                                        source={{ uri: profile.avatar.url }}
-                                        style={{ width: 29, height: 29, borderRadius: 14.5 }}
-                                        placeholder={{ thumbhash: profile.avatar.thumbhash }}
-                                        contentFit="cover"
-                                        transition={200}
-                                        cachePolicy="memory-disk"
-                                    />
-                                ) : (
-                                    <Ionicons name="logo-github" size={29} color={theme.colors.textSecondary} />
-                                )}
                             />
                         )}
                     </ItemGroup>
@@ -398,9 +372,8 @@ export default React.memo(() => {
                 {profile.connectedServices && profile.connectedServices.length > 0 && (() => {
                     // Map of service IDs to display names and icons
                     const knownServices = {
-                        anthropic: { name: 'Claude Code', icon: require('@/assets/images/icon-claude.png'), tintColor: null },
-                        gemini: { name: 'Google Gemini', icon: require('@/assets/images/icon-gemini.png'), tintColor: null },
-                        openai: { name: 'OpenAI Codex', icon: require('@/assets/images/icon-gpt.png'), tintColor: theme.colors.text }
+                        gemini: { name: 'Google Gemini', tintColor: null },
+                        openai: { name: 'OpenAI Codex', tintColor: theme.colors.text }
                     };
                     
                     // Filter to only known services
@@ -426,11 +399,10 @@ export default React.memo(() => {
                                         disabled={isDisconnecting}
                                         showChevron={false}
                                         icon={
-                                            <Image
-                                                source={serviceInfo.icon}
-                                                style={{ width: 29, height: 29 }}
-                                                tintColor={serviceInfo.tintColor}
-                                                contentFit="contain"
+                                            <Ionicons
+                                                name={service === 'gemini' ? 'sparkles-outline' : 'code-slash-outline'}
+                                                size={29}
+                                                color={serviceInfo.tintColor ?? theme.colors.textSecondary}
                                             />
                                         }
                                     />
@@ -520,11 +492,11 @@ export default React.memo(() => {
                 </ItemGroup>
 
                 <ItemGroup
-                    title="Push Notifications"
-                    footer="Shows every push token registered on your account. Tap an old token to delete it."
+                    title={t('settingsAccount.pushNotifications')}
+                    footer={t('settingsAccount.pushNotificationsFooter')}
                 >
                     <Item
-                        title="Permission"
+                        title={t('settingsAccount.pushPermissionTitle')}
                         detail={formatPushPermissionLabel(pushPermission)}
                         subtitle={formatPushPermissionSubtitle(pushPermission)}
                         icon={<Ionicons name="notifications-outline" size={29} color="#007AFF" />}
@@ -532,12 +504,12 @@ export default React.memo(() => {
                         showChevron={false}
                     />
                     <Item
-                        title="Request Permission Again"
+                        title={t('settingsAccount.pushRequestPermissionAgain')}
                         subtitle={pushPermission?.status === 'unsupported'
-                            ? 'Push notification permissions are only available on iPhone and Android.'
+                            ? t('settingsAccount.pushRequestPermissionUnsupportedSubtitle')
                             : pushPermission?.canAskAgain
-                            ? 'Shows the system prompt again if iOS still allows it.'
-                            : 'Opens system settings when iOS will not prompt again.'}
+                            ? t('settingsAccount.pushRequestPermissionCanAskAgainSubtitle')
+                            : t('settingsAccount.pushRequestPermissionOpenSettingsSubtitle')}
                         icon={<Ionicons name="shield-checkmark-outline" size={29} color="#34C759" />}
                         onPress={handlePushPermissionRequest}
                         loading={requestingPushPermission}
@@ -545,10 +517,10 @@ export default React.memo(() => {
                         showChevron={false}
                     />
                     <Item
-                        title="Re-register This Device"
+                        title={t('settingsAccount.pushReregisterDevice')}
                         subtitle={currentPushToken
-                            ? `Current token ${formatPushTokenFingerprint(currentPushToken)}`
-                            : 'Fetches the current Expo token and registers it again.'}
+                            ? t('settingsAccount.pushCurrentTokenSubtitle', { token: formatPushTokenFingerprint(currentPushToken) })
+                            : t('settingsAccount.pushReregisterSubtitle')}
                         icon={<Ionicons name="refresh-outline" size={29} color="#FF9500" />}
                         onPress={handleRefreshCurrentPushToken}
                         loading={refreshingPushToken}
@@ -558,13 +530,13 @@ export default React.memo(() => {
                 </ItemGroup>
 
                 <ItemGroup
-                    title={`Registered Tokens (${pushTokens.length})`}
-                    footer="Current-device metadata comes from this phone. Older tokens use their token fingerprint plus server timestamps."
+                    title={t('settingsAccount.pushRegisteredTokens', { count: pushTokens.length })}
+                    footer={t('settingsAccount.pushRegisteredTokensFooter')}
                 >
                     {pushTokens.length === 0 ? (
                         <Item
-                            title="No registered push tokens"
-                            subtitle="Once this device is registered, it will appear here."
+                            title={t('settingsAccount.pushNoRegisteredTokens')}
+                            subtitle={t('settingsAccount.pushNoRegisteredTokensSubtitle')}
                             showChevron={false}
                         />
                     ) : (
@@ -575,7 +547,7 @@ export default React.memo(() => {
                                     <Item
                                         key={pushToken.id}
                                         title={formatPushTokenFingerprint(pushToken.token)}
-                                        detail={isCurrentDevice ? 'This device' : undefined}
+                                        detail={isCurrentDevice ? t('settingsAccount.pushThisDevice') : undefined}
                                         subtitle={buildPushTokenSubtitle(pushToken, {
                                             isCurrentDevice,
                                             currentDeviceLabel: currentPushDevice.deviceLabel,

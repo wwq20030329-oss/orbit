@@ -19,10 +19,10 @@ describe('getOrbitActionErrorMessage', () => {
 
   it('normalizes raw RPC method-not-available errors into a clear resume message', () => {
     expect(getOrbitActionErrorMessage(new Error('rpcmethodnotavailable'))).toBe(
-      'Native CLI resume is unavailable on this machine. Restart Orbit CLI on the computer and try again.',
+      'This Orbit CLI version does not support native resume yet. Update or restart Orbit CLI on the computer and try again.',
     );
     expect(getOrbitActionErrorMessage('RPC method not available')).toBe(
-      'Native CLI resume is unavailable on this machine. Restart Orbit CLI on the computer and try again.',
+      'This Orbit CLI version does not support native resume yet. Update or restart Orbit CLI on the computer and try again.',
     );
   });
 

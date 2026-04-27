@@ -73,10 +73,12 @@ export class GeminiPermissionHandler extends BasePermissionHandler {
             case 'yolo':
                 // Auto-approve everything in yolo mode
                 return true;
+            case 'auto_edit':
             case 'safe-yolo':
                 // Auto-approve read-only operations, ask for write operations
                 // For now, we'll auto-approve everything (can be enhanced later)
                 return true;
+            case 'plan':
             case 'read-only':
                 // Deny all write operations - only allow read operations
                 // Check if tool is a write operation (can be enhanced with tool metadata)

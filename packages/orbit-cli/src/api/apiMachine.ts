@@ -14,6 +14,14 @@ import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { detectCLIAvailability, CLIAvailability } from '@/utils/detectCLI';
 import { detectResumeSupport, type ResumeSupport } from '@/resume/localOrbitAgentAuth';
 import type { NativeCliHistoryEntry, NativeCliTool } from '@/history/nativeCliHistory';
+import type {
+    LiveMirrorControl,
+    LiveMirrorDetach,
+    LiveMirrorFrame,
+    LiveMirrorInput,
+    LiveMirrorResize,
+    LiveMirrorRuntimeDescriptor,
+} from '@orbit/wire';
 
 interface ServerToDaemonEvents {
     update: (data: Update) => void;
@@ -21,6 +29,9 @@ interface ServerToDaemonEvents {
     'rpc-registered': (data: { method: string }) => void;
     'rpc-unregistered': (data: { method: string }) => void;
     'rpc-error': (data: { type: string, error: string }) => void;
+    'live-input': (payload: LiveMirrorInput) => void;
+    'live-resize': (payload: LiveMirrorResize) => void;
+    'live-control': (payload: LiveMirrorControl) => void;
     auth: (data: { success: boolean, user: string }) => void;
     error: (data: { message: string }) => void;
 }
@@ -70,21 +81,37 @@ interface DaemonToServerEvents {
         result?: any
         error?: string
     }) => void) => void;
+    'live-runtime-register': (payload: LiveMirrorRuntimeDescriptor) => void;
+    'live-runtime-update': (payload: LiveMirrorRuntimeDescriptor) => void;
+    'live-frame': (payload: LiveMirrorFrame) => void;
+    'live-runtime-detach': (payload: LiveMirrorDetach) => void;
 }
 
 type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     resumeSession?: (sessionId: string) => Promise<SpawnSessionResult>;
     listNativeCliHistory: (limit?: number) => Promise<NativeCliHistoryEntry[]>;
+    deleteNativeCliHistoryEntry: (params: {
+        tool: NativeCliTool;
+        backendId: string;
+        workingDirectory?: string;
+    }) => Promise<{ deletedCount: number; deletedPaths: string[] }>;
     resumeNativeCliHistorySession: (params: {
         tool: NativeCliTool;
         backendId: string;
         workingDirectory: string;
         title: string;
         summary?: string | null;
+        updatedAt?: number | null;
     }) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
     requestShutdown: () => void;
+}
+
+type LiveMirrorHandlers = {
+    onInput?: (payload: LiveMirrorInput) => void | Promise<void>;
+    onResize?: (payload: LiveMirrorResize) => void | Promise<void>;
+    onControl?: (payload: LiveMirrorControl) => void | Promise<void>;
 }
 
 function isNativeCliTool(value: unknown): value is NativeCliTool {
@@ -98,6 +125,9 @@ export class ApiMachineClient {
     private lastKnownResumeSupport: ResumeSupport | null = null;
     private rpcHandlerManager: RpcHandlerManager;
     private resumeSessionHandler: ((sessionId: string) => Promise<SpawnSessionResult>) | null = null;
+    private liveInputHandler: LiveMirrorHandlers['onInput'] | null = null;
+    private liveResizeHandler: LiveMirrorHandlers['onResize'] | null = null;
+    private liveControlHandler: LiveMirrorHandlers['onControl'] | null = null;
 
     constructor(
         private token: string,
@@ -114,10 +144,21 @@ export class ApiMachineClient {
         registerCommonHandlers(this.rpcHandlerManager, process.cwd());
     }
 
+    setLiveMirrorHandlers({
+        onInput,
+        onResize,
+        onControl,
+    }: LiveMirrorHandlers): void {
+        this.liveInputHandler = onInput ?? null;
+        this.liveResizeHandler = onResize ?? null;
+        this.liveControlHandler = onControl ?? null;
+    }
+
     setRPCHandlers({
         spawnSession,
         resumeSession,
         listNativeCliHistory,
+        deleteNativeCliHistoryEntry,
         resumeNativeCliHistorySession,
         stopSession,
         requestShutdown
@@ -156,8 +197,21 @@ export class ApiMachineClient {
             return await listNativeCliHistory(limit);
         });
 
+        this.rpcHandlerManager.registerHandler('delete-native-cli-history', async (params: any) => {
+            const { tool, backendId, workingDirectory } = params || {};
+            if (!isNativeCliTool(tool) || typeof backendId !== 'string') {
+                throw new Error('tool and backendId are required');
+            }
+
+            return await deleteNativeCliHistoryEntry({
+                tool,
+                backendId,
+                workingDirectory: typeof workingDirectory === 'string' ? workingDirectory : undefined,
+            });
+        });
+
         this.rpcHandlerManager.registerHandler('resume-native-cli-session', async (params: any) => {
-            const { tool, backendId, workingDirectory, title, summary } = params || {};
+            const { tool, backendId, workingDirectory, title, summary, updatedAt } = params || {};
             if (!isNativeCliTool(tool) || typeof backendId !== 'string' || typeof workingDirectory !== 'string' || typeof title !== 'string') {
                 throw new Error('tool, backendId, workingDirectory, and title are required');
             }
@@ -168,6 +222,7 @@ export class ApiMachineClient {
                 workingDirectory,
                 title,
                 summary: typeof summary === 'string' ? summary : null,
+                updatedAt: typeof updatedAt === 'number' ? updatedAt : null,
             });
 
             switch (result.type) {
@@ -379,6 +434,27 @@ export class ApiMachineClient {
             }
         });
 
+        this.socket.on('live-input', (payload: LiveMirrorInput) => {
+            logger.debugLargeJson('[API MACHINE] Received live input', payload);
+            void Promise.resolve(this.liveInputHandler?.(payload)).catch((error) => {
+                logger.debug('[API MACHINE] Live input handler failed:', error);
+            });
+        });
+
+        this.socket.on('live-resize', (payload: LiveMirrorResize) => {
+            logger.debugLargeJson('[API MACHINE] Received live resize', payload);
+            void Promise.resolve(this.liveResizeHandler?.(payload)).catch((error) => {
+                logger.debug('[API MACHINE] Live resize handler failed:', error);
+            });
+        });
+
+        this.socket.on('live-control', (payload: LiveMirrorControl) => {
+            logger.debugLargeJson('[API MACHINE] Received live control', payload);
+            void Promise.resolve(this.liveControlHandler?.(payload)).catch((error) => {
+                logger.debug('[API MACHINE] Live control handler failed:', error);
+            });
+        });
+
         this.socket.on('connect_error', (error) => {
             logger.debug(`[API MACHINE] Connection error: ${error.message}`);
         });
@@ -442,5 +518,24 @@ export class ApiMachineClient {
             this.socket.close();
             logger.debug('[API MACHINE] Socket closed');
         }
+    }
+
+    registerLiveRuntime(runtime: LiveMirrorRuntimeDescriptor): void {
+        logger.debugLargeJson('[API MACHINE] Registering live runtime', runtime);
+        this.socket.emit('live-runtime-register', runtime);
+    }
+
+    updateLiveRuntime(runtime: LiveMirrorRuntimeDescriptor): void {
+        logger.debugLargeJson('[API MACHINE] Updating live runtime', runtime);
+        this.socket.emit('live-runtime-update', runtime);
+    }
+
+    emitLiveFrame(frame: LiveMirrorFrame): void {
+        this.socket.emit('live-frame', frame);
+    }
+
+    detachLiveRuntime(event: LiveMirrorDetach): void {
+        logger.debugLargeJson('[API MACHINE] Detaching live runtime', event);
+        this.socket.emit('live-runtime-detach', event);
     }
 }

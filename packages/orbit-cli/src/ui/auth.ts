@@ -6,13 +6,28 @@ import axios from 'axios';
 import { displayQRCode } from "./qrcode";
 import { delay } from "@/utils/time";
 import { writeCredentialsLegacy, readCredentials, updateSettings, Credentials, writeCredentialsDataKey } from "@/persistence";
-import { generateWebAuthUrl } from "@/api/webAuth";
-import { openBrowser } from "@/utils/browser";
 import { AuthSelector, AuthMethod } from "./ink/AuthSelector";
 import { render } from 'ink';
 import React from 'react';
 import { randomUUID } from 'node:crypto';
 import { logger } from './logger';
+
+function resolveOrbitAppUrlScheme(): string {
+    const explicitScheme = process.env.ORBIT_APP_URL_SCHEME?.trim();
+    if (explicitScheme) {
+        return explicitScheme;
+    }
+
+    const appEnv = process.env.APP_ENV?.trim();
+    if (appEnv === 'development') {
+        return 'orbitdev';
+    }
+    if (appEnv === 'preview') {
+        return 'orbitpreview';
+    }
+
+    return 'orbit';
+}
 
 export async function doAuth(): Promise<Credentials | null> {
     console.clear();
@@ -50,11 +65,7 @@ export async function doAuth(): Promise<Credentials | null> {
     }
 
     // Handle authentication based on selected method
-    if (authMethod === 'mobile') {
-        return await doMobileAuth(keypair);
-    } else {
-        return await doWebAuth(keypair);
-    }
+    return await doMobileAuth(keypair);
 }
 
 /**
@@ -95,41 +106,11 @@ async function doMobileAuth(keypair: tweetnacl.BoxKeyPair): Promise<Credentials 
     console.log('\nMobile Authentication\n');
     console.log('Scan this QR code with your Orbit mobile app:\n');
 
-    const authUrl = 'orbit://terminal?' + encodeBase64Url(keypair.publicKey);
+    const authUrl = `${resolveOrbitAppUrlScheme()}://terminal?${encodeBase64Url(keypair.publicKey)}`;
     displayQRCode(authUrl);
 
     console.log('\nOr manually enter this URL:');
     console.log(authUrl);
-    console.log('');
-
-    return await waitForAuthentication(keypair);
-}
-
-/**
- * Handle web authentication flow
- */
-async function doWebAuth(keypair: tweetnacl.BoxKeyPair): Promise<Credentials | null> {
-    console.clear();
-    console.log('\nWeb Authentication\n');
-
-    const webUrl = generateWebAuthUrl(keypair.publicKey);
-    console.log('Opening your browser...');
-
-    const browserOpened = await openBrowser(webUrl);
-
-    if (browserOpened) {
-        console.log('✓ Browser opened\n');
-        console.log('Complete authentication in your browser window.');
-    } else {
-        console.log('Could not open browser automatically.');
-    }
-
-    // I changed this to always show the URL because we got a report from
-    // someone running orbit inside a devcontainer that they saw the
-    // "Complete authentication in your browser window." but nothing opened.
-    // https://github.com/wwq20030329-oss/orbit/issues/19
-    console.log('\nIf the browser did not open, please copy and paste this URL:');
-    console.log(webUrl);
     console.log('');
 
     return await waitForAuthentication(keypair);

@@ -344,6 +344,7 @@ const COMMANDS_SUPPORTING_TARGET = new Set([
     'select-window', 'split-window', 'select-pane', 'kill-pane',
     'select-layout', 'display-message', 'attach-session', 'detach-client',
     'new-session', 'kill-session', 'list-windows', 'list-panes'
+    , 'resize-pane'
 ]);
 
 // Control sequences that must be separate arguments with proper typing
@@ -612,6 +613,31 @@ export class TmuxUtilities {
         return '';
     }
 
+    async capturePaneText(
+        sessionIdentifier: string,
+        options: { scrollbackLines?: number } = {},
+    ): Promise<string> {
+        try {
+            const parsed = parseTmuxSessionIdentifier(sessionIdentifier);
+            const scrollbackLines = Math.max(0, options.scrollbackLines ?? 200);
+            const result = await this.executeTmuxCommand(
+                ['capture-pane', '-p', '-S', `-${scrollbackLines}`],
+                parsed.session,
+                parsed.window,
+                parsed.pane,
+            );
+
+            if (!result || result.returncode !== 0) {
+                return '';
+            }
+
+            return result.stdout.replace(/\r\n/g, '\n').trimEnd();
+        } catch (error) {
+            logger.debug('[TMUX] Failed to capture pane text:', error);
+            return '';
+        }
+    }
+
     /**
      * Check if user is actively typing
      */
@@ -683,6 +709,65 @@ export class TmuxUtilities {
         }
 
         return true;
+    }
+
+    async sendInput(
+        sessionIdentifier: string,
+        input: string,
+    ): Promise<boolean> {
+        try {
+            const parsed = parseTmuxSessionIdentifier(sessionIdentifier);
+            const pieces = input.match(/\u0003|\r?\n|[^\r\n\u0003]+/g) ?? [];
+
+            for (const piece of pieces) {
+                if (piece === '\u0003') {
+                    const success = await this.sendKeys('C-c', parsed.session, parsed.window, parsed.pane);
+                    if (!success) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                if (piece === '\n' || piece === '\r\n') {
+                    const success = await this.sendKeys('C-m', parsed.session, parsed.window, parsed.pane);
+                    if (!success) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                const success = await this.sendKeys(piece, parsed.session, parsed.window, parsed.pane);
+                if (!success) {
+                    return false;
+                }
+            }
+
+            return true;
+        } catch (error) {
+            logger.debug('[TMUX] Failed to send input to pane:', error);
+            return false;
+        }
+    }
+
+    async resizePane(
+        sessionIdentifier: string,
+        cols: number,
+        rows: number,
+    ): Promise<boolean> {
+        try {
+            const parsed = parseTmuxSessionIdentifier(sessionIdentifier);
+            const result = await this.executeTmuxCommand(
+                ['resize-pane', '-x', String(cols), '-y', String(rows)],
+                parsed.session,
+                parsed.window,
+                parsed.pane,
+            );
+
+            return result !== null && result.returncode === 0;
+        } catch (error) {
+            logger.debug('[TMUX] Failed to resize pane:', error);
+            return false;
+        }
     }
 
     /**

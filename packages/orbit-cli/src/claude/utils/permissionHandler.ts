@@ -20,7 +20,7 @@ interface PermissionResponse {
     id: string;
     approved: boolean;
     reason?: string;
-    mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+    mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'auto' | 'dontAsk';
     allowTools?: string[];
     receivedAt?: number;
 }
@@ -91,7 +91,7 @@ export class PermissionHandler {
             if (response.approved) {
                 logger.debug('Plan approved - injecting PLAN_FAKE_RESTART');
                 // Inject the approval message at the beginning of the queue
-                if (response.mode && ['default', 'acceptEdits', 'bypassPermissions'].includes(response.mode)) {
+                if (response.mode && ['default', 'acceptEdits', 'bypassPermissions', 'auto'].includes(response.mode)) {
                     this.session.queue.unshift(PLAN_FAKE_RESTART, { permissionMode: response.mode });
                 } else {
                     this.session.queue.unshift(PLAN_FAKE_RESTART, { permissionMode: 'default' });
@@ -156,12 +156,19 @@ export class PermissionHandler {
         // Handle special cases
         //
 
-        if (this.permissionMode === 'bypassPermissions') {
+        if (this.permissionMode === 'bypassPermissions' || this.permissionMode === 'auto') {
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
         }
 
         if (this.permissionMode === 'acceptEdits' && descriptor.edit) {
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
+        }
+
+        if (this.permissionMode === 'dontAsk') {
+            return {
+                behavior: 'deny',
+                message: 'Permission mode is set to dontAsk. Wait for the user to explicitly approve or change the mode.',
+            };
         }
 
         //

@@ -14,7 +14,6 @@ import {
     EffortLevel,
 } from '@/components/modelModeOptions';
 import { getSuggestions } from '@/components/autocomplete/suggestions';
-import { resolveSendTargetSessionId } from './resolveSendTargetSession';
 import { replaceToSession } from '@/hooks/useNavigateToSession';
 import { ChatHeaderView } from '@/components/ChatHeaderView';
 import { ChatList } from '@/components/ChatList';
@@ -23,14 +22,12 @@ import { EmptyMessages } from '@/components/EmptyMessages';
 import { SessionActionsAnchor, SessionActionsPopover } from '@/components/SessionActionsPopover';
 import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
+import { useOrbitRemoteSessionManager } from '@/hooks/useOrbitRemoteSessionManager';
 import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { getCurrentVoiceConversationId, getCurrentVoiceSessionDurationSeconds, startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
-import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useNativeCliHistoryByMachine, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
-import { useSession } from '@/sync/storage';
+import { storage, useIsDataReady, useNativeCliHistoryByMachine, useRealtimeStatus, useRemoteSessionView, useSessionUsage } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
-import { sync } from '@/sync/sync';
 import { t } from '@/text';
 import { tracking } from '@/track';
 import { getVoiceMessageCount, getVoiceOnboardingPromptLoadCount } from '@/sync/persistence';
@@ -43,11 +40,13 @@ import { isRunningOnMac } from '@/utils/platform';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/responsive';
 import { findMatchingNativeCliEntryForSession, getSessionDisplayTitle } from '@/utils/nativeCliHistory';
 import { formatPathRelativeToHome, getResumeCommandBlock, getSessionAvatarId, getSessionName } from '@/utils/sessionUtils';
-import { getSessionControlState, useSessionControlState } from '@/utils/sessionControlState';
+import { shouldAutoResumeSession } from '@/utils/sessionAutoResume';
+import { getSessionControlState } from '@/utils/sessionControlState';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { DrawerActions, useNavigation } from '@react-navigation/native';
 import * as React from 'react';
 import { useMemo } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
@@ -55,13 +54,17 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 import { useShallow } from 'zustand/react/shallow';
-import { findFallbackSessionMessages } from '@/utils/sessionMessageFallback';
 
-export const SessionView = React.memo((props: { id: string; nativeConnectionPending?: boolean }) => {
+export const SessionView = React.memo((props: { id: string; nativeConnectionPending?: boolean; headerVariant?: 'default' | 'home' }) => {
     const sessionId = props.id;
     const nativeConnectionPending = props.nativeConnectionPending ?? false;
+    const headerVariant = props.headerVariant ?? 'default';
     const router = useRouter();
-    const session = useSession(sessionId);
+    const navigation = useNavigation();
+    const remoteSessionView = useRemoteSessionView(sessionId, {
+        nativeConnectionPending,
+    });
+    const session = remoteSessionView.session;
     const isDataReady = useIsDataReady();
     const { theme } = useUnistyles();
     const safeArea = useSafeAreaInsets();
@@ -73,11 +76,25 @@ export const SessionView = React.memo((props: { id: string; nativeConnectionPend
     const isTablet = useIsTablet();
     const sessionControlState = React.useMemo(
         () => session
-            ? getSessionControlState(session, { sessionId })
+            ? (remoteSessionView.sessionControlState ?? getSessionControlState(session, { sessionId }))
             : null,
-        [session, sessionId],
+        [remoteSessionView.sessionControlState, session, sessionId],
     );
     const [sessionActionsAnchor, setSessionActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
+
+    const handlePrimaryBackAction = React.useCallback(() => {
+        if (headerVariant === 'home') {
+            navigation.dispatch(DrawerActions.openDrawer());
+            return;
+        }
+
+        if (navigation.canGoBack()) {
+            router.back();
+            return;
+        }
+
+        navigation.dispatch(DrawerActions.openDrawer());
+    }, [headerVariant, navigation, router]);
 
     React.useEffect(() => {
         if (!session) {
@@ -124,9 +141,11 @@ export const SessionView = React.memo((props: { id: string; nativeConnectionPend
         const displayPath = session.metadata?.path ?? matchingNativeCliEntry?.workingDirectory;
             return {
                 title: getSessionDisplayTitle(session, nativeCliHistoryByMachine) || getSessionName(session),
-                subtitle: displayPath ? formatPathRelativeToHome(displayPath, session.metadata?.homeDir) : undefined,
-                avatarId: getSessionAvatarId(session),
-                onAvatarPress: () => router.push(`/session/${sessionId}/info`),
+                subtitle: headerVariant === 'home'
+                    ? undefined
+                    : displayPath ? formatPathRelativeToHome(displayPath, session.metadata?.homeDir) : undefined,
+                avatarId: headerVariant === 'home' ? undefined : getSessionAvatarId(session),
+                onAvatarPress: headerVariant === 'home' ? undefined : () => router.push(`/session/${sessionId}/info`),
                 isConnected: nativeConnectionPending ? false : (sessionControlState?.isConnected ?? false),
                 flavor: session.metadata?.flavor || null,
                 tintColor: nativeConnectionPending
@@ -135,7 +154,7 @@ export const SessionView = React.memo((props: { id: string; nativeConnectionPend
                         ? '#000'
                         : '#8E8E93'
             };
-    }, [session, isDataReady, sessionId, router, matchingNativeCliEntry, nativeCliHistoryByMachine, nativeConnectionPending, sessionControlState]);
+    }, [session, isDataReady, sessionId, router, matchingNativeCliEntry, nativeCliHistoryByMachine, nativeConnectionPending, sessionControlState, headerVariant]);
 
     return (
         <>
@@ -161,7 +180,7 @@ export const SessionView = React.memo((props: { id: string; nativeConnectionPend
             )}
 
             {/* Header - always shown on desktop/Mac, hidden in landscape mode only on actual phones */}
-            {!(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') && (
+            {!(isLandscape && deviceType === 'phone' && true) && (
                 <View style={{
                     position: 'absolute',
                     top: 0,
@@ -171,8 +190,18 @@ export const SessionView = React.memo((props: { id: string; nativeConnectionPend
                 }}>
                     <ChatHeaderView
                         {...headerProps}
-                        onBackPress={() => router.back()}
-                        avatarMenuExpanded={Platform.OS === 'web' && !!sessionActionsAnchor}
+                        onBackPress={handlePrimaryBackAction}
+                        leadingIcon={headerVariant === 'home' ? 'menu' : 'back'}
+                        rightAccessory={headerVariant === 'home' ? (
+                            <Pressable
+                                hitSlop={15}
+                                style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}
+                                onPress={() => router.navigate('/new')}
+                            >
+                                <Ionicons name="add-outline" size={24} color={theme.colors.header.tint} />
+                            </Pressable>
+                        ) : undefined}
+                        avatarMenuExpanded={false}
                         avatarMenuSession={session}
                         onAfterAvatarArchive={() => {
                             setSessionActionsAnchor(null);
@@ -182,17 +211,20 @@ export const SessionView = React.memo((props: { id: string; nativeConnectionPend
                             setSessionActionsAnchor(null);
                             router.replace('/');
                         }}
-                        onAvatarMenuRequest={Platform.OS === 'web' && session ? setSessionActionsAnchor : undefined}
+                        onAvatarMenuRequest={undefined}
                     />
                     {/* Voice status bar below header - not on tablet (shown in sidebar) */}
                     {!isTablet && realtimeStatus !== 'disconnected' && (
-                        <VoiceAssistantStatusBar variant="full" />
+                        <VoiceAssistantStatusBar
+                            variant="full"
+                            realtimeStatusOverride={realtimeStatus}
+                        />
                     )}
                 </View>
             )}
 
             {/* Content based on state */}
-            <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 32 : 0) : 0 }}>
+            <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && true) ? safeArea.top + headerHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 32 : 0) : 0 }}>
                 {!isDataReady ? (
                     // Loading state
                     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
@@ -208,13 +240,16 @@ export const SessionView = React.memo((props: { id: string; nativeConnectionPend
                     // Normal session view
                     <SessionViewLoaded
                         key={sessionId}
+                        onBackPress={handlePrimaryBackAction}
                         nativeConnectionPending={nativeConnectionPending}
+                        remoteSessionView={remoteSessionView}
+                        realtimeStatus={realtimeStatus}
                         sessionId={sessionId}
                         session={session}
                     />
                 )}
             </View>
-            {Platform.OS === 'web' && session && (
+            {/* Web context-menu popover removed; native uses long-press menu */ false && session && (
                 <SessionActionsPopover
                     anchor={sessionActionsAnchor}
                     onAfterArchive={() => {
@@ -236,12 +271,18 @@ export const SessionView = React.memo((props: { id: string; nativeConnectionPend
 
 
 function SessionViewLoaded({
+    onBackPress,
+    remoteSessionView,
     sessionId,
     session,
+    realtimeStatus,
     nativeConnectionPending = false,
 }: {
+    onBackPress: () => void;
+    remoteSessionView: ReturnType<typeof useRemoteSessionView>;
     sessionId: string;
     session: Session;
+    realtimeStatus: ReturnType<typeof useRealtimeStatus>;
     nativeConnectionPending?: boolean;
 }) {
     const { theme } = useUnistyles();
@@ -251,19 +292,18 @@ function SessionViewLoaded({
     const deviceType = useDeviceType();
     const isTablet = useIsTablet();
     const [message, setMessage] = React.useState('');
-    const realtimeStatus = useRealtimeStatus();
-    const { messages, isLoaded } = useSessionMessages(sessionId);
-    const fallbackMessages = storage(useShallow((state) => (
-        findFallbackSessionMessages({
-            currentSession: session,
-            currentSessionId: sessionId,
-            sessions: state.sessions,
-            sessionMessages: state.sessionMessages,
-        })
-    )));
-    const displayMessages = messages.length > 0 ? messages : fallbackMessages;
-    const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
-    const sessionInputHorizontalPadding = Platform.OS === 'web' || isRunningOnMac() || isTablet ? 12 : 8;
+    const displayMessages = remoteSessionView.messages;
+    const isLoaded = remoteSessionView.isLoaded;
+    const sessionViewSettings = storage(useShallow((state) => ({
+        acknowledgedCliVersions: state.localSettings.acknowledgedCliVersions,
+        alwaysShowContextSize: state.settings.alwaysShowContextSize,
+        experiments: state.settings.experiments,
+        expResumeSession: state.settings.expResumeSession,
+        agentInputEnterToSend: state.settings.agentInputEnterToSend,
+        gitStatus: state.getSessionProjectGitStatus(sessionId) ?? state.sessionGitStatus[sessionId] ?? null,
+    })));
+    const acknowledgedCliVersions = sessionViewSettings.acknowledgedCliVersions;
+    const sessionInputHorizontalPadding = false || isRunningOnMac() || isTablet ? 12 : 8;
 
     // Check if CLI version is outdated and not already acknowledged
     const cliVersion = session.metadata?.version;
@@ -307,15 +347,47 @@ function SessionViewLoaded({
         ])
     ), [availableEffortLevels, session.effortLevel, session.metadata?.currentThoughtLevelCode, flavor, selectedModelKey]);
 
-    const sessionControlState = useSessionControlState(session, { sessionId });
+    const sessionControlState = remoteSessionView.sessionControlState ?? getSessionControlState(session, { sessionId });
     const sessionStatus = sessionControlState.status;
     const sessionUsage = useSessionUsage(sessionId);
-    const alwaysShowContextSize = useSetting('alwaysShowContextSize');
-    const experiments = useSetting('experiments');
-    const expResumeSession = useSetting('expResumeSession');
-    const isDisconnected = nativeConnectionPending || sessionControlState.isDisconnected;
+    const alwaysShowContextSize = sessionViewSettings.alwaysShowContextSize;
+    const experiments = sessionViewSettings.experiments;
+    const expResumeSession = sessionViewSettings.expResumeSession;
+    const agentInputEnterToSend = sessionViewSettings.agentInputEnterToSend;
+    const gitStatus = sessionViewSettings.gitStatus;
+    const remoteSessionManager = useOrbitRemoteSessionManager(sessionId, {
+        onSessionRouted: (targetSessionId) => {
+            replaceToSession(router, targetSessionId);
+        },
+        onBackgroundError: (error) => {
+            console.warn('Failed to refresh session view remote session', error);
+        },
+    });
+    const isDisconnected = remoteSessionView.isDisconnected;
     const isInactiveArchivedSession = sessionControlState.isInactiveArchivedSession;
-    const inputConnectionStatus = nativeConnectionPending
+    const resumeCommandBlock = getResumeCommandBlock(session);
+    const {
+        canResume,
+        canShowResume,
+        resumeSession,
+        resumeSessionSubtitle,
+        resumingSession,
+    } = useSessionQuickActions(session);
+    const autoResumeAttemptRef = React.useRef<string | null>(null);
+    const autoResumeKey = React.useMemo(
+        () => `${session.id}:${session.seq}:${session.updatedAt}:${session.activeAt}`,
+        [session.activeAt, session.id, session.seq, session.updatedAt],
+    );
+    const shouldAutoResume = shouldAutoResumeSession({
+        isDisconnected,
+        canShowResume,
+        canResume,
+        resumingSession,
+        nativeConnectionPending,
+        isInactiveArchivedSession,
+    });
+    const connectionPending = nativeConnectionPending || resumingSession || shouldAutoResume;
+    const inputConnectionStatus = connectionPending
         ? {
             text: t('terminal.connecting'),
             color: theme.colors.textSecondary,
@@ -328,14 +400,22 @@ function SessionViewLoaded({
             dotColor: sessionStatus.statusDotColor,
             isPulsing: sessionStatus.isPulsing,
         };
-    const resumeCommandBlock = getResumeCommandBlock(session);
-    const {
-        canResume,
-        canShowResume,
-        resumeSession,
-        resumeSessionSubtitle,
-        resumingSession,
-    } = useSessionQuickActions(session);
+
+    React.useEffect(() => {
+        if (!shouldAutoResume) {
+            if (!isDisconnected || !canShowResume) {
+                autoResumeAttemptRef.current = null;
+            }
+            return;
+        }
+
+        if (autoResumeAttemptRef.current === autoResumeKey) {
+            return;
+        }
+
+        autoResumeAttemptRef.current = autoResumeKey;
+        resumeSession();
+    }, [autoResumeKey, canShowResume, isDisconnected, resumeSession, shouldAutoResume]);
 
     // Use draft hook for auto-saving message drafts
     const { clearDraft } = useDraft(sessionId, message, setMessage);
@@ -374,7 +454,6 @@ function SessionViewLoaded({
             marginTop: 0 // No marginTop needed since header is handled by parent
         },
     }), []);
-
 
     // Handle microphone button press - memoized to prevent button flashing
     const handleMicrophonePress = React.useCallback(async () => {
@@ -427,13 +506,11 @@ function SessionViewLoaded({
 
     // Trigger session visibility for message sync and any session-scoped background work.
     React.useEffect(() => {
-
-        // Trigger session sync
-        sync.onSessionVisible(sessionId);
+        remoteSessionManager.connect();
         return () => {
-            sync.onSessionHidden(sessionId);
+            remoteSessionManager.disconnect();
         };
-    }, [sessionId]);
+    }, [remoteSessionManager]);
 
     const content = (
         <>
@@ -451,7 +528,7 @@ function SessionViewLoaded({
             ) : (
                 <View style={{ alignItems: 'center', gap: 8 }}>
                     <ActivityIndicator size="small" color={theme.colors.textSecondary} />
-                    {nativeConnectionPending && (
+                    {connectionPending && (
                         <Text style={{ color: theme.colors.textSecondary, fontSize: 14 }}>
                             {t('terminal.connecting')}
                         </Text>
@@ -484,13 +561,12 @@ function SessionViewLoaded({
                 if (message.trim()) {
                     const outgoingMessage = message;
                     try {
-                        const targetSessionId = await resolveSendTargetSessionId(session);
                         setMessage('');
                         clearDraft();
-                        if (targetSessionId !== sessionId) {
-                            replaceToSession(router, targetSessionId);
-                        }
-                        sync.sendMessage(targetSessionId, outgoingMessage, { source: 'chat' });
+                        await remoteSessionManager.sendMessage(session, {
+                            content: outgoingMessage,
+                            source: 'chat',
+                        });
                     } catch (error) {
                         console.warn('Failed to resolve send target session', error);
                         Modal.alert(
@@ -502,8 +578,8 @@ function SessionViewLoaded({
             }}
             onMicPress={isDisconnected ? undefined : micButtonState.onMicPress}
             isMicActive={isDisconnected ? false : micButtonState.isMicActive}
-            onAbort={isDisconnected ? undefined : () => sessionAbort(sessionId)}
-            showAbortButton={!nativeConnectionPending && (sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting')}
+            onAbort={isDisconnected ? undefined : () => remoteSessionManager.cancelSession()}
+            showAbortButton={!connectionPending && (sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting')}
             onFileViewerPress={experiments ? () => router.push(`/session/${sessionId}/files`) : undefined}
             autocompletePrefixes={['@', '/']}
             autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
@@ -521,6 +597,8 @@ function SessionViewLoaded({
                 contextSize: session.latestUsage.contextSize
             } : undefined}
             alwaysShowContextSize={alwaysShowContextSize}
+            enterToSendEnabled={agentInputEnterToSend}
+            gitStatus={gitStatus}
         />
     );
 
@@ -539,7 +617,7 @@ function SessionViewLoaded({
         </>
     ) : (
         <>
-            {isDisconnected && canShowResume && !nativeConnectionPending && (
+            {isDisconnected && canShowResume && !connectionPending && (
                 <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
                     <ResumeSessionHint
                         canResume={canResume}
@@ -552,7 +630,7 @@ function SessionViewLoaded({
                     />
                 </CenteredInputWidth>
             )}
-            {!canShowResume && expResumeSession && isDisconnected && resumeCommandBlock && !nativeConnectionPending && (
+            {!canShowResume && expResumeSession && isDisconnected && resumeCommandBlock && !connectionPending && (
                 <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
                     <ResumeCommandHint resumeCommandBlock={resumeCommandBlock} />
                 </CenteredInputWidth>
@@ -599,7 +677,7 @@ function SessionViewLoaded({
             )}
 
             {/* Main content area - no padding since header is overlay */}
-            <View style={{ flexBasis: 0, flexGrow: 1, paddingBottom: safeArea.bottom + ((isRunningOnMac() || Platform.OS === 'web') ? 8 : 0) }}>
+            <View style={{ flexBasis: 0, flexGrow: 1, paddingBottom: safeArea.bottom + ((isRunningOnMac() || false) ? 8 : 0) }}>
                 <AgentContentView
                     content={content}
                     input={input}
@@ -611,7 +689,7 @@ function SessionViewLoaded({
             {
                 isLandscape && deviceType === 'phone' && (
                     <Pressable
-                        onPress={() => router.back()}
+                        onPress={onBackPress}
                         style={{
                             position: 'absolute',
                             top: safeArea.top + 8,

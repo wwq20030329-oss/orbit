@@ -1,5 +1,8 @@
-import { SettingsViewWrapper } from "@/components/SettingsViewWrapper";
+import * as React from 'react';
+import { SettingsView } from "@/components/SettingsView";
 
-export default function SettingsIndexScreen() {
-    return <SettingsViewWrapper variant="floating" />;
-}
+export const SettingsIndexScreen = React.memo(function SettingsIndexScreen() {
+    return <SettingsView />;
+});
+
+export default SettingsIndexScreen;

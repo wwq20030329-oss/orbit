@@ -119,8 +119,7 @@ export default function AppearanceSettingsScreen() {
                 />
             </ItemGroup> */}
 
-            {/* Display Settings */}
-            <ItemGroup title={t('settingsAppearance.display')} footer={t('settingsAppearance.displayDescription')}>
+            <ItemGroup title={t('settingsAppearance.conversation')} footer={t('settingsAppearance.conversationDescription')}>
                 <Item
                     title={t('settingsAppearance.compactSessionView')}
                     subtitle={t('settingsAppearance.compactSessionViewDescription')}
@@ -154,6 +153,32 @@ export default function AppearanceSettingsScreen() {
                         />
                     }
                 />
+                <Item
+                    title={t('settingsAppearance.avatarStyle')}
+                    subtitle={t('settingsAppearance.avatarStyleDescription')}
+                    icon={<Ionicons name="person-circle-outline" size={29} color="#5856D6" />}
+                    detail={displayStyle === 'pixelated' ? t('settingsAppearance.avatarOptions.pixelated') : displayStyle === 'brutalist' ? t('settingsAppearance.avatarOptions.brutalist') : t('settingsAppearance.avatarOptions.gradient')}
+                    onPress={() => {
+                        const currentIndex = displayStyle === 'pixelated' ? 0 : displayStyle === 'gradient' ? 1 : 2;
+                        const nextIndex = (currentIndex + 1) % 3;
+                        const nextStyle = nextIndex === 0 ? 'pixelated' : nextIndex === 1 ? 'gradient' : 'brutalist';
+                        setAvatarStyle(nextStyle);
+                    }}
+                />
+                <Item
+                    title={t('settingsAppearance.showFlavorIcons')}
+                    subtitle={t('settingsAppearance.showFlavorIconsDescription')}
+                    icon={<Ionicons name="apps-outline" size={29} color="#5856D6" />}
+                    rightElement={
+                        <Switch
+                            value={showFlavorIcons}
+                            onValueChange={setShowFlavorIcons}
+                        />
+                    }
+                />
+            </ItemGroup>
+
+            <ItemGroup title={t('settingsAppearance.codeViews')} footer={t('settingsAppearance.codeViewsDescription')}>
                 <Item
                     title={t('settingsAppearance.showLineNumbersInDiffs')}
                     subtitle={t('settingsAppearance.showLineNumbersInDiffsDescription')}
@@ -195,29 +220,6 @@ export default function AppearanceSettingsScreen() {
                         <Switch
                             value={alwaysShowContextSize}
                             onValueChange={setAlwaysShowContextSize}
-                        />
-                    }
-                />
-                <Item
-                    title={t('settingsAppearance.avatarStyle')}
-                    subtitle={t('settingsAppearance.avatarStyleDescription')}
-                    icon={<Ionicons name="person-circle-outline" size={29} color="#5856D6" />}
-                    detail={displayStyle === 'pixelated' ? t('settingsAppearance.avatarOptions.pixelated') : displayStyle === 'brutalist' ? t('settingsAppearance.avatarOptions.brutalist') : t('settingsAppearance.avatarOptions.gradient')}
-                    onPress={() => {
-                        const currentIndex = displayStyle === 'pixelated' ? 0 : displayStyle === 'gradient' ? 1 : 2;
-                        const nextIndex = (currentIndex + 1) % 3;
-                        const nextStyle = nextIndex === 0 ? 'pixelated' : nextIndex === 1 ? 'gradient' : 'brutalist';
-                        setAvatarStyle(nextStyle);
-                    }}
-                />
-                <Item
-                    title={t('settingsAppearance.showFlavorIcons')}
-                    subtitle={t('settingsAppearance.showFlavorIconsDescription')}
-                    icon={<Ionicons name="apps-outline" size={29} color="#5856D6" />}
-                    rightElement={
-                        <Switch
-                            value={showFlavorIcons}
-                            onValueChange={setShowFlavorIcons}
                         />
                     }
                 />

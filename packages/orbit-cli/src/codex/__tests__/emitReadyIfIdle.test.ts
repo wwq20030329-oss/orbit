@@ -60,4 +60,22 @@ describe('emitReadyIfIdle', () => {
         expect(emitted).toBe(false);
         expect(sendReady).not.toHaveBeenCalled();
     });
+
+    it('skips when the turn outcome should not emit ready', () => {
+        const sendReady = vi.fn();
+        const notify = vi.fn();
+
+        const emitted = emitReadyIfIdle({
+            pending: null,
+            queueSize: () => 0,
+            shouldExit: false,
+            sendReady,
+            allowReady: false,
+            notify,
+        });
+
+        expect(emitted).toBe(false);
+        expect(sendReady).not.toHaveBeenCalled();
+        expect(notify).not.toHaveBeenCalled();
+    });
 });

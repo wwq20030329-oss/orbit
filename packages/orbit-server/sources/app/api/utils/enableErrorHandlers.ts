@@ -2,6 +2,27 @@ import { log } from "@/utils/log";
 import { Fastify } from "../types";
 import { FastifyError } from "fastify";
 
+// Fields to scrub from header snapshots before logging. Keeping tokens out
+// of log sinks is critical — they would otherwise be persisted to disk via
+// DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING or shipped to aggregators.
+const SENSITIVE_HEADERS = new Set([
+    'authorization',
+    'cookie',
+    'set-cookie',
+    'proxy-authorization',
+    'x-api-key',
+    'x-auth-token',
+    'x-access-token',
+]);
+
+function redactHeaders(headers: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(headers ?? {})) {
+        out[key] = SENSITIVE_HEADERS.has(key.toLowerCase()) ? '[REDACTED]' : value;
+    }
+    return out;
+}
+
 export function enableErrorHandlers(app: Fastify) {
     // Global error handler
     app.setErrorHandler(async (error: FastifyError, request, reply) => {
@@ -43,9 +64,15 @@ export function enableErrorHandlers(app: Fastify) {
         }
     });
 
-    // Catch-all route for debugging 404s
+    // Catch-all route for debugging 404s. NEVER log the raw `request.headers`
+    // directly — they include Authorization bearer tokens.
     app.setNotFoundHandler((request, reply) => {
-        log({ module: '404-handler' }, `404 - Method: ${request.method}, Path: ${request.url}, Headers: ${JSON.stringify(request.headers)}`);
+        log({
+            module: '404-handler',
+            method: request.method,
+            path: request.url,
+            headers: redactHeaders(request.headers as Record<string, unknown>),
+        }, `404 - ${request.method} ${request.url}`);
         reply.code(404).send({ error: 'Not found', path: request.url, method: request.method });
     });
 

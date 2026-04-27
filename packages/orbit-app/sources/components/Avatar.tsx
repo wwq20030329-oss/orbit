@@ -4,8 +4,9 @@ import { Image } from "expo-image";
 import { AvatarSkia } from "./AvatarSkia";
 import { AvatarGradient } from "./AvatarGradient";
 import { AvatarBrutalist } from "./AvatarBrutalist";
-import { useSetting } from '@/sync/storage';
+import { storage } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { useShallow } from 'zustand/react/shallow';
 
 interface AvatarProps {
     id: string;
@@ -46,8 +47,12 @@ const styles = StyleSheet.create((theme) => ({
 
 export const Avatar = React.memo((props: AvatarProps) => {
     const { flavor, size = 48, imageUrl, thumbhash, ...avatarProps } = props;
-    const avatarStyle = useSetting('avatarStyle');
-    const showFlavorIcons = useSetting('showFlavorIcons');
+    const avatarSettings = storage(useShallow((state) => ({
+        avatarStyle: state.settings.avatarStyle,
+        showFlavorIcons: state.settings.showFlavorIcons,
+    })));
+    const avatarStyle = avatarSettings.avatarStyle;
+    const showFlavorIcons = avatarSettings.showFlavorIcons;
     const { theme } = useUnistyles();
 
     // Render custom image if provided

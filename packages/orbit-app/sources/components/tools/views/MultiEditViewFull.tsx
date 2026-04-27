@@ -7,16 +7,15 @@ import { toolFullViewStyles } from '../ToolFullView';
 import { DiffView } from '@/components/diff/DiffView';
 import { trimIdent } from '@/utils/trimIdent';
 import { t } from '@/text';
-import { useSetting } from '@/sync/storage';
 
 interface MultiEditViewFullProps {
     tool: ToolCall;
     metadata: Metadata | null;
+    wrapLinesInDiffs?: boolean;
 }
 
-export const MultiEditViewFull = React.memo<MultiEditViewFullProps>(({ tool, metadata }) => {
+export const MultiEditViewFull = React.memo<MultiEditViewFullProps>(({ tool, metadata, wrapLinesInDiffs = false }) => {
     const { input } = tool;
-    const wrapLinesInDiffs = useSetting('wrapLinesInDiffs');
 
     // Parse the input
     let edits: Array<{ old_string: string; new_string: string; replace_all?: boolean }> = [];

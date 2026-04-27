@@ -52,7 +52,7 @@ class Logger {
     public readonly logFilePath = getSessionLogPath()
   ) {
     // Remote logging enabled only when explicitly set with server URL
-    const remoteLoggingUrl = process.env.ORBIT_SERVER_URL || process.env.HAPPY_SERVER_URL
+    const remoteLoggingUrl = process.env.ORBIT_SERVER_URL
     if (process.env.DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING
       && remoteLoggingUrl) {
       this.dangerouslyUnencryptedServerLoggingUrl = remoteLoggingUrl

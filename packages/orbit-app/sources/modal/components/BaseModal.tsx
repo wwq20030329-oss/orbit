@@ -1,103 +1,102 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import {
-    View,
     Modal,
-    TouchableWithoutFeedback,
-    Animated,
+    Pressable,
     StyleSheet,
     KeyboardAvoidingView,
-    Platform
+    Platform,
+    View,
 } from 'react-native';
-
-// On web, stop events from propagating to expo-router's modal overlay
-// which intercepts clicks when it applies pointer-events: none to body
-const stopPropagation = (e: { stopPropagation: () => void }) => e.stopPropagation();
-const webEventHandlers = Platform.OS === 'web'
-    ? { onClick: stopPropagation, onPointerDown: stopPropagation, onTouchStart: stopPropagation }
-    : {};
+import Animated, {
+    runOnJS,
+    useAnimatedStyle,
+    useSharedValue,
+    withSpring,
+    withTiming,
+} from 'react-native-reanimated';
+import { BACKDROP_OPACITY, DURATION, EASING, SPRING } from '@/components/motion/tokens';
 
 interface BaseModalProps {
     visible: boolean;
     onClose?: () => void;
     children: React.ReactNode;
+    /**
+     * Kept for backwards compatibility — value is ignored. Animations are now
+     * driven by Reanimated for parity with the rest of the app.
+     */
     animationType?: 'fade' | 'slide' | 'none';
     transparent?: boolean;
     closeOnBackdrop?: boolean;
 }
 
+/**
+ * Centred dialog primitive. Uses spring-in / fade-out so it feels alive
+ * without losing the snappy "system dialog" character users expect from
+ * confirms, prompts and alerts.
+ *
+ * The component stays mounted for one extra frame after `visible=false`
+ * so the exit animation can play before unmount.
+ */
 export function BaseModal({
     visible,
     onClose,
     children,
-    animationType = 'fade',
     transparent = true,
-    closeOnBackdrop = true
+    closeOnBackdrop = true,
 }: BaseModalProps) {
-    const fadeAnim = useRef(new Animated.Value(0)).current;
+    const progress = useSharedValue(0);
+    const [mounted, setMounted] = React.useState(visible);
 
-    useEffect(() => {
+    React.useEffect(() => {
         if (visible) {
-            Animated.timing(fadeAnim, {
-                toValue: 1,
-                duration: 200,
-                useNativeDriver: true
-            }).start();
+            setMounted(true);
+            progress.value = withSpring(1, SPRING.standard);
         } else {
-            Animated.timing(fadeAnim, {
-                toValue: 0,
-                duration: 200,
-                useNativeDriver: true
-            }).start();
+            progress.value = withTiming(
+                0,
+                { duration: DURATION.short, easing: EASING.accelerate },
+                (finished) => {
+                    if (finished) {
+                        runOnJS(setMounted)(false);
+                    }
+                },
+            );
         }
-    }, [visible, fadeAnim]);
+    }, [progress, visible]);
 
-    const handleBackdropPress = () => {
-        if (closeOnBackdrop && onClose) {
-            onClose();
-        }
-    };
+    const backdropStyle = useAnimatedStyle(() => ({
+        opacity: progress.value * BACKDROP_OPACITY,
+    }));
+
+    const contentStyle = useAnimatedStyle(() => ({
+        opacity: progress.value,
+        transform: [{ scale: 0.92 + progress.value * 0.08 }],
+    }));
+
+    const handleBackdropPress = React.useCallback(() => {
+        if (closeOnBackdrop && onClose) onClose();
+    }, [closeOnBackdrop, onClose]);
+
+    if (!mounted) return null;
 
     return (
         <Modal
-            visible={visible}
+            visible
             transparent={transparent}
-            animationType={animationType}
+            animationType="none"
+            statusBarTranslucent
             onRequestClose={onClose}
         >
             <KeyboardAvoidingView
                 style={styles.container}
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-                {...webEventHandlers}
             >
-                <TouchableWithoutFeedback onPress={handleBackdropPress}>
-                    <Animated.View 
-                        style={[
-                            styles.backdrop,
-                            {
-                                opacity: fadeAnim.interpolate({
-                                    inputRange: [0, 1],
-                                    outputRange: [0, 0.5]
-                                })
-                            }
-                        ]}
-                    />
-                </TouchableWithoutFeedback>
-                
-                <Animated.View
-                    style={[
-                        styles.content,
-                        {
-                            opacity: fadeAnim,
-                            transform: [{
-                                scale: fadeAnim.interpolate({
-                                    inputRange: [0, 1],
-                                    outputRange: [0.9, 1]
-                                })
-                            }]
-                        }
-                    ]}
-                >
-                    {children}
+                <Animated.View style={[styles.backdrop, backdropStyle]} pointerEvents="auto">
+                    <Pressable style={StyleSheet.absoluteFillObject} onPress={handleBackdropPress} />
+                </Animated.View>
+
+                <Animated.View style={[styles.content, contentStyle]}>
+                    <View>{children}</View>
                 </Animated.View>
             </KeyboardAvoidingView>
         </Modal>
@@ -109,14 +108,12 @@ const styles = StyleSheet.create({
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
-        // On web, ensure modal can receive pointer events when body has pointer-events: none
-        ...Platform.select({ web: { pointerEvents: 'auto' as const } })
     },
     backdrop: {
         ...StyleSheet.absoluteFillObject,
-        backgroundColor: 'black'
+        backgroundColor: '#000',
     },
     content: {
-        zIndex: 1
-    }
+        zIndex: 1,
+    },
 });

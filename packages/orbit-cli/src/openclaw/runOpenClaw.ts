@@ -26,6 +26,7 @@ import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import { notifyDaemonSessionStarted } from '@/daemon/controlClient';
 import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler';
 import { connectionState } from '@/utils/serverConnectionErrors';
+import { shouldReportSessionStartToDaemon } from '@/utils/shouldReportSessionStartToDaemon';
 import { OpenClawBackend } from './OpenClawBackend';
 import type { OpenClawGatewayConfig } from './openclawTypes';
 import type { AgentMessage } from '@/agent/core';
@@ -179,7 +180,7 @@ export async function runOpenClaw(opts: RunOpenClawOptions): Promise<void> {
   });
   session = initialSession;
 
-  if (response) {
+  if (response && shouldReportSessionStartToDaemon({ startedBy: opts.startedBy })) {
     try {
       await notifyDaemonSessionStarted(response.id, metadata);
     } catch (error) {

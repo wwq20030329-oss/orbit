@@ -1,4 +1,5 @@
 import { machineResumeNativeCliHistory } from '@/sync/ops';
+import { OrbitSessionHistoryLoader } from '@/remote/OrbitSessionHistoryLoader';
 import { storage } from '@/sync/storage';
 import type { Machine, NativeCliHistoryEntry, Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -476,7 +477,7 @@ function startNativeResumeWarmup(sessionId: string, identifier: string): void {
         }
 
         try {
-            await sync.refreshSessionMessagesIfStale(lastVisibleSessionId);
+            await new OrbitSessionHistoryLoader(lastVisibleSessionId).refreshIfStale();
         } catch {
             // Session encryption/session creation can lag slightly behind warmup.
         }
@@ -489,7 +490,7 @@ function startNativeResumeWarmup(sessionId: string, identifier: string): void {
 
 async function primeResumedNativeSession(sessionId: string): Promise<void> {
     try {
-        await sync.waitForSessionReady(sessionId);
+        await new OrbitSessionHistoryLoader(sessionId).waitUntilReady();
     } catch {
         // A background warmup will keep trying. Returning the resumed session id is
         // still better than failing the whole restore flow on a transient refresh miss.

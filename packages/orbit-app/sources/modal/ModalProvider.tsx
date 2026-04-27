@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { ModalState, ModalConfig, ModalContextValue } from './types';
 import { Modal } from './ModalManager';
-import { WebAlertModal } from './components/WebAlertModal';
-import { WebPromptModal } from './components/WebPromptModal';
+import { AlertModal } from './components/AlertModal';
+import { PromptModal } from './components/PromptModal';
 import { CustomModal } from './components/CustomModal';
 
 const ModalContext = createContext<ModalContextValue | undefined>(undefined);
@@ -65,13 +65,13 @@ export function ModalProvider({ children }: { children: React.ReactNode }) {
             {currentModal && (
                 <>
                     {currentModal.type === 'alert' && (
-                        <WebAlertModal
+                        <AlertModal
                             config={currentModal}
                             onClose={() => hideModal(currentModal.id)}
                         />
                     )}
                     {currentModal.type === 'confirm' && (
-                        <WebAlertModal
+                        <AlertModal
                             config={currentModal}
                             onClose={() => hideModal(currentModal.id)}
                             onConfirm={(value) => {
@@ -81,7 +81,7 @@ export function ModalProvider({ children }: { children: React.ReactNode }) {
                         />
                     )}
                     {currentModal.type === 'prompt' && (
-                        <WebPromptModal
+                        <PromptModal
                             config={currentModal}
                             onClose={() => hideModal(currentModal.id)}
                             onConfirm={(value) => {

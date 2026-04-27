@@ -1,6 +1,4 @@
 import { z } from 'zod';
-import { sync } from '@/sync/sync';
-import { sessionAllow, sessionDeny } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { trackVoicePermissionResponse } from '@/track';
 import { getVoiceSession, isVoiceSessionStarted } from './RealtimeSession';
@@ -8,6 +6,7 @@ import {
     getVoiceMessageCount,
     incrementVoiceMessageCount,
 } from '@/sync/persistence';
+import { OrbitRemoteSessionManager } from '@/remote/OrbitRemoteSessionManager';
 
 /**
  * Static client tools for the realtime voice interface.
@@ -31,7 +30,10 @@ export const realtimeClientTools = {
 
         const { sessionId, message } = parsed.data;
         console.log('📤 Sending message to session:', sessionId);
-        await sync.sendMessage(sessionId, message, { source: 'voice' });
+        await new OrbitRemoteSessionManager(sessionId).sendCurrentSessionMessage({
+            content: message,
+            source: 'voice',
+        });
         incrementVoiceMessageCount();
         const voiceMessageCount = getVoiceMessageCount();
         if (isVoiceSessionStarted()) {
@@ -78,11 +80,12 @@ export const realtimeClientTools = {
         console.log('🔍 processPermissionRequest:', decision, 'for session:', sessionId, 'request:', requestId);
 
         try {
+            const remoteSessionManager = new OrbitRemoteSessionManager(sessionId);
             if (decision === 'allow') {
-                await sessionAllow(sessionId, requestId);
+                await remoteSessionManager.allowPermission(requestId);
                 trackVoicePermissionResponse(true);
             } else {
-                await sessionDeny(sessionId, requestId);
+                await remoteSessionManager.denyPermission(requestId);
                 trackVoicePermissionResponse(false);
             }
             return "done [DO NOT say anything else, simply say 'done']";

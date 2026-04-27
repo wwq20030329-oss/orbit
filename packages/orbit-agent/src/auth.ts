@@ -14,6 +14,23 @@ export type AuthRequestResponse = {
     response?: string; // base64-encoded encrypted account secret
 };
 
+function resolveOrbitAppUrlScheme(): string {
+    const explicitScheme = process.env.ORBIT_APP_URL_SCHEME?.trim();
+    if (explicitScheme) {
+        return explicitScheme;
+    }
+
+    const appEnv = process.env.APP_ENV?.trim();
+    if (appEnv === 'development') {
+        return 'orbitdev';
+    }
+    if (appEnv === 'preview') {
+        return 'orbitpreview';
+    }
+
+    return 'orbit';
+}
+
 export async function authLogin(config: Config): Promise<void> {
     // 1. Generate ephemeral box keypair
     const seed = getRandomBytes(32);
@@ -33,7 +50,7 @@ export async function authLogin(config: Config): Promise<void> {
     }
 
     // 3. Generate and display QR code
-    const qrData = `orbit:///account?${encodeBase64Url(keypair.publicKey)}`;
+    const qrData = `${resolveOrbitAppUrlScheme()}:///account?${encodeBase64Url(keypair.publicKey)}`;
     console.log('');
     qrcode.generate(qrData, { small: true }, (code: string) => {
         console.log(code);

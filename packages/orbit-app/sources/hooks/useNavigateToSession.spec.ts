@@ -6,6 +6,8 @@ const hoisted = vi.hoisted(() => {
   const state = {
     sessions: {} as Record<string, Session>,
     sessionMessages: {} as Record<string, { messages?: Array<{ kind: string }> }>,
+    applyLocalSettings: vi.fn(),
+    setPhoneWorkspaceSessionId: vi.fn(),
   };
 
   return {
@@ -17,9 +19,12 @@ const hoisted = vi.hoisted(() => {
     refreshSessions: vi.fn(),
     waitForSessionReady: vi.fn(),
     rememberNativeCliHintsForSession: vi.fn(),
+    isNativeCliResumeUnavailableError: vi.fn(),
+    isNativeCliSessionMissingError: vi.fn(),
     getNativeCliSessionTarget: vi.fn(),
     shouldAutoResolveNativeCliSession: vi.fn(),
     hasMeaningfulSessionHistoryMessages: vi.fn(),
+    getDeviceType: vi.fn(),
   };
 });
 
@@ -38,6 +43,8 @@ vi.mock('@/utils/openNativeCliSession', () => ({
   openNativeCliSessionFromSession: hoisted.openNativeCliSessionFromSession,
   openNativeCliSessionFromIdentifier: hoisted.openNativeCliSessionFromIdentifier,
   rememberNativeCliHintsForSession: hoisted.rememberNativeCliHintsForSession,
+  isNativeCliResumeUnavailableError: hoisted.isNativeCliResumeUnavailableError,
+  isNativeCliSessionMissingError: hoisted.isNativeCliSessionMissingError,
 }));
 
 vi.mock('@/sync/sync', () => ({
@@ -54,6 +61,16 @@ vi.mock('@/utils/nativeCliHistory', () => ({
 vi.mock('@/utils/nativeCliSessionResolver', () => ({
   getNativeCliSessionTarget: hoisted.getNativeCliSessionTarget,
   shouldAutoResolveNativeCliSession: hoisted.shouldAutoResolveNativeCliSession,
+}));
+
+vi.mock('@/utils/responsive', () => ({
+  getDeviceType: hoisted.getDeviceType,
+}));
+
+vi.mock('react-native', () => ({
+  Platform: {
+    OS: 'ios',
+  },
 }));
 
 vi.mock('expo-router', () => ({
@@ -94,6 +111,8 @@ describe('navigateToSession', () => {
       'session-1': createSession(),
     };
     hoisted.state.sessionMessages = {};
+    hoisted.state.applyLocalSettings.mockReset();
+    hoisted.state.setPhoneWorkspaceSessionId.mockReset();
     hoisted.trackSessionSwitched.mockReset();
     hoisted.clearSessionOpenedAsHistoryOnly.mockReset();
     hoisted.openNativeCliSessionFromSession.mockReset();
@@ -101,6 +120,8 @@ describe('navigateToSession', () => {
     hoisted.refreshSessions.mockReset();
     hoisted.waitForSessionReady.mockReset();
     hoisted.rememberNativeCliHintsForSession.mockReset();
+    hoisted.isNativeCliResumeUnavailableError.mockReset();
+    hoisted.isNativeCliSessionMissingError.mockReset();
     hoisted.getNativeCliSessionTarget.mockReset();
     hoisted.shouldAutoResolveNativeCliSession.mockReset();
     hoisted.hasMeaningfulSessionHistoryMessages.mockReset();
@@ -118,6 +139,9 @@ describe('navigateToSession', () => {
         message.kind === 'user-text' || message.kind === 'agent-text' || message.kind === 'tool-call'
       ))
     ));
+    hoisted.getDeviceType.mockReturnValue('tablet');
+    hoisted.isNativeCliResumeUnavailableError.mockReturnValue(false);
+    hoisted.isNativeCliSessionMissingError.mockReturnValue(false);
     hoisted.waitForSessionReady.mockResolvedValue(true);
   });
 
@@ -138,6 +162,50 @@ describe('navigateToSession', () => {
         dangerouslySingular: expect.any(Function),
       }),
     );
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
+  it('opens actual sessions inside the phone workspace on phones', async () => {
+    hoisted.getDeviceType.mockReturnValue('phone');
+    hoisted.openNativeCliSessionFromSession.mockResolvedValue('session-1');
+    const router = {
+      navigate: vi.fn(),
+      replace: vi.fn(),
+    };
+
+    await navigateToSession(router as never, 'session-1');
+
+    expect(hoisted.state.setPhoneWorkspaceSessionId).toHaveBeenCalledWith('session-1');
+    expect(router.navigate).toHaveBeenCalledWith('/');
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
+  it('opens the resolved native session inside the phone workspace when recovery reroutes to a different session', async () => {
+    hoisted.getDeviceType.mockReturnValue('phone');
+    hoisted.openNativeCliSessionFromSession.mockResolvedValue('session-2');
+    hoisted.state.sessions['session-2'] = createSession({
+      id: 'session-2',
+      active: true,
+      activeAt: Date.now(),
+      presence: 'online',
+      metadata: {
+        machineId: 'machine-1',
+        codexThreadId: 'thread-1',
+        path: '/Users/test/project',
+        host: 'wwq-mac',
+        flavor: 'codex',
+        lifecycleState: 'running',
+      },
+    });
+    const router = {
+      navigate: vi.fn(),
+      replace: vi.fn(),
+    };
+
+    await navigateToSession(router as never, 'session-1');
+
+    expect(hoisted.state.setPhoneWorkspaceSessionId).toHaveBeenCalledWith('session-2');
+    expect(router.navigate).toHaveBeenCalledWith('/');
     expect(router.replace).not.toHaveBeenCalled();
   });
 
@@ -269,5 +337,81 @@ describe('navigateToSession', () => {
         dangerouslySingular: expect.any(Function),
       }),
     );
+  });
+
+  it('still prefers native cli recovery for archived native sessions', async () => {
+    hoisted.state.sessions = {
+      'session-1': createSession({
+        metadata: {
+          machineId: 'machine-1',
+          codexThreadId: 'thread-1',
+          path: '/Users/test/project',
+          host: 'wwq-mac',
+          flavor: 'codex',
+          lifecycleState: 'archived',
+        },
+      }),
+    };
+    hoisted.openNativeCliSessionFromSession.mockResolvedValue('session-2');
+    hoisted.state.sessions['session-2'] = createSession({
+      id: 'session-2',
+      active: true,
+      activeAt: Date.now(),
+      presence: 'online',
+      metadata: {
+        machineId: 'machine-1',
+        codexThreadId: 'thread-1',
+        path: '/Users/test/project',
+        host: 'wwq-mac',
+        flavor: 'codex',
+        lifecycleState: 'running',
+      },
+    });
+    const router = {
+      navigate: vi.fn(),
+      replace: vi.fn(),
+    };
+
+    await navigateToSession(router as never, 'session-1');
+
+    expect(hoisted.openNativeCliSessionFromSession).toHaveBeenCalledWith(hoisted.state.sessions['session-1']);
+    expect(router.navigate).toHaveBeenCalledWith(
+      '/session/session-2',
+      expect.objectContaining({
+        dangerouslySingular: expect.any(Function),
+      }),
+    );
+  });
+
+  it('can preserve an archived native session when the caller is explicitly opening history', async () => {
+    hoisted.state.sessions = {
+      'session-1': createSession({
+        metadata: {
+          machineId: 'machine-1',
+          codexThreadId: 'thread-1',
+          path: '/Users/test/project',
+          host: 'wwq-mac',
+          flavor: 'codex',
+          lifecycleState: 'archived',
+        },
+      }),
+    };
+    const router = {
+      navigate: vi.fn(),
+      replace: vi.fn(),
+    };
+
+    await navigateToSession(router as never, 'session-1', {
+      preferHistoryEntry: true,
+    });
+
+    expect(hoisted.openNativeCliSessionFromSession).not.toHaveBeenCalled();
+    expect(router.navigate).toHaveBeenCalledWith(
+      '/session/session-1?history=1',
+      expect.objectContaining({
+        dangerouslySingular: expect.any(Function),
+      }),
+    );
+    expect(router.replace).not.toHaveBeenCalled();
   });
 });

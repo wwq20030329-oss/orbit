@@ -10,8 +10,6 @@ interface TokenCacheEntry {
 interface AuthTokens {
     generator: Awaited<ReturnType<typeof privacyKit.createPersistentTokenGenerator>>;
     verifier: Awaited<ReturnType<typeof privacyKit.createPersistentTokenVerifier>>;
-    githubVerifier: Awaited<ReturnType<typeof privacyKit.createEphemeralTokenVerifier>>;
-    githubGenerator: Awaited<ReturnType<typeof privacyKit.createEphemeralTokenGenerator>>;
 }
 
 class AuthModule {
@@ -36,19 +34,7 @@ class AuthModule {
             publicKey: Uint8Array.from(generator.publicKey)
         });
         
-        const githubGenerator = await privacyKit.createEphemeralTokenGenerator({
-            service: 'github-orbit',
-            seed: process.env.HANDY_MASTER_SECRET!,
-            ttl: 5 * 60 * 1000 // 5 minutes
-        });
-
-        const githubVerifier = await privacyKit.createEphemeralTokenVerifier({
-            service: 'github-orbit',
-            publicKey: Uint8Array.from(githubGenerator.publicKey),
-        });
-
-
-        this.tokens = { generator, verifier, githubVerifier, githubGenerator };
+        this.tokens = { generator, verifier };
         
         log({ module: 'auth' }, 'Auth module initialized');
     }
@@ -148,35 +134,6 @@ class AuthModule {
         };
     }
     
-    async createGithubToken(userId: string): Promise<string> {
-        if (!this.tokens) {
-            throw new Error('Auth module not initialized');
-        }
-        
-        const payload = { user: userId, purpose: 'github-oauth' };
-        const token = await this.tokens.githubGenerator.new(payload);
-        
-        return token;
-    }
-
-    async verifyGithubToken(token: string): Promise<{ userId: string } | null> {
-        if (!this.tokens) {
-            throw new Error('Auth module not initialized');
-        }
-        
-        try {
-            const verified = await this.tokens.githubVerifier.verify(token);
-            if (!verified) {
-                return null;
-            }
-            
-            return { userId: verified.user as string };
-        } catch (error) {
-            log({ module: 'auth', level: 'error' }, `GitHub token verification failed: ${error}`);
-            return null;
-        }
-    }
-
     // Cleanup old entries (optional - can be called periodically)
     cleanup(): void {
         // Note: Since tokens are cached "forever" as requested,

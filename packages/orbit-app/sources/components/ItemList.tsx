@@ -22,8 +22,8 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         backgroundColor: theme.colors.groupped.background,
     },
     contentContainer: {
-        paddingBottom: Platform.select({ ios: 34, default: 16 }),
-        paddingTop: 0,
+        paddingBottom: Platform.select({ ios: 42, default: 24 }),
+        paddingTop: 4,
     },
 }));
 
@@ -40,7 +40,6 @@ export const ItemList = React.memo<ItemListProps>((props) => {
     } = props;
 
     const isIOS = Platform.OS === 'ios';
-    const isWeb = Platform.OS === 'web';
     
     // Override background for non-inset grouped lists on iOS
     const backgroundColor = (isIOS && !insetGrouped) ? '#FFFFFF' : theme.colors.groupped.background;
@@ -58,8 +57,10 @@ export const ItemList = React.memo<ItemListProps>((props) => {
             ]}
             showsVerticalScrollIndicator={scrollViewProps.showsVerticalScrollIndicator !== undefined 
                 ? scrollViewProps.showsVerticalScrollIndicator 
-                : true}
-            contentInsetAdjustmentBehavior={(isIOS && !isWeb) ? 'automatic' : undefined}
+                : false}
+            contentInsetAdjustmentBehavior={isIOS ? 'automatic' : undefined}
+            keyboardDismissMode={scrollViewProps.keyboardDismissMode ?? (isIOS ? 'interactive' : 'on-drag')}
+            keyboardShouldPersistTaps={scrollViewProps.keyboardShouldPersistTaps ?? 'handled'}
             {...scrollViewProps}
         >
             {children}

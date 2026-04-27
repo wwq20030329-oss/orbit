@@ -14,13 +14,14 @@ export type ClaudeSdkPermissionMode = NonNullable<QueryOptions['permissionMode']
  * - read-only → default (Claude doesn't support read-only)
  *
  * Claude modes pass through unchanged:
- * - default, acceptEdits, bypassPermissions, plan
+ * - default, acceptEdits, bypassPermissions, plan, auto, dontAsk
  */
 export function mapToClaudeMode(mode: PermissionMode): ClaudeSdkPermissionMode {
     const codexToClaudeMap: Record<string, ClaudeSdkPermissionMode> = {
         'yolo': 'bypassPermissions',
         'safe-yolo': 'default',
         'read-only': 'default',
+        'auto_edit': 'acceptEdits',
     };
     return codexToClaudeMap[mode] ?? (mode as ClaudeSdkPermissionMode);
 }
@@ -30,6 +31,9 @@ const VALID_PERMISSION_MODES: readonly PermissionMode[] = [
     'acceptEdits',
     'bypassPermissions',
     'plan',
+    'auto',
+    'dontAsk',
+    'auto_edit',
     'read-only',
     'safe-yolo',
     'yolo',

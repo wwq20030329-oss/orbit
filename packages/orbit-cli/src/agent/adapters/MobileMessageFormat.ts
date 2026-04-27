@@ -28,6 +28,8 @@ export interface MobileMessageMeta {
   permissionMode?: string;
   /** Model name if applicable */
   model?: string | null;
+  /** Thought / reasoning effort if applicable */
+  effortLevel?: string;
 }
 
 /**

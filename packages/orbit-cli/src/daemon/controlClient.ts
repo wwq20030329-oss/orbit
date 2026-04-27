@@ -11,7 +11,28 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { configuration } from '@/configuration';
 
-async function daemonPost(path: string, body?: any): Promise<{ error?: string } | any> {
+const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 10_000;
+const SPAWN_DAEMON_HTTP_TIMEOUT_MS = 20_000;
+
+function resolveDaemonHttpTimeout(fallbackMs: number): number {
+  const rawTimeout = process.env.ORBIT_DAEMON_HTTP_TIMEOUT;
+  if (!rawTimeout) {
+    return fallbackMs;
+  }
+
+  const parsedTimeout = parseInt(rawTimeout, 10);
+  if (Number.isNaN(parsedTimeout) || parsedTimeout <= 0) {
+    return fallbackMs;
+  }
+
+  return parsedTimeout;
+}
+
+async function daemonPost(
+  path: string,
+  body?: any,
+  options: { timeoutMs?: number } = {},
+): Promise<{ error?: string } | any> {
   const state = await readDaemonState();
   if (!state?.httpPort) {
     const errorMessage = 'No daemon running, no state file found';
@@ -32,14 +53,12 @@ async function daemonPost(path: string, body?: any): Promise<{ error?: string } 
   }
 
   try {
-    const timeout = process.env.ORBIT_DAEMON_HTTP_TIMEOUT
-      ? parseInt(process.env.ORBIT_DAEMON_HTTP_TIMEOUT)
-      : 10_000;
+    const timeout = options.timeoutMs ?? resolveDaemonHttpTimeout(DEFAULT_DAEMON_HTTP_TIMEOUT_MS);
     const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
-      // Mostly increased for stress test
+      // Longer-running endpoints like spawn-session can override this timeout.
       signal: AbortSignal.timeout(timeout)
     });
     
@@ -82,7 +101,11 @@ export async function stopDaemonSession(sessionId: string): Promise<boolean> {
 }
 
 export async function spawnDaemonSession(directory: string, sessionId?: string): Promise<any> {
-  const result = await daemonPost('/spawn-session', { directory, sessionId });
+  const result = await daemonPost(
+    '/spawn-session',
+    { directory, sessionId },
+    { timeoutMs: resolveDaemonHttpTimeout(SPAWN_DAEMON_HTTP_TIMEOUT_MS) },
+  );
   return result;
 }
 

@@ -16,10 +16,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
-import WebSocket from 'ws';
 import { OpenClawSocket } from './OpenClawSocket';
 import { OpenClawBackend } from './OpenClawBackend';
 import { resetIdentityCache } from './openclawAuth';
@@ -27,6 +25,7 @@ import { AcpSessionManager } from '@/agent/acp/AcpSessionManager';
 import type { AgentMessage } from '@/agent/core/AgentBackend';
 import type { SessionEnvelope } from '@orbit/wire';
 import { getIntegrationEnv } from '@/testing/currentIntegrationEnv';
+import { GATEWAY_URL, readGatewayToken, shouldRunOpenClawIntegration } from './testAvailability';
 import {
   listDaemonSessions,
   stopDaemonSession,
@@ -35,55 +34,8 @@ import { readDaemonState } from '@/persistence';
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
-const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL ?? 'ws://127.0.0.1:18789';
-const integrationEnv = getIntegrationEnv();
-
-function readGatewayToken(): string | undefined {
-  try {
-    const configPath = join(homedir(), '.openclaw', 'openclaw.json');
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    return config?.gateway?.auth?.token;
-  } catch {
-    return process.env.OPENCLAW_GATEWAY_TOKEN;
-  }
-}
-
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), 'openclaw-integ-'));
-}
-
-async function isGatewayReachable(url: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const ws = new WebSocket(url, { handshakeTimeout: 2000 });
-    const finish = (result: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      resolve(result);
-    };
-    const timeout = setTimeout(() => finish(false), 2500);
-    ws.on('open', () => finish(true));
-    ws.on('error', () => finish(false));
-  });
-}
-
-async function shouldRunOpenClawIntegration(): Promise<boolean> {
-  if (!(await isGatewayReachable(GATEWAY_URL))) {
-    console.log(`[openclaw-test] Skipping: gateway not reachable at ${GATEWAY_URL}`);
-    return false;
-  }
-  const token = readGatewayToken();
-  if (!token) {
-    console.log('[openclaw-test] Skipping: no gateway token (OPENCLAW_GATEWAY_TOKEN or ~/.openclaw/openclaw.json)');
-    return false;
-  }
-  return true;
 }
 
 async function isDaemonRunning(): Promise<boolean> {
@@ -96,6 +48,10 @@ async function isDaemonRunning(): Promise<boolean> {
 }
 
 const gatewayAvailable = await shouldRunOpenClawIntegration();
+
+function getOpenClawIntegrationEnv() {
+  return getIntegrationEnv();
+}
 
 // ── 1. OpenClawSocket ───────────────────────────────────────────────────────
 
@@ -402,6 +358,7 @@ describe.skipIf(!gatewayAvailable)('OpenClaw integration - daemon lifecycle', { 
 
     const state = await readDaemonState();
     const port = state!.httpPort;
+    const integrationEnv = getOpenClawIntegrationEnv();
     const spawnResponse = await fetch(`http://127.0.0.1:${port}/spawn-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -464,6 +421,7 @@ describe.skipIf(!gatewayAvailable)('OpenClaw integration - daemon lifecycle', { 
 
     const state = await readDaemonState();
     const port = state!.httpPort;
+    const integrationEnv = getOpenClawIntegrationEnv();
 
     const spawn1 = await fetch(`http://127.0.0.1:${port}/spawn-session`, {
       method: 'POST',

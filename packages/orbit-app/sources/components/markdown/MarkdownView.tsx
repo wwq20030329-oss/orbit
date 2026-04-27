@@ -1,4 +1,5 @@
-import { MarkdownSpan, parseMarkdown } from './parseMarkdown';
+import { MarkdownSpan } from './parseMarkdown';
+import { parseMarkdownIncremental } from './parseMarkdownIncremental';
 import * as React from 'react';
 import { Image, Pressable, ScrollView, View, Platform } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -21,20 +22,27 @@ export type Option = {
     title: string;
 };
 
-export const MarkdownView = React.memo((props: { 
+type MarkdownContentViewProps = {
     markdown: string;
     onOptionPress?: (option: Option) => void;
     sessionId?: string;
-}) => {
-    const blocks = React.useMemo(() => parseMarkdown(props.markdown), [props.markdown]);
-    
+    markdownCopyV2: boolean;
+};
+
+export const MarkdownContentView = React.memo((props: MarkdownContentViewProps) => {
+    // `parseMarkdownIncremental` memoizes each block by its raw source
+    // substring, so across streaming ticks unchanged blocks keep their
+    // exact same reference. Combined with the memoized block renderers
+    // below this turns the hot path from O(total markdown length) into
+    // O(length of the tail block being streamed).
+    const entries = React.useMemo(() => parseMarkdownIncremental(props.markdown), [props.markdown]);
+
     // Backwards compatibility: The original version just returned the view, wrapping the list of blocks.
     // It made each of the individual text elements selectable. When we enable the markdownCopyV2 feature,
     // we disable the selectable property on individual text segments on mobile only. Instead, the long press
     // will be handled by a wrapper Pressable. If we don't disable the selectable property, then you will see
     // the native copy modal come up at the same time as the long press handler is fired.
-    const markdownCopyV2 = useLocalSetting('markdownCopyV2');
-    const selectable = Platform.OS === 'web' || !markdownCopyV2;
+    const selectable = !props.markdownCopyV2;
     const router = useRouter();
 
     const handleLinkPress = React.useCallback((url: string) => {
@@ -42,81 +50,157 @@ export const MarkdownView = React.memo((props: {
             return;
         }
 
-        if (Platform.OS === 'web') {
-            if (typeof window !== 'undefined') {
-                window.open(url, '_blank', 'noopener,noreferrer');
-            }
-            return;
-        }
-
         void WebBrowser.openBrowserAsync(url);
     }, []);
 
+    // Stash the latest markdown in a ref so that `handleLongPress` is
+    // itself stable across renders — previously the callback depended
+    // on `props.markdown` and therefore changed every streaming tick,
+    // busting the memoization of any downstream gesture handler.
+    const markdownRef = React.useRef(props.markdown);
+    React.useEffect(() => {
+        markdownRef.current = props.markdown;
+    }, [props.markdown]);
+
     const handleLongPress = React.useCallback(() => {
         try {
-            const textId = storeTempText(props.markdown);
+            const textId = storeTempText(markdownRef.current);
             router.push(`/text-selection?textId=${textId}`);
         } catch (error) {
             console.error('Error storing text for selection:', error);
-            Modal.alert('Error', 'Failed to open text selection. Please try again.');
+            Modal.alert(t('common.error'), t('errors.tryAgain'));
         }
-    }, [props.markdown, router]);
-    const renderContent = () => {
-        return (
-            <View style={{ width: '100%' }}>
-                {blocks.map((block, index) => {
-                    if (block.type === 'text') {
-                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
-                    } else if (block.type === 'header') {
-                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
-                    } else if (block.type === 'horizontal-rule') {
-                        return <View style={style.horizontalRule} key={index} />;
-                    } else if (block.type === 'list') {
-                        return <RenderListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
-                    } else if (block.type === 'numbered-list') {
-                        return <RenderNumberedListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
-                    } else if (block.type === 'code-block') {
-                        return <RenderCodeBlock content={block.content} language={block.language} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} />;
-                    } else if (block.type === 'mermaid') {
-                        return <MermaidRenderer content={block.content} key={index} />;
-                    } else if (block.type === 'options') {
-                        return <RenderOptionsBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onOptionPress={props.onOptionPress} />;
-                    } else if (block.type === 'table') {
-                        return <RenderTableBlock headers={block.headers} rows={block.rows} onLinkPress={handleLinkPress} selectable={selectable} key={index} first={index === 0} last={index === blocks.length - 1} />;
-                    } else if (block.type === 'image') {
-                        return <RenderImageBlock url={block.url} alt={block.alt} key={index} first={index === 0} last={index === blocks.length - 1} />;
-                    } else {
-                        return null;
-                    }
-                })}
-            </View>
-        );
-    }
+    }, [router]);
 
-    if (!markdownCopyV2) {
-        return renderContent();
+    const onOptionPress = props.onOptionPress;
+    const content = (
+        <View style={{ width: '100%' }}>
+            {entries.map((entry) => {
+                const { block, source } = entry;
+                // Use the block's raw source substring as the React key.
+                // Two consecutive renders of the same block (unchanged
+                // source) keep the same component instance, so React
+                // short-circuits reconciliation entirely.
+                const key = source;
+                switch (block.type) {
+                    case 'text':
+                        return (
+                            <RenderTextBlock
+                                key={key}
+                                spans={block.content}
+                                selectable={selectable}
+                                onLinkPress={handleLinkPress}
+                            />
+                        );
+                    case 'header':
+                        return (
+                            <RenderHeaderBlock
+                                key={key}
+                                level={block.level}
+                                spans={block.content}
+                                selectable={selectable}
+                                onLinkPress={handleLinkPress}
+                            />
+                        );
+                    case 'horizontal-rule':
+                        return <View key={key} style={style.horizontalRule} />;
+                    case 'list':
+                        return (
+                            <RenderListBlock
+                                key={key}
+                                items={block.items}
+                                selectable={selectable}
+                                onLinkPress={handleLinkPress}
+                            />
+                        );
+                    case 'numbered-list':
+                        return (
+                            <RenderNumberedListBlock
+                                key={key}
+                                items={block.items}
+                                selectable={selectable}
+                                onLinkPress={handleLinkPress}
+                            />
+                        );
+                    case 'code-block':
+                        return (
+                            <RenderCodeBlock
+                                key={key}
+                                content={block.content}
+                                language={block.language}
+                                selectable={selectable}
+                            />
+                        );
+                    case 'mermaid':
+                        return <MermaidRenderer key={key} content={block.content} />;
+                    case 'options':
+                        return (
+                            <RenderOptionsBlock
+                                key={key}
+                                items={block.items}
+                                selectable={selectable}
+                                onOptionPress={onOptionPress}
+                            />
+                        );
+                    case 'table':
+                        return (
+                            <RenderTableBlock
+                                key={key}
+                                headers={block.headers}
+                                rows={block.rows}
+                                onLinkPress={handleLinkPress}
+                                selectable={selectable}
+                            />
+                        );
+                    case 'image':
+                        return <RenderImageBlock key={key} url={block.url} alt={block.alt} />;
+                    default:
+                        return null;
+                }
+            })}
+        </View>
+    );
+
+    if (!props.markdownCopyV2 || false) {
+        return content;
     }
-    
-    if (Platform.OS === 'web') {
-        return renderContent();
-    }
-    
-    // Use GestureDetector with LongPress gesture - it doesn't block pan gestures
-    // so horizontal scrolling in code blocks and tables still works
-    const longPressGesture = Gesture.LongPress()
-        .minDuration(500)
-        .onStart(() => {
-            handleLongPress();
-        })
-        .runOnJS(true);
 
     return (
-        <GestureDetector gesture={longPressGesture}>
+        <LongPressGestureWrapper onLongPress={handleLongPress}>
+            {content}
+        </LongPressGestureWrapper>
+    );
+});
+
+// Gesture wrapper extracted so the gesture object is constructed once
+// per `onLongPress` identity rather than once per render of the owning
+// MarkdownContentView. The old code rebuilt a `Gesture.LongPress()`
+// every render, which in turn rebuilt the underlying native handler.
+const LongPressGestureWrapper = React.memo((props: {
+    onLongPress: () => void;
+    children: React.ReactNode;
+}) => {
+    const gesture = React.useMemo(() => (
+        Gesture.LongPress()
+            .minDuration(500)
+            .onStart(() => {
+                props.onLongPress();
+            })
+            .runOnJS(true)
+    ), [props.onLongPress]);
+
+    return (
+        <GestureDetector gesture={gesture}>
             <View style={{ width: '100%' }}>
-                {renderContent()}
+                {props.children}
             </View>
         </GestureDetector>
     );
+});
+
+export const MarkdownView = React.memo((props: Omit<MarkdownContentViewProps, 'markdownCopyV2'>) => {
+    const markdownCopyV2 = useLocalSetting('markdownCopyV2');
+    return <MarkdownContentView {...props} markdownCopyV2={markdownCopyV2} />;
 });
 
 type RenderSpanProps = {
@@ -126,17 +210,22 @@ type RenderSpanProps = {
     onLinkPress: (url: string) => void;
 };
 
-function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
-    return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last]}><RenderSpans spans={props.spans} baseStyle={style.text} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
-}
+// Every block renderer is wrapped in `React.memo`. Because the parent
+// now reuses the same cached `MarkdownBlock` references for unchanged
+// blocks (see `parseMarkdownIncremental`), the default shallow prop
+// comparison is enough to skip re-rendering entire paragraphs / code
+// fences / tables while the AI is streaming new content below them.
+const RenderTextBlock = React.memo((props: { spans: MarkdownSpan[], selectable: boolean, onLinkPress: (url: string) => void }) => {
+    return <Text selectable={props.selectable} style={style.text}><RenderSpans spans={props.spans} baseStyle={style.text} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
+});
 
-function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
+const RenderHeaderBlock = React.memo((props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], selectable: boolean, onLinkPress: (url: string) => void }) => {
     const s = (style as any)[`header${props.level}`];
-    const headerStyle = [style.header, s, props.first && style.first, props.last && style.last];
+    const headerStyle = [style.header, s];
     return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
-}
+});
 
-function RenderListBlock(props: { items: MarkdownSpan[][], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
+const RenderListBlock = React.memo((props: { items: MarkdownSpan[][], selectable: boolean, onLinkPress: (url: string) => void }) => {
     const listStyle = [style.text, style.list];
     return (
         <View style={{ flexDirection: 'column', marginBottom: 8, gap: 1 }}>
@@ -145,9 +234,9 @@ function RenderListBlock(props: { items: MarkdownSpan[][], first: boolean, last:
             ))}
         </View>
     );
-}
+});
 
-function RenderNumberedListBlock(props: { items: { number: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
+const RenderNumberedListBlock = React.memo((props: { items: { number: number, spans: MarkdownSpan[] }[], selectable: boolean, onLinkPress: (url: string) => void }) => {
     const listStyle = [style.text, style.list];
     return (
         <View style={{ flexDirection: 'column', marginBottom: 8, gap: 1 }}>
@@ -156,11 +245,9 @@ function RenderNumberedListBlock(props: { items: { number: number, spans: Markdo
             ))}
         </View>
     );
-}
+});
 
-function RenderCodeBlock(props: { content: string, language: string | null, first: boolean, last: boolean, selectable: boolean }) {
-    const [isHovered, setIsHovered] = React.useState(false);
-
+const RenderCodeBlock = React.memo((props: { content: string, language: string | null, selectable: boolean }) => {
     const copyCode = React.useCallback(async () => {
         try {
             await Clipboard.setStringAsync(props.content);
@@ -172,13 +259,7 @@ function RenderCodeBlock(props: { content: string, language: string | null, firs
     }, [props.content]);
 
     return (
-        <View
-            style={[style.codeBlock, props.first && style.first, props.last && style.last]}
-            // @ts-ignore - Web only events
-            onMouseEnter={() => setIsHovered(true)}
-            // @ts-ignore - Web only events
-            onMouseLeave={() => setIsHovered(false)}
-        >
+        <View style={style.codeBlock}>
             {props.language && <Text selectable={props.selectable} style={style.codeLanguage}>{props.language}</Text>}
             <ScrollView
                 style={{ flexGrow: 0, flexShrink: 0 }}
@@ -192,10 +273,7 @@ function RenderCodeBlock(props: { content: string, language: string | null, firs
                     selectable={props.selectable}
                 />
             </ScrollView>
-            <View
-                style={[style.copyButtonWrapper, isHovered && style.copyButtonWrapperVisible]}
-                {...(Platform.OS === 'web' ? ({ className: 'copy-button-wrapper' } as any) : {})}
-            >
+            <View style={[style.copyButtonWrapper, style.copyButtonWrapperVisible]}>
                 <Pressable
                     style={style.copyButton}
                     onPress={copyCode}
@@ -205,13 +283,13 @@ function RenderCodeBlock(props: { content: string, language: string | null, firs
             </View>
         </View>
     );
-}
+});
 
-function RenderImageBlock(props: { url: string, alt: string, first: boolean, last: boolean }) {
+const RenderImageBlock = React.memo((props: { url: string, alt: string }) => {
     const accessibleLabel = props.alt || 'Markdown image';
 
     return (
-        <View style={[style.imageBlock, props.first && style.first, props.last && style.last]}>
+        <View style={style.imageBlock}>
             <Image
                 source={{ uri: props.url }}
                 style={style.image}
@@ -223,17 +301,15 @@ function RenderImageBlock(props: { url: string, alt: string, first: boolean, las
             ) : null}
         </View>
     );
-}
+});
 
-function RenderOptionsBlock(props: { 
-    items: string[], 
-    first: boolean, 
-    last: boolean, 
+const RenderOptionsBlock = React.memo((props: {
+    items: string[],
     selectable: boolean,
-    onOptionPress?: (option: Option) => void 
-}) {
+    onOptionPress?: (option: Option) => void
+}) => {
     return (
-        <View style={[style.optionsContainer, props.first && style.first, props.last && style.last]}>
+        <View style={style.optionsContainer}>
             {props.items.map((item, index) => {
                 if (props.onOptionPress) {
                     return (
@@ -258,7 +334,7 @@ function RenderOptionsBlock(props: {
             })}
         </View>
     );
-}
+});
 
 function RenderSpans(props: RenderSpanProps) {
     return (<>
@@ -271,10 +347,7 @@ function RenderSpans(props: RenderSpanProps) {
                         selectable={props.selectable}
                         accessibilityRole={isExternalLink ? 'link' : undefined}
                         style={[props.baseStyle, isExternalLink && style.link, span.styles.map(s => style[s])]}
-                        {...(isExternalLink && Platform.OS === 'web' ? { onClick: () => { if (typeof window !== 'undefined') window.open(span.url!, '_blank', 'noopener,noreferrer'); } } as any : {})}
-                        onPress={isExternalLink && Platform.OS !== 'web'
-                            ? () => props.onLinkPress(span.url!)
-                            : undefined}
+                        onPress={isExternalLink ? () => props.onLinkPress(span.url!) : undefined}
                     >
                         {span.text}
                     </Text>
@@ -289,23 +362,21 @@ function RenderSpans(props: RenderSpanProps) {
 // Table rendering uses column-first layout to ensure consistent column widths.
 // Each column is rendered as a vertical container with all its cells (header + data).
 // This ensures that cells in the same column have the same width, determined by the widest content.
-function RenderTableBlock(props: {
+const RenderTableBlock = React.memo((props: {
     headers: MarkdownSpan[][],
     rows: MarkdownSpan[][][],
     onLinkPress: (url: string) => void,
     selectable: boolean,
-    first: boolean,
-    last: boolean
-}) {
+}) => {
     const columnCount = props.headers.length;
     const rowCount = props.rows.length;
     const isLastRow = (rowIndex: number) => rowIndex === rowCount - 1;
 
     return (
-        <View style={[style.tableContainer, props.first && style.first, props.last && style.last]}>
+        <View style={style.tableContainer}>
             <ScrollView
                 horizontal
-                showsHorizontalScrollIndicator={Platform.OS !== 'web'}
+                showsHorizontalScrollIndicator={true}
                 nestedScrollEnabled={true}
                 style={style.tableScrollView}
             >
@@ -341,7 +412,7 @@ function RenderTableBlock(props: {
             </ScrollView>
         </View>
     );
-}
+});
 
 
 const style = StyleSheet.create((theme) => ({
@@ -435,17 +506,6 @@ const style = StyleSheet.create((theme) => ({
         color: theme.colors.text,
         marginTop: 0,
         marginBottom: 0,
-    },
-
-    //
-    // Common
-    //
-
-    first: {
-        // marginTop: 0
-    },
-    last: {
-        // marginBottom: 0
     },
 
     //
@@ -630,9 +690,4 @@ const style = StyleSheet.create((theme) => ({
         lineHeight: 24,
     },
 
-    // Add global style for Web platform (Unistyles supports this via compiler plugin)
-    ...(Platform.OS === 'web' ? {
-        // Web-only CSS styles
-        _____web_global_styles: {}
-    } : {}),
 }));

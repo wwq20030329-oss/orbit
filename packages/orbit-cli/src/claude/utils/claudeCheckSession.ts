@@ -1,7 +1,80 @@
 import { logger } from "@/ui/logger";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getProjectPath } from "./path";
+
+const RECOVERED_TOOL_USE_NAME = 'UnknownTool';
+
+function repairInvalidToolUseNames(sessionFile: string): number {
+    const sessionData = readFileSync(sessionFile, 'utf-8');
+    const sessionLines = sessionData.split('\n');
+    let repairedCount = 0;
+
+    const repairedLines = sessionLines.map((line) => {
+        if (!line.trim()) {
+            return line;
+        }
+
+        try {
+            const parsed = JSON.parse(line) as Record<string, unknown>;
+            const message = parsed.message;
+
+            if (!message || typeof message !== 'object') {
+                return line;
+            }
+
+            const typedMessage = message as Record<string, unknown>;
+            const content = typedMessage.content;
+            if (!Array.isArray(content)) {
+                return line;
+            }
+
+            let repairedLine = false;
+            const nextContent = content.map((part) => {
+                if (!part || typeof part !== 'object') {
+                    return part;
+                }
+
+                const typedPart = part as Record<string, unknown>;
+                if (typedPart.type !== 'tool_use') {
+                    return part;
+                }
+
+                const name = typedPart.name;
+                if (typeof name === 'string' && name.trim().length === 0) {
+                    repairedCount += 1;
+                    repairedLine = true;
+                    return {
+                        ...typedPart,
+                        name: RECOVERED_TOOL_USE_NAME,
+                    };
+                }
+
+                return part;
+            });
+
+            if (!repairedLine) {
+                return line;
+            }
+
+            return JSON.stringify({
+                ...parsed,
+                message: {
+                    ...typedMessage,
+                    content: nextContent,
+                }
+            });
+        } catch {
+            return line;
+        }
+    });
+
+    if (repairedCount > 0) {
+        writeFileSync(sessionFile, repairedLines.join('\n'));
+    }
+
+    return repairedCount;
+}
 
 export function claudeCheckSession(sessionId: string, path: string) {
     const projectDir = getProjectPath(path);
@@ -12,6 +85,11 @@ export function claudeCheckSession(sessionId: string, path: string) {
     if (!sessionExists) {
         logger.debug(`[claudeCheckSession] Path ${sessionFile} does not exist`);
         return false;
+    }
+
+    const repairedCount = repairInvalidToolUseNames(sessionFile);
+    if (repairedCount > 0) {
+        logger.debug(`[claudeCheckSession] Repaired ${repairedCount} empty tool name(s) in session ${sessionId}`);
     }
 
     // Check if session contains any messages with valid ID fields

@@ -12,11 +12,12 @@ import { VoiceBars } from './VoiceBars';
 interface VoiceAssistantStatusBarProps {
     variant?: 'full' | 'sidebar';
     style?: any;
+    realtimeStatusOverride?: 'disconnected' | 'connecting' | 'connected' | 'error';
 }
 
-export const VoiceAssistantStatusBar = React.memo(({ variant = 'full', style }: VoiceAssistantStatusBarProps) => {
+export const VoiceAssistantStatusBar = React.memo(({ variant = 'full', style, realtimeStatusOverride }: VoiceAssistantStatusBarProps) => {
     const { theme } = useUnistyles();
-    const realtimeStatus = useRealtimeStatus();
+    const realtimeStatus = realtimeStatusOverride ?? useRealtimeStatus();
     const realtimeMode = useRealtimeMode();
 
     // Don't render if disconnected

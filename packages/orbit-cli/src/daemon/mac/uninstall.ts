@@ -1,45 +1,33 @@
-/**
- * Uninstallation script for Orbit daemon LaunchDaemon.
- * 
- * NOTE: This uninstallation method is currently NOT USED since we moved away from
- * system-level daemon installation. See install.ts for the full explanation.
- * 
- * This code is kept for potential future use if we decide to offer system-level 
- * installation/uninstallation as an option.
- */
-
 import { existsSync, unlinkSync } from 'fs';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
+import os from 'os';
+
 import { logger } from '@/ui/logger';
 
-const PLIST_LABEL = 'com.orbit-cli.daemon';
-const PLIST_FILE = `/Library/LaunchDaemons/${PLIST_LABEL}.plist`;
+import { getLaunchAgentPlistPath, LAUNCH_AGENT_LABEL } from './install';
 
 export async function uninstall(): Promise<void> {
+  const homeDir = os.homedir();
+  const plistPath = getLaunchAgentPlistPath(homeDir);
+
+  if (!existsSync(plistPath)) {
+    logger.info('Orbit daemon LaunchAgent not found. Nothing to uninstall.');
+    return;
+  }
+
+  const uid = process.getuid?.();
+  if (uid != null) {
     try {
-        // Check if plist exists
-        if (!existsSync(PLIST_FILE)) {
-            logger.info('Daemon plist not found. Nothing to uninstall.');
-            return;
-        }
-        
-        // Unload the daemon
-        try {
-            execSync(`launchctl unload ${PLIST_FILE}`, { stdio: 'inherit' });
-            logger.info('Daemon stopped successfully');
-        } catch (error) {
-            // Daemon might not be loaded, continue with removal
-            logger.info('Failed to unload daemon (it might not be running)');
-        }
-        
-        // Remove the plist file
-        unlinkSync(PLIST_FILE);
-        logger.info(`Removed daemon plist from ${PLIST_FILE}`);
-        
-        logger.info('Daemon uninstalled successfully');
-        
-    } catch (error) {
-        logger.debug('Failed to uninstall daemon:', error);
-        throw error;
+      execFileSync('launchctl', ['bootout', `gui/${uid}`, plistPath], { stdio: 'ignore' });
+    } catch {
+      try {
+        execFileSync('launchctl', ['disable', `gui/${uid}/${LAUNCH_AGENT_LABEL}`], { stdio: 'ignore' });
+      } catch {
+        // Ignore unload failures and continue cleanup.
+      }
     }
+  }
+
+  unlinkSync(plistPath);
+  logger.info(`Removed Orbit daemon LaunchAgent from ${plistPath}`);
 }

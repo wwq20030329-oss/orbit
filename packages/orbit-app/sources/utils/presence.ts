@@ -7,6 +7,9 @@ type SessionLike = {
     activeAt: number;
     presence?: "online" | number;
     updatedAt?: number;
+    liveRuntime?: {
+        status?: 'connected' | 'detached' | null;
+    } | null;
     metadata?: {
         lifecycleState?: string | null;
         claudeSessionId?: string | null;
@@ -110,6 +113,10 @@ export function isSessionLikelyOnline(
 ): boolean {
     if (session.metadata?.sessionRole === 'native-live-mirror') {
         return false;
+    }
+
+    if (session.liveRuntime?.status === 'connected') {
+        return true;
     }
 
     if (session.presence === 'online') {

@@ -96,13 +96,22 @@ function createResumeRequest(
 }
 
 describe('resolveSessionResumeTarget', () => {
-    it('keeps regular sessions on orbit resume when metadata is intact', () => {
+    it('prefers native CLI resume for sessions with provider backend metadata', () => {
         const session = createSession('session-1');
 
         expect(resolveSessionResumeTarget(session)).toEqual({
-            type: 'orbit-session',
+            type: 'native-cli-history',
             machineId: 'machine-1',
             sessionId: 'session-1',
+            request: {
+                machineId: 'machine-1',
+                tool: 'codex',
+                backendId: 'thread-1',
+                workingDirectory: '/Users/test/project',
+                title: 'project',
+                summary: null,
+                updatedAt: 1,
+            },
         });
     });
 
@@ -167,6 +176,31 @@ describe('getSessionResumeAvailability', () => {
             interactionBlocked: true,
             nativeResumeRequest: request,
         });
+
+        expect(availability.canResume).toBe(true);
+        expect(availability.canShowResume).toBe(true);
+    });
+
+    it('does not require orbit-agent auth for Codex sessions with backend metadata', () => {
+        const session = createSession('session-1');
+        const machine = createMachine('machine-1', {
+            metadata: {
+                host: 'wwq-mac',
+                platform: 'darwin',
+                orbitCliVersion: '1.0.0',
+                orbitHomeDir: '/Users/test/.orbit',
+                homeDir: '/Users/test',
+                resumeSupport: {
+                    rpcAvailable: false,
+                    requiresSameMachine: true,
+                    requiresOrbitAgentAuth: true,
+                    orbitAgentAuthenticated: false,
+                    detectedAt: Date.now(),
+                },
+            },
+        });
+
+        const availability = getSessionResumeAvailability(session, machine, false);
 
         expect(availability.canResume).toBe(true);
         expect(availability.canShowResume).toBe(true);

@@ -29,7 +29,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import Constants from 'expo-constants';
-import { useHeaderHeight } from '@/utils/responsive';
+import { useHeaderHeight, useIsTablet } from '@/utils/responsive';
 import { t } from '@/text';
 import { useAllMachines, useSessions, useSetting, storage } from '@/sync/storage';
 import type { NewSessionAgentType } from '@/sync/persistence';
@@ -55,6 +55,9 @@ import {
     type ModelMode,
     type EffortLevel,
 } from '@/components/modelModeOptions';
+import { PhoneNewSessionHome } from '@/components/PhoneNewSessionHome';
+import { PhoneSessionHome } from '@/components/PhoneSessionHome';
+import { OrbitRemoteSessionManager } from '@/remote/OrbitRemoteSessionManager';
 
 // Agent icon assets
 const agentIcons = {
@@ -78,7 +81,7 @@ type PickerType = 'machine' | 'path' | 'worktree';
 
 type PermissionStyle = { color: string; icon: 'play-forward' | 'pause' };
 
-const COMPOSER_INPUT_VERTICAL_PADDING = Platform.OS === 'web' ? 10 : 8;
+const COMPOSER_INPUT_VERTICAL_PADDING = 8;
 const COMPOSER_SEND_BUTTON_SIZE = 32;
 const COMPOSER_SEND_BUTTON_MARGIN_BOTTOM = Math.max(
     0,
@@ -353,7 +356,7 @@ function PathPickerContent({
         <View style={pickerStyles.container}>
             <View style={pickerStyles.titleRow}>
                 <Text style={[pickerStyles.title, { color: theme.colors.text }]}>{title}</Text>
-                {Platform.OS !== 'web' && onDone && (
+                {onDone && (
                     <Pressable
                         onPress={onDone}
                         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -469,7 +472,7 @@ function getMachineName(machine: Machine): string {
     return machine.metadata?.displayName || machine.metadata?.host || 'unknown';
 }
 
-function NewSessionScreen() {
+export function AdvancedNewSessionScreen() {
     const { theme } = useUnistyles();
     const safeArea = useSafeAreaInsets();
     const headerHeight = useHeaderHeight();
@@ -849,8 +852,10 @@ function NewSessionScreen() {
             switch (result.type) {
                 case 'success':
                     await sync.refreshSessions();
+                    const remoteSessionManager = new OrbitRemoteSessionManager(result.sessionId);
 
                     // Set permission mode and model on the session before sending
+                    await remoteSessionManager.waitUntilReady();
                     storage.getState().updateSessionPermissionMode(result.sessionId, currentPermission.key);
                     storage.getState().updateSessionModelMode(result.sessionId, currentModelKey);
                     if (currentEffort?.key) {
@@ -862,7 +867,10 @@ function NewSessionScreen() {
 
                     // Send initial message if provided
                     if (prompt.trim()) {
-                        await sync.sendMessage(result.sessionId, prompt.trim(), { source: 'new_session' });
+                        await remoteSessionManager.sendCurrentSessionMessage({
+                            content: prompt.trim(),
+                            source: 'new_session',
+                        });
                     }
 
                     router.back();
@@ -895,16 +903,8 @@ function NewSessionScreen() {
 
     const canSend = selectedMachineId && selectedMachine && isMachineOnline(selectedMachine) && !isSpawning;
 
-    // Handle Enter/Cmd+Enter to send on web
-    const handleKeyPress = React.useCallback((event: KeyPressEvent): boolean => {
-        if (Platform.OS === 'web' && event.key === 'Enter' && !event.shiftKey && agentInputEnterToSend) {
-            if (canSend) {
-                handleSend();
-                return true;
-            }
-        }
-        return false;
-    }, [agentInputEnterToSend, canSend, handleSend]);
+    // Web key handling removed; native composer relies on its own send button.
+    const handleKeyPress = React.useCallback((_event: KeyPressEvent): boolean => false, []);
 
     // Auto-focus the text input when the composer mounts
     const composerInputRef = React.useRef<import('@/components/MultiTextInput').MultiTextInputHandle>(null);
@@ -1148,32 +1148,7 @@ function NewSessionScreen() {
                         </Animated.View>
                     )}
 
-                    {/* Web: inline popover */}
-                    {Platform.OS === 'web' && activePicker && (
-                        <View style={[styles.popover, { backgroundColor: theme.colors.header.background }]}>
-                            {activePicker === 'path' ? (
-                                <PathPickerContent
-                                    title="Project"
-                                    items={pathItems}
-                                    value={selectedPath}
-                                    homeDir={selectedHomeDir}
-                                    onChangeValue={setSelectedPath}
-                                    onDone={() => setActivePicker(null)}
-                                />
-                            ) : pickerData ? (
-                                <PickerContent {...pickerData} onSelect={handlePickerSelect} />
-                            ) : null}
-                        </View>
-                    )}
                 </View>
-
-                {/* Web: click-away backdrop */}
-                {Platform.OS === 'web' && activePicker && (
-                    <Pressable
-                        style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: -1 }}
-                        onPress={() => setActivePicker(null)}
-                    />
-                )}
 
                 {/* Spacer */}
                 <View style={{ flex: 1 }} />
@@ -1220,7 +1195,7 @@ function NewSessionScreen() {
                                             name="arrow-up"
                                             size={16}
                                             color={theme.colors.button.primary.tint}
-                                            style={{ marginTop: Platform.OS === 'web' ? 2 : 0 }}
+                                            style={{ marginTop: 0 }}
                                         />
                                     )}
                                 </Pressable>
@@ -1233,7 +1208,7 @@ function NewSessionScreen() {
             </View>
 
             {/* Native: picker bottom sheet */}
-            {Platform.OS !== 'web' && (
+            {(
                 <BottomSheet
                     visible={!!activePicker}
                     onClose={() => setActivePicker(null)}
@@ -1569,4 +1544,12 @@ const pickerStyles = {
     } as const,
 };
 
-export default React.memo(NewSessionScreen);
+export default React.memo(function NewSessionIndexScreen() {
+    const isTablet = useIsTablet();
+
+    if (!isTablet && (Platform.OS === 'ios' || Platform.OS === 'android')) {
+        return <PhoneSessionHome />;
+    }
+
+    return <AdvancedNewSessionScreen />;
+});

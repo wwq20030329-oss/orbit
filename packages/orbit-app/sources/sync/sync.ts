@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import type { LiveMirrorDetach } from '@orbit/wire';
 import { apiSocket } from '@/sync/apiSocket';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { handleUnauthorizedResponse } from '@/auth/authRecovery';
@@ -55,10 +56,6 @@ import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
 import { DecryptedArtifact, Artifact, ArtifactCreateRequest, ArtifactUpdateRequest } from './artifactTypes';
 import { ArtifactEncryption } from './encryption/artifactEncryption';
-import { getFriendsList, getUserProfile } from './apiFriends';
-import { fetchFeed } from './apiFeed';
-import { FeedItem } from './feedTypes';
-import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
 import { didSessionControlReturnToApp, getSessionControlState } from '@/utils/sessionControlState';
 import { VisibleSessionTracker } from './visibleSessionTracker';
@@ -93,6 +90,17 @@ import {
     hasPendingOutboxMessages,
     shouldStartBackgroundSendWatchdog,
 } from './outboxSendLifecycle';
+import { t } from '@/text';
+import { createLiveMirrorClient } from './liveMirror';
+import {
+    LIVE_RUNTIME_SOCKET_DISCONNECT_GRACE_MS,
+    shouldDeferLiveRuntimeDetachDuringSocketRecovery,
+    resolveSessionLiveRuntimeTarget,
+    shouldKeepLiveRuntimeStateDuringSocketRecovery,
+    type SessionLiveRuntimeTarget,
+} from '@/utils/sessionLiveRuntime';
+import { requestSessionRefresh } from '@/remote/sessionRefreshRegistry';
+import { resolveTrackedSessionLastSeq } from '@/utils/sessionLastSeq';
 
 type V3PostSessionMessagesResponse = {
     messages: Array<{
@@ -162,8 +170,15 @@ class Sync {
     private sessionQueueProcessing = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
     private visibleSessions = new VisibleSessionTracker();
+    private liveMirrorClient = createLiveMirrorClient(apiSocket);
+    private liveRuntimeTargetsBySessionId = new Map<string, SessionLiveRuntimeTarget>();
+    private liveRuntimeLastSeqByRuntimeId = new Map<string, number>();
+    private liveRuntimeDisconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    private liveRuntimeDisconnectReason: LiveMirrorDetach['reason'] | null = null;
+    private liveRuntimeSocketStatus: 'disconnected' | 'connecting' | 'connected' | 'error' = 'disconnected';
     private messageFetchAbortControllers = new Map<string, AbortController>();
     private messageBackfillPromises = new Map<string, Promise<void>>();
+    private pendingVisibleSessionMessageRefreshReasons = new Map<string, 'app-active' | 'socket-reconnected' | 'realtime-message-gap' | 'session-control-returned'>();
     private visibleSessionMessageRefreshAt = new Map<string, number>();
     private visibleSessionStateRefreshAt = new Map<string, number>();
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
@@ -176,9 +191,6 @@ class Sync {
     private pushTokenSync: InvalidateSync;
     private nativeUpdateSync: InvalidateSync;
     private artifactsSync: InvalidateSync;
-    private friendsSync: InvalidateSync;
-    private friendRequestsSync: InvalidateSync;
-    private feedSync: InvalidateSync;
     private activityAccumulator: ActivityUpdateAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     private appState: AppStateStatus = AppState.currentState;
@@ -190,6 +202,7 @@ class Sync {
     // Generic locking mechanism
     private recalculationLockCount = 0;
     private lastRecalculationTime = 0;
+    private lastResumeRefreshAt = 0;
 
     constructor() {
         this.sessionsSync = new InvalidateSync(this.fetchSessions);
@@ -199,10 +212,6 @@ class Sync {
         this.machinesSync = new InvalidateSync(this.fetchMachines);
         this.nativeUpdateSync = new InvalidateSync(this.fetchNativeUpdate);
         this.artifactsSync = new InvalidateSync(this.fetchArtifactsList);
-        this.friendsSync = new InvalidateSync(this.fetchFriends);
-        this.friendRequestsSync = new InvalidateSync(this.fetchFriendRequests);
-        this.feedSync = new InvalidateSync(this.fetchFeed);
-
         const registerPushToken = async () => {
             if (__DEV__) {
                 return;
@@ -230,20 +239,26 @@ class Sync {
                     this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
                 }
                 log.log('📱 App became active');
-                invalidateNativeCliHistoryForMachines();
-                this.purchasesSync.invalidate();
-                this.profileSync.invalidate();
-                this.machinesSync.invalidate();
-                this.pushTokenSync.invalidate();
-                this.sessionsSync.invalidate();
-                this.nativeUpdateSync.invalidate();
-                log.log('📱 App became active: Invalidating artifacts sync');
-                this.artifactsSync.invalidate();
-                this.friendsSync.invalidate();
-                this.friendRequestsSync.invalidate();
-                this.feedSync.invalidate();
-                for (const sessionId of this.visibleSessions.listVisible()) {
-                    this.getMessagesSync(sessionId).invalidate();
+                
+                const now = Date.now();
+                const shouldThrottledRefresh = now - this.lastResumeRefreshAt > 5000;
+                
+                if (shouldThrottledRefresh) {
+                    this.lastResumeRefreshAt = now;
+                    invalidateNativeCliHistoryForMachines();
+                    this.purchasesSync.invalidate();
+                    this.profileSync.invalidate();
+                    this.machinesSync.invalidate();
+                    this.pushTokenSync.invalidate();
+                    this.sessionsSync.invalidate();
+                    this.nativeUpdateSync.invalidate();
+                    log.log('📱 App became active: Invalidating full sync (sessions, machines, artifacts)');
+                    this.artifactsSync.invalidate();
+                    for (const sessionId of this.visibleSessions.listVisible()) {
+                        this.requestSessionMessagesRefresh(sessionId, 'app-active');
+                    }
+                } else {
+                    log.log('📱 App became active: Skipping sync refresh (throttled)');
                 }
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
@@ -259,14 +274,15 @@ class Sync {
         this.serverID = parseToken(credentials.token);
         await this.#init();
 
-        // Await settings sync to have fresh settings
-        await this.settingsSync.awaitQueue();
-
-        // Await profile sync to have fresh profile
-        await this.profileSync.awaitQueue();
-
-        // Await purchases sync to have fresh purchases
-        await this.purchasesSync.awaitQueue();
+        // Settings / profile / purchases are independent network fetches; running
+        // them in parallel shaves ~2x the per-request latency off the first-launch
+        // cold path without changing their individual semantics (each one
+        // separately queues and resolves via `awaitQueue`).
+        await Promise.all([
+            this.settingsSync.awaitQueue(),
+            this.profileSync.awaitQueue(),
+            this.purchasesSync.awaitQueue(),
+        ]);
     }
 
     async restore(credentials: AuthCredentials, encryption: Encryption) {
@@ -303,10 +319,7 @@ class Sync {
         this.machinesSync.invalidate();
         this.pushTokenSync.invalidate();
         this.nativeUpdateSync.invalidate();
-        this.friendsSync.invalidate();
-        this.friendRequestsSync.invalidate();
         this.artifactsSync.invalidate();
-        this.feedSync.invalidate();
         log.log('🔄 #init: All syncs invalidated, including artifacts');
 
         // Wait for both sessions and machines to load, then mark as ready
@@ -353,13 +366,19 @@ class Sync {
         if (session) {
             voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
         }
+
+        if (session) {
+            this.attachLiveRuntimeForSession(sessionId);
+        }
     }
 
     onSessionHidden = (sessionId: string) => {
         this.visibleSessions.markHidden(sessionId);
         if (!this.isSessionVisible(sessionId)) {
             this.messageFetchAbortControllers.get(sessionId)?.abort();
+            this.pendingVisibleSessionMessageRefreshReasons.delete(sessionId);
         }
+        this.detachLiveRuntimeForSession(sessionId, 'client-detached');
     }
 
     private isSessionVisible = (sessionId: string) => {
@@ -372,6 +391,167 @@ class Sync {
 
     private shouldContinueVisibleSync = (sessionId: string, expectedVersion: number) => {
         return this.isSessionVisible(sessionId) && this.getSessionVisibilityVersion(sessionId) === expectedVersion;
+    }
+
+    private rememberLiveRuntimeTarget(sessionId: string, target: SessionLiveRuntimeTarget) {
+        this.liveRuntimeTargetsBySessionId.set(sessionId, target);
+    }
+
+    private forgetLiveRuntimeTarget(sessionId: string) {
+        this.liveRuntimeTargetsBySessionId.delete(sessionId);
+    }
+
+    private attachLiveRuntimeForSession(sessionId: string): boolean {
+        const session = storage.getState().sessions[sessionId];
+        if (!session) {
+            return false;
+        }
+
+        const target = resolveSessionLiveRuntimeTarget(session);
+        if (!target) {
+            this.forgetLiveRuntimeTarget(sessionId);
+            return false;
+        }
+
+        const existingTarget = this.liveRuntimeTargetsBySessionId.get(sessionId);
+        if (
+            existingTarget
+            && existingTarget.runtimeId === target.runtimeId
+            && existingTarget.sessionId === target.sessionId
+            && existingTarget.machineId === target.machineId
+        ) {
+            return true;
+        }
+
+        const afterSeq = this.liveRuntimeLastSeqByRuntimeId.get(target.runtimeId);
+        let didSend = false;
+        try {
+            didSend = this.liveMirrorClient.attach({
+                ...target,
+                ...(afterSeq !== undefined ? { afterSeq } : {}),
+                mode: 'viewer',
+            });
+        } catch (error) {
+            log.log(`🪞 Failed to attach live runtime for session ${sessionId}: ${String(error)}`);
+            return false;
+        }
+
+        if (didSend) {
+            this.rememberLiveRuntimeTarget(sessionId, target);
+        }
+
+        return didSend;
+    }
+
+    private detachLiveRuntimeForSession(
+        sessionId: string,
+        reason: 'client-detached' | 'error' = 'client-detached',
+    ) {
+        const existingTarget = this.liveRuntimeTargetsBySessionId.get(sessionId);
+        const resolvedTarget = existingTarget ?? (
+            storage.getState().sessions[sessionId]
+                ? resolveSessionLiveRuntimeTarget(storage.getState().sessions[sessionId]!)
+                : null
+        );
+
+        this.forgetLiveRuntimeTarget(sessionId);
+        if (!resolvedTarget) {
+            return;
+        }
+
+        try {
+            this.liveMirrorClient.detach(resolvedTarget);
+        } catch (error) {
+            log.log(`🪞 Failed to detach live runtime for session ${sessionId}: ${String(error)}`);
+        }
+        storage.getState().applyLiveRuntimeDetached({
+            runtimeId: resolvedTarget.runtimeId,
+            sessionId: resolvedTarget.sessionId,
+            machineId: resolvedTarget.machineId,
+            detachedAt: Date.now(),
+            reason,
+        });
+    }
+
+    private attachVisibleLiveRuntimes() {
+        for (const sessionId of this.visibleSessions.listVisible()) {
+            this.attachLiveRuntimeForSession(sessionId);
+        }
+    }
+
+    private cancelPendingLiveRuntimeDisconnect() {
+        if (this.liveRuntimeDisconnectTimeout) {
+            clearTimeout(this.liveRuntimeDisconnectTimeout);
+            this.liveRuntimeDisconnectTimeout = null;
+        }
+        this.liveRuntimeDisconnectReason = null;
+    }
+
+    private scheduleLiveRuntimeDisconnect(reason: LiveMirrorDetach['reason']) {
+        this.liveRuntimeDisconnectReason = reason;
+
+        if (this.liveRuntimeDisconnectTimeout) {
+            clearTimeout(this.liveRuntimeDisconnectTimeout);
+        }
+
+        this.liveRuntimeDisconnectTimeout = setTimeout(() => {
+            this.liveRuntimeDisconnectTimeout = null;
+            const pendingReason = this.liveRuntimeDisconnectReason;
+            this.liveRuntimeDisconnectReason = null;
+            if (!pendingReason) {
+                return;
+            }
+
+            if (this.liveRuntimeSocketStatus === 'connected') {
+                return;
+            }
+
+            this.clearLiveRuntimeConnections(pendingReason);
+        }, LIVE_RUNTIME_SOCKET_DISCONNECT_GRACE_MS);
+    }
+
+    private clearLiveRuntimeConnections(reason: LiveMirrorDetach['reason']) {
+        this.cancelPendingLiveRuntimeDisconnect();
+        this.liveRuntimeTargetsBySessionId.clear();
+        storage.getState().detachAllLiveRuntimeConnections(reason, Date.now());
+    }
+
+    private requestSessionMessagesRefresh(
+        sessionId: string,
+        reason: 'app-active' | 'socket-reconnected' | 'realtime-message-gap' | 'session-control-returned',
+    ) {
+        if (this.messageFetchAbortControllers.has(sessionId)) {
+            const existingReason = this.pendingVisibleSessionMessageRefreshReasons.get(sessionId);
+            if (
+                !existingReason
+                || reason === 'realtime-message-gap'
+                || reason === 'session-control-returned'
+            ) {
+                this.pendingVisibleSessionMessageRefreshReasons.set(sessionId, reason);
+            }
+            return;
+        }
+
+        this.pendingVisibleSessionMessageRefreshReasons.delete(sessionId);
+        if (!requestSessionRefresh(sessionId, reason)) {
+            this.getMessagesSync(sessionId).invalidate();
+        }
+    }
+
+    private flushPendingSessionMessagesRefresh(sessionId: string) {
+        const pendingReason = this.pendingVisibleSessionMessageRefreshReasons.get(sessionId);
+        if (!pendingReason || !this.isSessionVisible(sessionId)) {
+            this.pendingVisibleSessionMessageRefreshReasons.delete(sessionId);
+            return false;
+        }
+
+        this.pendingVisibleSessionMessageRefreshReasons.delete(sessionId);
+        if (!requestSessionRefresh(sessionId, pendingReason)) {
+            this.getMessagesSync(sessionId).invalidate();
+            return true;
+        }
+
+        return true;
     }
 
     private isAbortError = (error: unknown) => {
@@ -390,6 +570,17 @@ class Sync {
             this.messagesSync.set(sessionId, sync);
         }
         return sync;
+    }
+
+    private getTrackedLastSeq = (sessionId: string): number | undefined => {
+        const inMemoryLastSeq = this.sessionLastSeq.get(sessionId);
+        const storedLastSeq = storage.getState().sessionMessages[sessionId]?.lastSeq;
+        return resolveTrackedSessionLastSeq(inMemoryLastSeq, storedLastSeq);
+    }
+
+    private setTrackedLastSeq = (sessionId: string, seq: number) => {
+        this.sessionLastSeq.set(sessionId, seq);
+        storage.getState().applySessionLastSeq(sessionId, seq);
     }
 
     private refreshVisibleSessionMessages(sessionId: string, now = Date.now()) {
@@ -521,7 +712,6 @@ class Sync {
             appState: this.appState,
             hasPendingMessages: hasPendingOutboxMessages(this.sendAbortControllers, this.pendingOutbox),
             hasWatchdog: this.backgroundSendTimeout !== null,
-            isWeb: Platform.OS === 'web',
         })) {
             return;
         }
@@ -544,14 +734,14 @@ class Sync {
     }
 
     private async scheduleBackgroundSendTimeoutNotification() {
-        if (Platform.OS === 'web' || this.backgroundSendNotificationId) {
+        if (this.backgroundSendNotificationId) {
             return;
         }
         try {
             this.backgroundSendNotificationId = await Notifications.scheduleNotificationAsync({
                 content: {
-                    title: 'Message not sent',
-                    body: 'A message is still sending in the background. It will fail in 30 seconds if not delivered.',
+                    title: t('errors.messageNotSentTitle'),
+                    body: t('errors.messageNotSentBody'),
                     sound: true
                 },
                 trigger: {
@@ -578,14 +768,11 @@ class Sync {
     }
 
     private async notifyMessageSendFailed() {
-        if (Platform.OS === 'web') {
-            return;
-        }
         try {
             await Notifications.scheduleNotificationAsync({
                 content: {
-                    title: 'Message failed',
-                    body: 'A message failed to send while the app was in background. Open Orbit and retry.',
+                    title: t('errors.messageFailedTitle'),
+                    body: t('errors.messageFailedBody'),
                     sound: true
                 },
                 trigger: null
@@ -623,7 +810,7 @@ class Sync {
 
         await this.cancelBackgroundSendTimeoutNotification();
         await this.notifyMessageSendFailed();
-        this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
+        this.failPendingOutboxMessages(t('errors.backgroundSendFailedReason'));
         this.backgroundSendStartedAt = null;
     }
 
@@ -651,9 +838,7 @@ class Sync {
 
         // Determine sentFrom based on platform
         let sentFrom: string;
-        if (Platform.OS === 'web') {
-            sentFrom = 'web';
-        } else if (Platform.OS === 'android') {
+        if (Platform.OS === 'android') {
             sentFrom = 'android';
         } else if (Platform.OS === 'ios') {
             // Check if running on Mac (Catalyst or Designed for iPad on Mac)
@@ -663,7 +848,7 @@ class Sync {
                 sentFrom = 'ios';
             }
         } else {
-            sentFrom = 'web'; // fallback
+            sentFrom = 'ios'; // fallback
         }
 
         const fallbackModel: string | null = null;
@@ -841,40 +1026,6 @@ class Sync {
         }
     }
 
-    async assumeUsers(userIds: string[]): Promise<void> {
-        if (!this.credentials || userIds.length === 0) return;
-        
-        const state = storage.getState();
-        // Filter out users we already have in cache (including null for 404s)
-        const missingIds = userIds.filter(id => !(id in state.users));
-        
-        if (missingIds.length === 0) return;
-        
-        log.log(`👤 Fetching ${missingIds.length} missing users...`);
-        
-        // Fetch missing users in parallel
-        const results = await Promise.all(
-            missingIds.map(async (id) => {
-                try {
-                    const profile = await getUserProfile(this.credentials!, id);
-                    return { id, profile };  // profile is null if 404
-                } catch (error) {
-                    console.error(`Failed to fetch user ${id}:`, error);
-                    return { id, profile: null };  // Treat errors as 404
-                }
-            })
-        );
-        
-        // Convert to Record<string, UserProfile | null>
-        const usersMap: Record<string, UserProfile | null> = {};
-        results.forEach(({ id, profile }) => {
-            usersMap[id] = profile;
-        });
-        
-        storage.getState().applyUsers(usersMap);
-        log.log(`👤 Applied ${results.length} users to cache (${results.filter(r => r.profile).length} found, ${results.filter(r => !r.profile).length} not found)`);
-    }
-
     //
     // Private
     //
@@ -998,15 +1149,22 @@ class Sync {
             log.log('📦 fetchArtifactsList: Fetching artifacts from server');
             const artifacts = await fetchArtifacts(this.credentials);
             log.log(`📦 fetchArtifactsList: Received ${artifacts.length} artifacts from server`);
-            const decryptedArtifacts: DecryptedArtifact[] = [];
-
-            for (const artifact of artifacts) {
+            const decryptedArtifacts = await Promise.all(artifacts.map(async (artifact) => {
                 try {
                     // Decrypt the data encryption key
                     const decryptedKey = await this.encryption.decryptEncryptionKey(artifact.dataEncryptionKey);
                     if (!decryptedKey) {
                         console.error(`Failed to decrypt key for artifact ${artifact.id}`);
-                        continue;
+                        return {
+                            id: artifact.id,
+                            title: null,
+                            body: undefined,
+                            headerVersion: artifact.headerVersion,
+                            seq: artifact.seq,
+                            createdAt: artifact.createdAt,
+                            updatedAt: artifact.updatedAt,
+                            isDecrypted: false,
+                        };
                     }
 
                     // Store the decrypted key in memory
@@ -1018,7 +1176,7 @@ class Sync {
                     // Decrypt header
                     const header = await artifactEncryption.decryptHeader(artifact.header);
                     
-                    decryptedArtifacts.push({
+                    return {
                         id: artifact.id,
                         title: header?.title || null,
                         sessions: header?.sessions,  // Include sessions from header
@@ -1030,11 +1188,11 @@ class Sync {
                         createdAt: artifact.createdAt,
                         updatedAt: artifact.updatedAt,
                         isDecrypted: !!header,
-                    });
+                    } as DecryptedArtifact;
                 } catch (err) {
                     console.error(`Failed to decrypt artifact ${artifact.id}:`, err);
-                    // Add with decryption failed flag
-                    decryptedArtifacts.push({
+                    // Return with decryption failed flag
+                    return {
                         id: artifact.id,
                         title: null,
                         body: undefined,
@@ -1043,9 +1201,9 @@ class Sync {
                         createdAt: artifact.createdAt,
                         updatedAt: artifact.updatedAt,
                         isDecrypted: false,
-                    });
+                    } as DecryptedArtifact;
                 }
-            }
+            }));
 
             log.log(`📦 fetchArtifactsList: Successfully decrypted ${decryptedArtifacts.length} artifacts`);
             storage.getState().applyArtifacts(decryptedArtifacts);
@@ -1416,110 +1574,6 @@ class Sync {
         log.log(`🖥️ fetchMachines completed - processed ${decryptedMachines.length} machines`);
     }
 
-    private fetchFriends = async () => {
-        if (!this.credentials) return;
-        
-        try {
-            log.log('👥 Fetching friends list...');
-            const friendsList = await getFriendsList(this.credentials);
-            storage.getState().applyFriends(friendsList);
-            log.log(`👥 fetchFriends completed - processed ${friendsList.length} friends`);
-        } catch (error) {
-            console.error('Failed to fetch friends:', error);
-            // Silently handle error - UI will show appropriate state
-        }
-    }
-
-    private fetchFriendRequests = async () => {
-        // Friend requests are now included in the friends list with status='pending'
-        // This method is kept for backward compatibility but does nothing
-        log.log('👥 fetchFriendRequests called - now handled by fetchFriends');
-    }
-
-    private fetchFeed = async () => {
-        if (!this.credentials) return;
-
-        try {
-            log.log('📰 Fetching feed...');
-            const state = storage.getState();
-            const existingItems = state.feedItems;
-            const head = state.feedHead;
-            
-            // Load feed items - if we have a head, load newer items
-            let allItems: FeedItem[] = [];
-            let hasMore = true;
-            let cursor = head ? { after: head } : undefined;
-            let loadedCount = 0;
-            const maxItems = 500;
-            
-            // Keep loading until we reach known items or hit max limit
-            while (hasMore && loadedCount < maxItems) {
-                const response = await fetchFeed(this.credentials, {
-                    limit: 100,
-                    ...cursor
-                });
-                
-                // Check if we reached known items
-                const foundKnown = response.items.some(item => 
-                    existingItems.some(existing => existing.id === item.id)
-                );
-                
-                allItems.push(...response.items);
-                loadedCount += response.items.length;
-                hasMore = response.hasMore && !foundKnown;
-                
-                // Update cursor for next page
-                if (response.items.length > 0) {
-                    const lastItem = response.items[response.items.length - 1];
-                    cursor = { after: lastItem.cursor };
-                }
-            }
-            
-            // If this is initial load (no head), also load older items
-            if (!head && allItems.length < 100) {
-                const response = await fetchFeed(this.credentials, {
-                    limit: 100
-                });
-                allItems.push(...response.items);
-            }
-            
-            // Collect user IDs from friend-related feed items
-            const userIds = new Set<string>();
-            allItems.forEach(item => {
-                if (item.body && (item.body.kind === 'friend_request' || item.body.kind === 'friend_accepted')) {
-                    userIds.add(item.body.uid);
-                }
-            });
-            
-            // Fetch missing users
-            if (userIds.size > 0) {
-                await this.assumeUsers(Array.from(userIds));
-            }
-            
-            // Filter out items where user is not found (404)
-            const users = storage.getState().users;
-            const compatibleItems = allItems.filter(item => {
-                // Keep text items
-                if (item.body.kind === 'text') return true;
-                
-                // For friend-related items, check if user exists and is not null (404)
-                if (item.body.kind === 'friend_request' || item.body.kind === 'friend_accepted') {
-                    const userProfile = users[item.body.uid];
-                    // Keep item only if user exists and is not null
-                    return userProfile !== null && userProfile !== undefined;
-                }
-                
-                return true;
-            });
-            
-            // Apply only compatible items to storage
-            storage.getState().applyFeedItems(compatibleItems);
-            log.log(`📰 fetchFeed completed - loaded ${compatibleItems.length} compatible items (${allItems.length - compatibleItems.length} filtered)`);
-        } catch (error) {
-            console.error('Failed to fetch feed:', error);
-        }
-    }
-
     private syncSettings = async () => {
         if (!this.credentials) return;
 
@@ -1745,8 +1799,6 @@ class Sync {
                     apiKey = config.revenueCatAppleKey;
                 } else if (Platform.OS === 'android') {
                     apiKey = config.revenueCatGoogleKey;
-                } else if (Platform.OS === 'web') {
-                    apiKey = config.revenueCatStripeKey;
                 }
 
                 if (!apiKey) {
@@ -1816,14 +1868,14 @@ class Sync {
             const data = await response.json() as V3PostSessionMessagesResponse;
             pending.splice(0, batch.length);
             if (Array.isArray(data.messages) && data.messages.length > 0) {
-                const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+                const currentLastSeq = this.getTrackedLastSeq(sessionId) ?? 0;
                 let maxSeq = currentLastSeq;
                 for (const message of data.messages) {
                     if (message.seq > maxSeq) {
                         maxSeq = message.seq;
                     }
                 }
-                this.sessionLastSeq.set(sessionId, maxSeq);
+                this.setTrackedLastSeq(sessionId, maxSeq);
             }
         } catch (error) {
             this.maybeStartBackgroundSendWatchdog();
@@ -1875,7 +1927,7 @@ class Sync {
             const abortController = new AbortController();
             this.messageFetchAbortControllers.set(sessionId, abortController);
             const existingSessionMessages = storage.getState().sessionMessages[sessionId]?.messages ?? [];
-            const trackedLastSeq = this.sessionLastSeq.get(sessionId);
+            const trackedLastSeq = this.getTrackedLastSeq(sessionId);
             const afterSeq = trackedLastSeq ?? 0;
             const shouldBootstrap = shouldBootstrapVisibleSessionMessages({
                 loadedCount: existingSessionMessages.length,
@@ -1915,7 +1967,7 @@ class Sync {
                     }
 
                     if (page.newestSeq !== null) {
-                        this.sessionLastSeq.set(sessionId, page.newestSeq);
+                        this.setTrackedLastSeq(sessionId, page.newestSeq);
                         nextAfterSeq = page.newestSeq;
                     }
                     backgroundBackfillBeforeSeq = page.hasMore ? page.oldestSeq : null;
@@ -1953,7 +2005,7 @@ class Sync {
                         }
 
                         const maxSeq = page.newestSeq ?? nextAfterSeq;
-                        this.sessionLastSeq.set(sessionId, maxSeq);
+                        this.setTrackedLastSeq(sessionId, maxSeq);
                         hasMore = page.hasMore;
                         if (hasMore && maxSeq === nextAfterSeq) {
                             log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
@@ -1977,6 +2029,8 @@ class Sync {
                     this.startOlderMessagesBackfill(sessionId, backgroundBackfillBeforeSeq, visibilityVersion);
                 }
             }
+
+            this.flushPendingSessionMessagesRefresh(sessionId);
         });
     }
 
@@ -2009,15 +2063,91 @@ class Sync {
             this.machinesSync.invalidate();
             log.log('🔌 Socket reconnected: Invalidating artifacts sync');
             this.artifactsSync.invalidate();
-            this.friendsSync.invalidate();
-            this.friendRequestsSync.invalidate();
-            this.feedSync.invalidate();
             for (const sessionId of this.visibleSessions.listVisible()) {
-                this.getMessagesSync(sessionId).invalidate();
+                this.requestSessionMessagesRefresh(sessionId, 'socket-reconnected');
             }
             for (const sync of this.sendSync.values()) {
                 sync.invalidate();
             }
+            this.attachVisibleLiveRuntimes();
+        });
+
+        apiSocket.onStatusChange((status) => {
+            this.liveRuntimeSocketStatus = status;
+            if (status === 'connected') {
+                this.cancelPendingLiveRuntimeDisconnect();
+                return;
+            }
+
+            if (shouldKeepLiveRuntimeStateDuringSocketRecovery(status)) {
+                const reason = status === 'error' ? 'error' : 'client-detached';
+                this.scheduleLiveRuntimeDisconnect(reason);
+            }
+        });
+
+        this.liveMirrorClient.onAttachAccepted((payload) => {
+            this.cancelPendingLiveRuntimeDisconnect();
+            const latestFrameSeq = Math.max(
+                payload.snapshot?.seq ?? 0,
+                ...payload.backlog.map((frame) => frame.seq),
+            );
+            const latestFrameAt = Math.max(
+                payload.snapshot?.ts ?? 0,
+                ...payload.backlog.map((frame) => frame.ts),
+                payload.runtime.updatedAt,
+            );
+
+            this.liveRuntimeLastSeqByRuntimeId.set(
+                payload.runtime.runtimeId,
+                Math.max(payload.runtime.seq, latestFrameSeq),
+            );
+
+            storage.getState().applyLiveRuntimeConnected({
+                runtimeId: payload.runtime.runtimeId,
+                sessionId: payload.runtime.sessionId,
+                machineId: payload.runtime.machineId,
+                connectedAt: payload.runtime.updatedAt,
+                lastFrameAt: latestFrameAt > 0 ? latestFrameAt : null,
+            });
+        });
+
+        this.liveMirrorClient.onFrame((payload) => {
+            this.cancelPendingLiveRuntimeDisconnect();
+            const previousSeq = this.liveRuntimeLastSeqByRuntimeId.get(payload.runtimeId) ?? 0;
+            if (payload.seq > previousSeq) {
+                this.liveRuntimeLastSeqByRuntimeId.set(payload.runtimeId, payload.seq);
+            }
+
+            if (previousSeq === 0) {
+                storage.getState().applyLiveRuntimeFrame({
+                    runtimeId: payload.runtimeId,
+                    sessionId: payload.sessionId,
+                    machineId: payload.machineId,
+                    frameAt: payload.ts,
+                });
+            }
+        });
+
+        this.liveMirrorClient.onDetach((payload) => {
+            for (const [sessionId, target] of this.liveRuntimeTargetsBySessionId.entries()) {
+                if (target.runtimeId === payload.runtimeId) {
+                    this.liveRuntimeTargetsBySessionId.delete(sessionId);
+                }
+            }
+
+            if (shouldDeferLiveRuntimeDetachDuringSocketRecovery(payload.reason, this.liveRuntimeSocketStatus)) {
+                this.scheduleLiveRuntimeDisconnect(payload.reason);
+                return;
+            }
+
+            this.liveRuntimeLastSeqByRuntimeId.delete(payload.runtimeId);
+            storage.getState().applyLiveRuntimeDetached({
+                runtimeId: payload.runtimeId,
+                sessionId: payload.sessionId,
+                machineId: payload.machineId,
+                detachedAt: Date.now(),
+                reason: payload.reason,
+            });
         });
     }
 
@@ -2035,6 +2165,10 @@ class Sync {
             const messageUpdate = updateData as ApiUpdateContainer & { body: ApiUpdateNewMessage };
             await handleRealtimeMessageUpdate(messageUpdate, {
                 isSessionVisible: this.isSessionVisible,
+                hasLocalMessageHistory: (sessionId) => {
+                    const sessionMessages = storage.getState().sessionMessages[sessionId];
+                    return Boolean(sessionMessages?.isLoaded || (sessionMessages?.messages.length ?? 0) > 0);
+                },
                 getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
                 getSession: (sessionId) => storage.getState().sessions[sessionId],
                 applySessions: this.applySessions,
@@ -2043,13 +2177,13 @@ class Sync {
                         log.log(`🔄 Sync: Failed to refresh sessions for missing session ${messageUpdate.body.sid}: ${String(error)}`);
                     });
                 },
-                getLastSeq: (sessionId) => this.sessionLastSeq.get(sessionId),
+                getLastSeq: this.getTrackedLastSeq,
                 setLastSeq: (sessionId, seq) => {
-                    this.sessionLastSeq.set(sessionId, seq);
+                    this.setTrackedLastSeq(sessionId, seq);
                 },
                 enqueueMessages: this.enqueueMessages.bind(this),
                 invalidateMessages: (sessionId) => {
-                    this.getMessagesSync(sessionId).invalidate();
+                    this.requestSessionMessagesRefresh(sessionId, 'realtime-message-gap');
                 },
                 isMutableToolCall: (sessionId, toolUseId) => storage.getState().isMutableToolCall(sessionId, toolUseId),
                 invalidateGitStatus: (sessionId) => {
@@ -2076,7 +2210,7 @@ class Sync {
                 getSession: (sessionId) => storage.getState().sessions[sessionId],
                 getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
                 isSessionVisible: this.isSessionVisible,
-                invalidateMessages: (sessionId) => this.getMessagesSync(sessionId).invalidate(),
+                invalidateMessages: (sessionId) => this.requestSessionMessagesRefresh(sessionId, 'realtime-message-gap'),
                 invalidateGitStatus: (sessionId) => gitStatusSync.invalidate(sessionId),
                 rememberDeletedSessionHints: rememberNativeCliHintsForSession,
                 deleteSession: (sessionId) => storage.getState().deleteSession(sessionId),
@@ -2097,7 +2231,7 @@ class Sync {
                 getSession: (sessionId) => storage.getState().sessions[sessionId],
                 getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
                 isSessionVisible: this.isSessionVisible,
-                invalidateMessages: (sessionId) => this.getMessagesSync(sessionId).invalidate(),
+                invalidateMessages: (sessionId) => this.requestSessionMessagesRefresh(sessionId, 'realtime-message-gap'),
                 invalidateGitStatus: (sessionId) => gitStatusSync.invalidate(sessionId),
                 rememberDeletedSessionHints: rememberNativeCliHintsForSession,
                 deleteSession: (sessionId) => storage.getState().deleteSession(sessionId),
@@ -2128,7 +2262,7 @@ class Sync {
                 isSessionVisible: this.isSessionVisible,
                 invalidateMessages: (sessionId) => {
                     log.log(`🔄 Control returned to mobile for session ${sessionId}, re-fetching messages`);
-                    this.getMessagesSync(sessionId).invalidate();
+                    this.requestSessionMessagesRefresh(sessionId, 'session-control-returned');
                 },
                 invalidateGitStatus: (sessionId) => gitStatusSync.invalidate(sessionId),
                 rememberDeletedSessionHints: rememberNativeCliHintsForSession,
@@ -2168,10 +2302,11 @@ class Sync {
             }
 
             // Handle settings updates (new for profile sync)
-            if (accountUpdate.settings?.value) {
+            if (accountUpdate.settings) {
                 try {
-                    const decryptedSettings = await this.encryption.decryptRaw(accountUpdate.settings.value);
-                    const parsedSettings = settingsParse(decryptedSettings);
+                    const parsedSettings = accountUpdate.settings.value
+                        ? settingsParse(await this.encryption.decryptRaw(accountUpdate.settings.value))
+                        : { ...settingsDefaults };
 
                     // Version compatibility check
                     const settingsSchemaVersion = parsedSettings.schemaVersion ?? 1;
@@ -2199,25 +2334,6 @@ class Sync {
                 updateData as Parameters<typeof handleRealtimeUpdateMachineState>[0],
                 this.getMachineRealtimeUpdateDependencies(),
             );
-        } else if (updateData.body.t === 'relationship-updated') {
-            log.log('👥 Received relationship-updated update');
-            const relationshipUpdate = updateData.body;
-            
-            // Apply the relationship update to storage
-            storage.getState().applyRelationshipUpdate({
-                fromUserId: relationshipUpdate.fromUserId,
-                toUserId: relationshipUpdate.toUserId,
-                status: relationshipUpdate.status,
-                action: relationshipUpdate.action,
-                fromUser: relationshipUpdate.fromUser,
-                toUser: relationshipUpdate.toUser,
-                timestamp: relationshipUpdate.timestamp
-            });
-            
-            // Invalidate friends data to refresh with latest changes
-            this.friendsSync.invalidate();
-            this.friendRequestsSync.invalidate();
-            this.feedSync.invalidate();
         } else if (updateData.body.t === 'new-artifact') {
             log.log('📦 Received new-artifact update');
             const artifactUpdate = updateData.body;
@@ -2329,36 +2445,6 @@ class Sync {
             
             // Remove encryption key from memory
             this.artifactDataKeys.delete(artifactId);
-        } else if (updateData.body.t === 'new-feed-post') {
-            log.log('📰 Received new-feed-post update');
-            const feedUpdate = updateData.body;
-            
-            // Convert to FeedItem with counter from cursor
-            const feedItem: FeedItem = {
-                id: feedUpdate.id,
-                body: feedUpdate.body,
-                cursor: feedUpdate.cursor,
-                createdAt: feedUpdate.createdAt,
-                repeatKey: feedUpdate.repeatKey,
-                counter: parseInt(feedUpdate.cursor.substring(2), 10)
-            };
-            
-            // Check if we need to fetch user for friend-related items
-            if (feedItem.body && (feedItem.body.kind === 'friend_request' || feedItem.body.kind === 'friend_accepted')) {
-                await this.assumeUsers([feedItem.body.uid]);
-                
-                // Check if user fetch failed (404) - don't store item if user not found
-                const users = storage.getState().users;
-                const userProfile = users[feedItem.body.uid];
-                if (userProfile === null || userProfile === undefined) {
-                    // User was not found or 404, don't store this item
-                    log.log(`📰 Skipping feed item ${feedItem.id} - user ${feedItem.body.uid} not found`);
-                    return;
-                }
-            }
-            
-            // Apply to storage (will handle repeatKey replacement)
-            storage.getState().applyFeedItems([feedItem]);
         }
     }
 
@@ -2441,6 +2527,12 @@ class Sync {
         storage.getState().applySessions(sessions);
         const newActive = storage.getState().getActiveSessions();
         this.applySessionDiff(active, newActive);
+
+        for (const session of sessions) {
+            if (this.isSessionVisible(session.id)) {
+                this.attachLiveRuntimeForSession(session.id);
+            }
+        }
     }
 
     private applySessionDiff = (active: Session[], newActive: Session[]) => {
@@ -2483,33 +2575,37 @@ class Sync {
         sessions: EncryptedSessionRecord[],
     ): Promise<(Omit<Session, 'presence'> & { presence?: "online" | number })[]> => {
         const sessionKeys = new Map<string, Uint8Array | null>();
-        for (const session of sessions) {
+        
+        // Parallelize initial key decryption
+        await Promise.all(sessions.map(async (session) => {
             if (session.dataEncryptionKey) {
                 const decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
-                if (!decrypted) {
+                if (decrypted) {
+                    sessionKeys.set(session.id, decrypted);
+                } else {
                     console.error(`Failed to decrypt data encryption key for session ${session.id}`);
-                    continue;
                 }
-                sessionKeys.set(session.id, decrypted);
             } else {
                 sessionKeys.set(session.id, null);
             }
-        }
+        }));
 
         await this.encryption.initializeSessions(sessionKeys);
 
-        const decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
-        for (const session of sessions) {
+        // Parallelize metadata and agent state decryption
+        const decryptedSessions = await Promise.all(sessions.map(async (session) => {
             const sessionEncryption = this.encryption.getSessionEncryption(session.id);
             if (!sessionEncryption) {
-                console.error(`Session encryption not found for ${session.id} - this should never happen`);
-                continue;
+                console.error(`Session encryption not found for ${session.id} - skipping`);
+                return null;
             }
 
-            const metadata = await sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata);
-            const agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
+            const [metadata, agentState] = await Promise.all([
+                sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata),
+                sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState)
+            ]);
 
-            decryptedSessions.push({
+            return {
                 id: session.id,
                 seq: session.seq,
                 createdAt: session.createdAt,
@@ -2522,10 +2618,10 @@ class Sync {
                 agentStateVersion: session.agentStateVersion,
                 thinking: false,
                 thinkingAt: 0,
-            });
-        }
+            };
+        }));
 
-        return decryptedSessions;
+        return decryptedSessions.filter((s): s is NonNullable<typeof s> => s !== null);
     }
 
 }

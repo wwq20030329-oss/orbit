@@ -8,10 +8,27 @@ import { activityCache } from "@/app/presence/sessionCache";
 import { auth } from "./app/auth/auth";
 import { startDatabaseMetricsUpdater } from "@/app/monitoring/metrics2";
 import { initEncrypt } from "./modules/encrypt";
-import { initGithub } from "./modules/github";
 import { loadFiles } from "./storage/files";
 
+function assertRequiredEnv() {
+    const secret = process.env.HANDY_MASTER_SECRET;
+    if (!secret || secret.trim().length < 32) {
+        throw new Error(
+            'HANDY_MASTER_SECRET is required and must be at least 32 characters. ' +
+            'All token/encryption derivation depends on it — refusing to start with a weak or missing secret.'
+        );
+    }
+    // In production, reject the well-known development placeholder.
+    if (process.env.NODE_ENV === 'production' &&
+        secret === 'your-super-secret-key-for-local-development') {
+        throw new Error('HANDY_MASTER_SECRET is set to the development placeholder in production. Refusing to start.');
+    }
+}
+
 async function main() {
+
+    // Fail-fast environment validation
+    assertRequiredEnv();
 
     // Storage
     await db.$connect();
@@ -29,7 +46,6 @@ async function main() {
 
     // Initialize auth module
     await initEncrypt();
-    await initGithub();
     await loadFiles();
     await auth.init();
 
@@ -108,6 +124,7 @@ process.on('exit', (code) => {
 main().catch((e) => {
     console.error(e);
     process.exit(1);
-}).then(() => {
-    process.exit(0);
 });
+// Note: we do not force-exit on success. `awaitShutdown()` inside `main()`
+// resolves only after all `onShutdown` hooks have run, so letting the event
+// loop drain naturally allows async log transports (pino/file) to flush.

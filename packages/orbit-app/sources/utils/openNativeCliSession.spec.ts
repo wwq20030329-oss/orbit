@@ -597,6 +597,42 @@ describe('openNativeCliHistoryEntry', () => {
     expect(hoisted.state.applyNativeCliHistory).not.toHaveBeenCalled();
   });
 
+  it('retries native history resume after a transient disconnect when refreshed machine history still lists the entry', async () => {
+    hoisted.findExistingOrbitSessionIdForNativeEntry.mockReturnValue(null);
+    hoisted.machineResumeNativeCliHistory
+      .mockResolvedValueOnce({
+        type: 'error',
+        errorMessage: 'Socket has been disconnected',
+      })
+      .mockResolvedValueOnce({
+        type: 'success',
+        sessionId: 'resumed-1',
+      });
+    hoisted.refreshNativeCliHistoryForMachine.mockResolvedValue([
+      {
+        ...entry,
+        isLive: true,
+        updatedAt: entry.updatedAt + 1,
+      },
+    ]);
+
+    const result = await openNativeCliHistoryEntry(entry);
+
+    expect(result).toBe('resumed-1');
+    expect(hoisted.refreshNativeCliHistoryForMachine).toHaveBeenCalledWith('machine-1', { force: true });
+    expect(hoisted.machineResumeNativeCliHistory).toHaveBeenCalledTimes(2);
+    expect(hoisted.machineResumeNativeCliHistory).toHaveBeenLastCalledWith({
+      machineId: 'machine-1',
+      backendId: 'thread-1',
+      tool: 'codex',
+      workingDirectory: '/Users/test/project',
+      title: 'project',
+      summary: null,
+      updatedAt: entry.updatedAt + 1,
+    });
+    expect(isSessionOpenedAsHistoryOnly('resumed-1')).toBe(false);
+  });
+
   it('does not retry history refresh when native CLI resume is unavailable on the machine', async () => {
     hoisted.findExistingOrbitSessionIdForNativeEntry.mockReturnValue(null);
     hoisted.machineResumeNativeCliHistory.mockResolvedValueOnce({

@@ -98,7 +98,7 @@ if (startFrom) {
 
 **Server Details**:
 - Default server: `https://api.cluster-fluster.com`
-- Environment variable: `HAPPY_SERVER_URL` (overrides default)
+- Environment variable: `ORBIT_SERVER_URL` (overrides default)
 - Local development: `http://localhost:3005`
 - The server handles session management and real-time communication for Happy CLI
 
@@ -315,7 +315,7 @@ describe('Api server error handling', () => {
    # Verify mobile/daemon still work with session ID
 
    # Test Bug 2 fix:
-   HAPPY_SERVER_URL=http://invalid:9999 ./bin/happy.mjs  # Should show warning, not crash
+   ORBIT_SERVER_URL=http://invalid:9999 ./bin/orbit.mjs  # Should show warning, not crash
    # Or test with unreachable default server:
    # Temporarily block network access to test default server fallback
    ```
@@ -327,7 +327,7 @@ describe('Api server error handling', () => {
 - No "session-id cannot be used" error
 
 **Bug 2 Fixed**:
-- Test: `HAPPY_SERVER_URL=http://invalid:9999 ./bin/happy.mjs` shows warning message
+- Test: `ORBIT_SERVER_URL=http://invalid:9999 ./bin/orbit.mjs` shows warning message
 - Process continues in local mode instead of crashing
 - Clear user feedback: "⚠️ Happy server unreachable - working in offline mode"
 

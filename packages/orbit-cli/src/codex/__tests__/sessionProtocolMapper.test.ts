@@ -30,8 +30,12 @@ describe('mapCodexMcpMessageToSessionEnvelopes', () => {
             { currentTurnId: 'turn-1' }
         );
 
-        expect(result.envelopes).toHaveLength(1);
+        expect(result.envelopes).toHaveLength(2);
         expect(result.envelopes[0].ev).toEqual({
+            t: 'service',
+            text: 'Task cancelled',
+        });
+        expect(result.envelopes[1].ev).toEqual({
             t: 'turn-end',
             status: 'cancelled',
         });
@@ -47,6 +51,16 @@ describe('mapCodexMcpMessageToSessionEnvelopes', () => {
         expect(result.envelopes).toHaveLength(1);
         expect(result.envelopes[0].turn).toBe('turn-1');
         expect(result.envelopes[0].ev).toEqual({ t: 'text', text: 'hello' });
+    });
+
+    it('ignores partial agent messages so streaming snapshots do not render as duplicates', () => {
+        const result = mapCodexMcpMessageToSessionEnvelopes(
+            { type: 'agent_message', message: 'hello', partial: true },
+            { currentTurnId: 'turn-1' }
+        );
+
+        expect(result.envelopes).toHaveLength(0);
+        expect(result.currentTurnId).toBe('turn-1');
     });
 
     it('maps parent call linkage to subagent field', () => {

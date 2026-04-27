@@ -77,7 +77,7 @@ This is a completely separate client from `happy-cli`. It has its own authentica
 - [x] Run tests — must pass before task 3
 
 ### Task 3: Configuration and credential storage
-- [x] Create `src/config.ts` — reads `HAPPY_SERVER_URL` (default: `https://api.cluster-fluster.com`), `HAPPY_HOME_DIR` (default: `~/.happy`), derives credential file path as `${happyHomeDir}/agent.key`
+- [x] Create `src/config.ts` — reads `ORBIT_SERVER_URL` (default: `https://api.2003383.xyz`), `ORBIT_HOME_DIR` (default: `~/.orbit`), derives credential file path as `${orbitHomeDir}/agent.key`
 - [x] Create `src/credentials.ts`:
   - `Credentials` type: `{ token: string, secret: Uint8Array, contentKeyPair: { publicKey: Uint8Array, secretKey: Uint8Array } }`
   - `readCredentials(config)` — parses `~/.happy/agent.key` JSON `{ token, secret }`, decodes secret from base64, derives contentKeyPair via `deriveContentKeyPair(secret)`. Returns `Credentials` or `null` if file missing.

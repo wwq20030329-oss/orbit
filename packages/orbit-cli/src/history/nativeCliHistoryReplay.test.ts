@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildNativeCliResumeSessionTag,
   buildReplayEnvelopes,
   extractCodexReplayMessages,
   extractGeminiReplayMessages,
+  markNativeCliHistoryImported,
+  shouldReplayNativeCliHistory,
 } from './nativeCliHistoryReplay';
+import type { Metadata } from '@/api/types';
 
 describe('extractCodexReplayMessages', () => {
   it('keeps user and assistant text while skipping setup noise', () => {
@@ -100,5 +104,57 @@ describe('buildReplayEnvelopes', () => {
         },
       },
     ]);
+  });
+});
+
+describe('native history import metadata', () => {
+  const request = {
+    tool: 'codex' as const,
+    backendId: 'thread-123',
+    title: 'Current rollout thread',
+    summary: null,
+    updatedAt: 400,
+  };
+  const baseMetadata: Metadata = {
+    path: '/tmp/project',
+    host: 'host',
+    homeDir: '/Users/test',
+    orbitHomeDir: '/Users/test/.orbit',
+    orbitLibDir: '/tmp/orbit',
+    orbitToolsDir: '/tmp/orbit/tools',
+  };
+
+  it('builds a unique orbit wrapper session tag for each native CLI history import', () => {
+    const firstTag = buildNativeCliResumeSessionTag(request);
+    const secondTag = buildNativeCliResumeSessionTag(request);
+
+    expect(firstTag).toMatch(/^native-history-import:codex:thread-123:/);
+    expect(secondTag).toMatch(/^native-history-import:codex:thread-123:/);
+    expect(secondTag).not.toBe(firstTag);
+  });
+
+  it('replays history only until that native thread has been imported for the current CLI history snapshot', () => {
+    expect(shouldReplayNativeCliHistory(baseMetadata, request)).toBe(true);
+    expect(shouldReplayNativeCliHistory({
+      ...baseMetadata,
+      nativeHistorySourceTool: 'codex',
+      nativeHistorySourceBackendId: 'thread-123',
+      nativeHistoryImportedAt: 450,
+    }, request)).toBe(false);
+    expect(shouldReplayNativeCliHistory({
+      ...baseMetadata,
+      nativeHistorySourceTool: 'codex',
+      nativeHistorySourceBackendId: 'thread-123',
+      nativeHistoryImportedAt: 123,
+    }, request)).toBe(true);
+  });
+
+  it('marks session metadata after native history import completes', () => {
+    expect(markNativeCliHistoryImported(baseMetadata, request, 456)).toMatchObject({
+      codexThreadId: 'thread-123',
+      nativeHistorySourceTool: 'codex',
+      nativeHistorySourceBackendId: 'thread-123',
+      nativeHistoryImportedAt: 456,
+    });
   });
 });

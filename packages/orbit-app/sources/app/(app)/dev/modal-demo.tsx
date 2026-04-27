@@ -99,7 +99,7 @@ export default function ModalDemoScreen() {
             <View style={styles.header}>
                 <Text style={[styles.title, Typography.default('semiBold')]}>Modal Demo</Text>
                 <Text style={[styles.subtitle, Typography.default()]}>
-                    Platform: {Platform.OS} ({Platform.OS === 'web' ? 'Custom modals' : 'Native alerts'})
+                    Platform: {Platform.OS} (Native alerts)
                 </Text>
             </View>
 

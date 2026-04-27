@@ -1,27 +1,13 @@
 import * as React from 'react';
-import { View, ActivityIndicator, Text, Pressable } from 'react-native';
+import { View, ActivityIndicator } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useAllMachines, useFriendRequests, useSocketStatus, useRealtimeStatus } from '@/sync/storage';
+import { useHasOnlineMachines, useRealtimeStatus, useSocketConnectionStatus } from '@/sync/storage';
 import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
 import { useIsTablet } from '@/utils/responsive';
-import { useRouter } from 'expo-router';
 import { EmptySessionsTablet } from './EmptySessionsTablet';
 import { SessionsList } from './SessionsList';
-import { FABWide } from './FABWide';
-import { TabBar, TabType } from './TabBar';
-import { InboxView } from './InboxView';
-import { SettingsViewWrapper } from './SettingsViewWrapper';
 import { SessionsListWrapper } from './SessionsListWrapper';
-import { Header } from './navigation/Header';
-import { HeaderLogo } from './HeaderLogo';
 import { VoiceAssistantStatusBar } from './VoiceAssistantStatusBar';
-import { StatusDot } from './StatusDot';
-import { Ionicons } from '@expo/vector-icons';
-import { Typography } from '@/constants/Typography';
-import { t } from '@/text';
-import { isUsingCustomServer } from '@/sync/serverConfig';
-import { trackFriendsSearch } from '@/track';
-import { resolveDisplayConnectionStatus } from '@/utils/connectionStatus';
 
 interface MainViewProps {
     variant: 'phone' | 'sidebar';
@@ -70,257 +56,73 @@ const styles = StyleSheet.create((theme) => ({
         flexBasis: 0,
         flexGrow: 1,
     },
-    titleContainer: {
-        flex: 1,
-        alignItems: 'center',
-    },
-    titleText: {
-        fontSize: 17,
-        color: theme.colors.header.tint,
-        fontWeight: '600',
-        ...Typography.default('semiBold'),
-    },
-    statusContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginTop: -2,
-    },
-    statusText: {
-        fontSize: 12,
-        fontWeight: '500',
-        lineHeight: 16,
-        ...Typography.default(),
-    },
-    headerButton: {
-        width: 32,
-        height: 32,
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
 }));
 
-// Tab header configuration
-const TAB_TITLES = {
-    sessions: 'tabs.sessions',
-    inbox: 'tabs.inbox',
-    settings: 'tabs.settings',
-} as const;
+export const MainView = React.memo(({ variant }: MainViewProps) => {
+    const isTablet = useIsTablet();
+    if (variant === 'sidebar') {
+        return <SidebarSessionsContent />;
+    }
 
-// Active tabs
-type ActiveTabType = 'sessions' | 'inbox' | 'settings';
-
-// Header title component with connection status
-const HeaderTitle = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => {
-    const { theme } = useUnistyles();
-    const socketStatus = useSocketStatus();
-    const machines = useAllMachines({ includeOffline: true });
-
-    const connectionStatus = React.useMemo(() => {
-        const status = resolveDisplayConnectionStatus(socketStatus.status, machines);
-        switch (status) {
-            case 'connected':
-                return {
-                    color: theme.colors.status.connected,
-                    isPulsing: false,
-                    text: t('status.connected'),
-                };
-            case 'connecting':
-                return {
-                    color: theme.colors.status.connecting,
-                    isPulsing: true,
-                    text: t('status.connecting'),
-                };
-            case 'disconnected':
-                return {
-                    color: theme.colors.status.disconnected,
-                    isPulsing: false,
-                    text: t('status.disconnected'),
-                };
-            case 'error':
-                return {
-                    color: theme.colors.status.error,
-                    isPulsing: false,
-                    text: t('status.error'),
-                };
-            default:
-                return {
-                    color: theme.colors.status.default,
-                    isPulsing: false,
-                    text: '',
-                };
-        }
-    }, [machines, socketStatus.status, theme]);
+    if (isTablet) {
+        return <View style={styles.emptyStateContentContainer} />;
+    }
 
     return (
-        <View style={styles.titleContainer}>
-            <Text style={styles.titleText}>
-                {t(TAB_TITLES[activeTab])}
-            </Text>
-            {connectionStatus.text && (
-                <View style={styles.statusContainer}>
-                    <StatusDot
-                        color={connectionStatus.color}
-                        isPulsing={connectionStatus.isPulsing}
-                        size={6}
-                        style={{ marginRight: 4 }}
-                    />
-                    <Text style={[styles.statusText, { color: connectionStatus.color }]}>
-                        {connectionStatus.text}
-                    </Text>
-                </View>
-            )}
+        <View style={styles.phoneContainer}>
+            <PhoneVoiceAssistantStatusBar />
+            <PhoneSessionsContent />
         </View>
     );
 });
 
-// Header right button - varies by tab
-const HeaderRight = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => {
-    const router = useRouter();
-    const { theme } = useUnistyles();
-    const isCustomServer = isUsingCustomServer();
-
-    if (activeTab === 'sessions') {
-        return (
-            <Pressable
-                onPress={() => router.navigate('/new')}
-                hitSlop={15}
-                style={styles.headerButton}
-            >
-                <Ionicons name="add-outline" size={28} color={theme.colors.header.tint} />
-            </Pressable>
-        );
-    }
-
-    if (activeTab === 'inbox') {
-        return (
-            <Pressable
-                onPress={() => {
-                    trackFriendsSearch();
-                    router.push('/friends/search');
-                }}
-                hitSlop={15}
-                style={styles.headerButton}
-            >
-                <Ionicons name="person-add-outline" size={24} color={theme.colors.header.tint} />
-            </Pressable>
-        );
-    }
-
-    if (activeTab === 'settings') {
-        if (!isCustomServer) {
-            // Empty view to maintain header centering
-            return <View style={styles.headerButton} />;
-        }
-        return (
-            <Pressable
-                onPress={() => router.push('/server')}
-                hitSlop={15}
-                style={styles.headerButton}
-            >
-                <Ionicons name="server-outline" size={24} color={theme.colors.header.tint} />
-            </Pressable>
-        );
-    }
-
-    return null;
+const PhoneSessionsContent = React.memo(() => {
+    const sessionListViewData = useVisibleSessionListViewData();
+    return <SessionsListWrapper data={sessionListViewData} />;
 });
 
-export const MainView = React.memo(({ variant }: MainViewProps) => {
-    const { theme } = useUnistyles();
-    const sessionListViewData = useVisibleSessionListViewData();
-    const isTablet = useIsTablet();
-    const router = useRouter();
-    const friendRequests = useFriendRequests();
+const PhoneVoiceAssistantStatusBar = React.memo(() => {
     const realtimeStatus = useRealtimeStatus();
 
-    // Tab state management
-    // NOTE: Zen tab removed - the feature never got to a useful state
-    const [activeTab, setActiveTab] = React.useState<TabType>('sessions');
+    if (realtimeStatus === 'disconnected') {
+        return null;
+    }
 
-    const handleNewSession = React.useCallback(() => {
-        router.navigate('/new');
-    }, [router]);
+    return (
+        <VoiceAssistantStatusBar
+            variant="full"
+            realtimeStatusOverride={realtimeStatus}
+        />
+    );
+});
 
-    const handleTabPress = React.useCallback((tab: TabType) => {
-        setActiveTab(tab);
-    }, []);
+const SidebarSessionsContent = React.memo(() => {
+    const { theme } = useUnistyles();
+    const sessionListViewData = useVisibleSessionListViewData();
 
-    // Regular phone mode with tabs - define this before any conditional returns
-    const renderTabContent = React.useCallback(() => {
-        switch (activeTab) {
-            case 'inbox':
-                return <InboxView />;
-            case 'settings':
-                return <SettingsViewWrapper />;
-            case 'sessions':
-            default:
-                return <SessionsListWrapper data={sessionListViewData} />;
-        }
-    }, [activeTab, sessionListViewData]);
-
-    // Sidebar variant
-    if (variant === 'sidebar') {
-        // Loading state
-        if (sessionListViewData === null) {
-            return (
-                <View style={styles.sidebarContentContainer}>
-                    <View style={styles.tabletLoadingContainer}>
-                        <ActivityIndicator size="small" color={theme.colors.textSecondary} />
-                    </View>
-                </View>
-            );
-        }
-
-        // Empty state
-        if (sessionListViewData.length === 0) {
-            return (
-                <View style={styles.sidebarContentContainer}>
-                    <View style={styles.emptyStateContainer}>
-                        <EmptySessionsTablet />
-                    </View>
-                </View>
-            );
-        }
-
-        // Sessions list
+    if (sessionListViewData === null) {
         return (
             <View style={styles.sidebarContentContainer}>
-                <SessionsList data={sessionListViewData} />
+                <View style={styles.tabletLoadingContainer}>
+                    <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                </View>
             </View>
         );
     }
 
-    // Phone variant
-    // Tablet in phone mode - special case (when showing index view on tablets, show empty view)
-    if (isTablet) {
-        // Just show an empty view on tablets for the index view
-        // The sessions list is shown in the sidebar, so the main area should be blank
-        return <View style={styles.emptyStateContentContainer} />;
+    if (sessionListViewData.length === 0) {
+        return (
+            <View style={styles.sidebarContentContainer}>
+                <View style={styles.emptyStateContainer}>
+                    <EmptySessionsTablet />
+                </View>
+            </View>
+        );
     }
 
-    // Regular phone mode with tabs
     return (
-        <>
-            <View style={styles.phoneContainer}>
-                <View style={{ backgroundColor: theme.colors.groupped.background }}>
-                    <Header
-                        title={<HeaderTitle activeTab={activeTab as ActiveTabType} />}
-                        headerRight={() => <HeaderRight activeTab={activeTab as ActiveTabType} />}
-                        headerLeft={() => <HeaderLogo />}
-                        headerShadowVisible={false}
-                        headerTransparent={true}
-                    />
-                    {realtimeStatus !== 'disconnected' && (
-                        <VoiceAssistantStatusBar variant="full" />
-                    )}
-                </View>
-                {renderTabContent()}
-            </View>
-            <TabBar
-                activeTab={activeTab}
-                onTabPress={handleTabPress}
-                inboxBadgeCount={friendRequests.length}
-            />
-        </>
+        <View style={styles.sidebarContentContainer}>
+            <SessionsList data={sessionListViewData} />
+        </View>
     );
 });

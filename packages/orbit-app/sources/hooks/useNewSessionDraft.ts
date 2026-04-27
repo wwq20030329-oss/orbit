@@ -3,7 +3,9 @@
  * Persists the user's last-used configuration (machine, path, agent, model, permissions, etc.)
  * so the new session screen restores the same defaults on next visit.
  */
+import { InteractionManager } from 'react-native';
 import { create } from 'zustand';
+import { useShallow } from 'zustand/react/shallow';
 import {
     loadNewSessionDraft,
     saveNewSessionDraft,
@@ -31,7 +33,29 @@ interface NewSessionDraftState {
     setSessionType: (type: NewSessionSessionType) => void;
 }
 
-function persist(state: NewSessionDraftState) {
+type PersistedDraftSnapshot = Pick<
+    NewSessionDraft,
+    'input' | 'selectedMachineId' | 'selectedPath' | 'agentType' | 'permissionMode' | 'modelMode' | 'sessionType'
+>;
+
+type NewSessionDraftValues = Pick<
+    NewSessionDraftState,
+    'selectedMachineId' | 'selectedPath' | 'agentType' | 'permissionMode' | 'modelMode'
+>;
+
+type NewSessionDraftActions = Pick<
+    NewSessionDraftState,
+    'setInput' | 'setMachineId' | 'setPath' | 'setAgentType' | 'setPermissionMode' | 'setModelMode' | 'setSessionType'
+>;
+
+type NewSessionDraftInput = Pick<NewSessionDraftState, 'input' | 'setInput'>;
+
+const INPUT_PERSIST_DEBOUNCE_MS = 240;
+const CONFIG_PERSIST_DEBOUNCE_MS = 120;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingInteractionPersist: ReturnType<typeof InteractionManager.runAfterInteractions> | null = null;
+
+function persist(state: PersistedDraftSnapshot) {
     saveNewSessionDraft({
         input: state.input,
         selectedMachineId: state.selectedMachineId,
@@ -44,7 +68,69 @@ function persist(state: NewSessionDraftState) {
     });
 }
 
+function cancelScheduledPersist() {
+    if (!persistTimer) {
+        return;
+    }
+
+    clearTimeout(persistTimer);
+    persistTimer = null;
+}
+
+function cancelScheduledInteractionPersist() {
+    if (!pendingInteractionPersist) {
+        return;
+    }
+
+    pendingInteractionPersist.cancel();
+    pendingInteractionPersist = null;
+}
+
+function schedulePersist(state: NewSessionDraftState, delayMs: number) {
+    cancelScheduledPersist();
+    cancelScheduledInteractionPersist();
+    const snapshot = {
+        input: state.input,
+        selectedMachineId: state.selectedMachineId,
+        selectedPath: state.selectedPath,
+        agentType: state.agentType,
+        permissionMode: state.permissionMode,
+        modelMode: state.modelMode,
+        sessionType: state.sessionType,
+    };
+    persistTimer = setTimeout(() => {
+        persistTimer = null;
+        pendingInteractionPersist = InteractionManager.runAfterInteractions(() => {
+            pendingInteractionPersist = null;
+            persist(snapshot);
+        });
+    }, delayMs);
+}
+
 const initial = loadNewSessionDraft();
+
+const selectNewSessionDraftValues = (state: NewSessionDraftState): NewSessionDraftValues => ({
+    selectedMachineId: state.selectedMachineId,
+    selectedPath: state.selectedPath,
+    agentType: state.agentType,
+    permissionMode: state.permissionMode,
+    modelMode: state.modelMode,
+});
+
+const selectNewSessionDraftActions = (state: NewSessionDraftState): NewSessionDraftActions => ({
+    setInput: state.setInput,
+    setMachineId: state.setMachineId,
+    setPath: state.setPath,
+    setAgentType: state.setAgentType,
+    setPermissionMode: state.setPermissionMode,
+    setModelMode: state.setModelMode,
+    setSessionType: state.setSessionType,
+});
+
+const selectNewSessionDraftInput = (state: NewSessionDraftState): NewSessionDraftInput => ({
+    input: state.input,
+    setInput: state.setInput,
+});
 
 export const useNewSessionDraft = create<NewSessionDraftState>()((set, get) => ({
     input: initial?.input ?? '',
@@ -55,11 +141,65 @@ export const useNewSessionDraft = create<NewSessionDraftState>()((set, get) => (
     modelMode: initial?.modelMode ?? 'default',
     sessionType: initial?.sessionType ?? 'simple',
 
-    setInput: (input) => { set({ input }); persist(get()); },
-    setMachineId: (id) => { set({ selectedMachineId: id, selectedPath: null }); persist(get()); },
-    setPath: (path) => { set({ selectedPath: path }); persist(get()); },
-    setAgentType: (agent) => { set({ agentType: agent }); persist(get()); },
-    setPermissionMode: (mode) => { set({ permissionMode: mode }); persist(get()); },
-    setModelMode: (mode) => { set({ modelMode: mode }); persist(get()); },
-    setSessionType: (type) => { set({ sessionType: type }); persist(get()); },
+    setInput: (input) => {
+        if (get().input === input) {
+            return;
+        }
+        set({ input });
+        schedulePersist(get(), INPUT_PERSIST_DEBOUNCE_MS);
+    },
+    setMachineId: (id) => {
+        if (get().selectedMachineId === id && get().selectedPath === null) {
+            return;
+        }
+        set({ selectedMachineId: id, selectedPath: null });
+        schedulePersist(get(), CONFIG_PERSIST_DEBOUNCE_MS);
+    },
+    setPath: (path) => {
+        if (get().selectedPath === path) {
+            return;
+        }
+        set({ selectedPath: path });
+        schedulePersist(get(), CONFIG_PERSIST_DEBOUNCE_MS);
+    },
+    setAgentType: (agent) => {
+        if (get().agentType === agent) {
+            return;
+        }
+        set({ agentType: agent });
+        schedulePersist(get(), CONFIG_PERSIST_DEBOUNCE_MS);
+    },
+    setPermissionMode: (mode) => {
+        if (get().permissionMode === mode) {
+            return;
+        }
+        set({ permissionMode: mode });
+        schedulePersist(get(), CONFIG_PERSIST_DEBOUNCE_MS);
+    },
+    setModelMode: (mode) => {
+        if (get().modelMode === mode) {
+            return;
+        }
+        set({ modelMode: mode });
+        schedulePersist(get(), CONFIG_PERSIST_DEBOUNCE_MS);
+    },
+    setSessionType: (type) => {
+        if (get().sessionType === type) {
+            return;
+        }
+        set({ sessionType: type });
+        schedulePersist(get(), CONFIG_PERSIST_DEBOUNCE_MS);
+    },
 }));
+
+export function useNewSessionDraftValues(): NewSessionDraftValues {
+    return useNewSessionDraft(useShallow(selectNewSessionDraftValues));
+}
+
+export function useNewSessionDraftActions(): NewSessionDraftActions {
+    return useNewSessionDraft(useShallow(selectNewSessionDraftActions));
+}
+
+export function useNewSessionDraftInput(): NewSessionDraftInput {
+    return useNewSessionDraft(useShallow(selectNewSessionDraftInput));
+}

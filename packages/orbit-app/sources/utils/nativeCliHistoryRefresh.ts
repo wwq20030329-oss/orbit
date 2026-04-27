@@ -7,6 +7,13 @@ import { isMachineOnline } from '@/utils/machineUtils';
 
 const nativeCliHistoryInFlight = new Map<string, Promise<NativeCliHistoryEntry[]>>();
 const nativeCliHistoryLoadedAt = new Map<string, number>();
+const NATIVE_CLI_HISTORY_STALE_MS = 30_000;
+
+export type NativeCliHistoryLoadTarget = {
+    id: string;
+    online: boolean;
+    hasNativeCliHistory: boolean;
+};
 
 function isNativeCliHistoryUnavailableError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error ?? '');
@@ -17,17 +24,24 @@ function isNativeCliHistoryUnavailableError(error: unknown): boolean {
         || normalizedMessage.includes('method not available');
 }
 
-function canRefreshNativeCliHistory(machine: Machine | null | undefined): machine is Machine {
-    if (!machine || !isMachineOnline(machine)) {
+function canRefreshNativeCliHistory(machine: NativeCliHistoryLoadTarget | null | undefined): machine is NativeCliHistoryLoadTarget {
+    if (!machine || !machine.online) {
         return false;
+    }
+    return machine.hasNativeCliHistory;
+}
+
+function resolveNativeCliHistoryLoadTarget(machine: Machine | null | undefined): NativeCliHistoryLoadTarget | null {
+    if (!machine) {
+        return null;
     }
 
     const availability = machine.metadata?.cliAvailability;
-    if (!availability) {
-        return false;
-    }
-
-    return availability.claude || availability.codex || availability.gemini;
+    return {
+        id: machine.id,
+        online: isMachineOnline(machine),
+        hasNativeCliHistory: Boolean(availability?.claude || availability?.codex || availability?.gemini),
+    };
 }
 
 function withMachineId(machineId: string, entries: NativeCliHistoryEntry[]): NativeCliHistoryEntry[] {
@@ -39,6 +53,19 @@ function withMachineId(machineId: string, entries: NativeCliHistoryEntry[]): Nat
 
 export function hasLoadedNativeCliHistoryForMachine(machineId: string): boolean {
     return nativeCliHistoryLoadedAt.has(machineId);
+}
+
+function shouldRefreshNativeCliHistory(machineId: string, force: boolean | undefined): boolean {
+    if (force) {
+        return true;
+    }
+
+    const loadedAt = nativeCliHistoryLoadedAt.get(machineId);
+    if (loadedAt === undefined) {
+        return true;
+    }
+
+    return Date.now() - loadedAt > NATIVE_CLI_HISTORY_STALE_MS;
 }
 
 export function invalidateNativeCliHistoryForMachines(machineIds?: Iterable<string>): void {
@@ -59,12 +86,12 @@ export async function refreshNativeCliHistoryForMachine(
     const machine = storage.getState().machines[machineId];
     const existingEntries = storage.getState().nativeCliHistoryByMachine[machineId] ?? [];
 
-    if (!canRefreshNativeCliHistory(machine)) {
+    if (!canRefreshNativeCliHistory(resolveNativeCliHistoryLoadTarget(machine))) {
         return existingEntries;
     }
 
     const hasLoaded = hasLoadedNativeCliHistoryForMachine(machineId);
-    if (!options.force && hasLoaded) {
+    if (!shouldRefreshNativeCliHistory(machineId, options.force)) {
         return existingEntries;
     }
 
@@ -83,11 +110,12 @@ export async function refreshNativeCliHistoryForMachine(
             return entriesForMachine;
         })
         .catch((error) => {
+            if (isNativeCliHistoryUnavailableError(error)) {
+                nativeCliHistoryLoadedAt.set(machineId, Date.now());
+                return existingEntries;
+            }
             if (!hasLoaded) {
                 nativeCliHistoryLoadedAt.set(machineId, Date.now());
-            }
-            if (isNativeCliHistoryUnavailableError(error)) {
-                return existingEntries;
             }
             throw error;
         })
@@ -99,10 +127,10 @@ export async function refreshNativeCliHistoryForMachine(
     return request;
 }
 
-export async function ensureNativeCliHistoryLoadedForMachines(machines: Machine[]): Promise<void> {
+export async function ensureNativeCliHistoryLoadedForMachines(machines: NativeCliHistoryLoadTarget[]): Promise<void> {
     await Promise.all(
         machines
-            .filter((machine) => canRefreshNativeCliHistory(machine) && !hasLoadedNativeCliHistoryForMachine(machine.id))
+            .filter((machine) => canRefreshNativeCliHistory(machine) && shouldRefreshNativeCliHistory(machine.id, false))
             .map((machine) => refreshNativeCliHistoryForMachine(machine.id)),
     );
 }

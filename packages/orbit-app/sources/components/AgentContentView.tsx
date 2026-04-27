@@ -19,12 +19,16 @@ export const AgentContentView: React.FC<AgentContentViewProps> = React.memo(({ i
         <View style={{ flexBasis:0, flexGrow:1, paddingBottom: state.isVisible ? state.height - safeArea.bottom : 0 }}>
             <View style={{ flexBasis:0, flexGrow:1 }}>
                 {content && (
-                    <View style={[{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }]}>
+                    <View
+                        pointerEvents="box-none"
+                        style={[{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }]}
+                    >
                         {content}
                     </View>
                 )}
                 {placeholder && (
                     <ScrollView
+                        pointerEvents="box-none"
                         style={[{ position: 'absolute', top: safeArea.top + headerHeight, left: 0, right: 0, bottom: 0 }]}
                         contentContainerStyle={{ alignItems: 'center', justifyContent: 'center', flex: 1 }}
                         keyboardShouldPersistTaps="handled"

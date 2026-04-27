@@ -12,7 +12,7 @@ dist
 .claude/
 
 # Standalone build artifacts
-data/
+/data/
 happy-server
 pglite.wasm
 pglite.data

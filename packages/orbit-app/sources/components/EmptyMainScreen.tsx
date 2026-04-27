@@ -1,5 +1,7 @@
 import React from 'react';
 import { View, Text, Platform } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+
 import { Typography } from '@/constants/Typography';
 import { RoundButton } from '@/components/RoundButton';
 import { useConnectTerminal } from '@/hooks/useConnectTerminal';
@@ -7,7 +9,7 @@ import { useRouter } from 'expo-router';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { getTerminalAuthPlaceholder } from '@/utils/appUrlScheme';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 
@@ -16,84 +18,61 @@ const stylesheet = StyleSheet.create((theme) => ({
         flex: 1,
         alignItems: 'center',
         justifyContent: 'center',
-        marginBottom: 32,
+        paddingHorizontal: 28,
+        paddingBottom: 32,
     },
-    title: {
-        marginBottom: 16,
-        textAlign: 'center',
-        fontSize: 24,
-        color: theme.colors.text,
-        ...Typography.default('semiBold'),
-    },
-    terminalBlock: {
-        backgroundColor: theme.colors.surfaceHighest,
-        borderRadius: 8,
-        padding: 20,
-        marginHorizontal: 24,
-        marginBottom: 20,
-        borderWidth: 1,
-        borderColor: theme.colors.divider,
-    },
-    terminalText: {
-        ...Typography.mono(),
-        fontSize: 16,
-        color: theme.colors.status.connected,
-    },
-    terminalTextFirst: {
-        marginBottom: 8,
-    },
-    stepsContainer: {
-        marginTop: 12,
-        marginHorizontal: 24,
-        marginBottom: 48,
-        width: 250,
-    },
-    stepRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginBottom: 8,
-    },
-    stepRowLast: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
-    stepNumber: {
-        width: 24,
-        height: 24,
-        borderRadius: 12,
-        backgroundColor: theme.colors.surfaceHigh,
+    hero: {
+        width: '100%',
+        maxWidth: 360,
         alignItems: 'center',
         justifyContent: 'center',
-        marginRight: 12,
+        flex: 1,
     },
-    stepNumberText: {
-        ...Typography.default('semiBold'),
-        fontSize: 14,
+    heroIconWrap: {
+        width: 56,
+        height: 56,
+        borderRadius: 28,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginBottom: 18,
+        backgroundColor: theme.colors.surface,
+    },
+    title: {
+        marginBottom: 10,
+        textAlign: 'center',
+        fontSize: 28,
         color: theme.colors.text,
+        ...Typography.default('semiBold'),
     },
-    stepText: {
+    subtitle: {
         ...Typography.default(),
-        fontSize: 18,
+        fontSize: 16,
+        lineHeight: 22,
         color: theme.colors.textSecondary,
+        textAlign: 'center',
+        maxWidth: 280,
     },
     buttonsContainer: {
         alignItems: 'center',
         width: '100%',
+        maxWidth: 360,
     },
     buttonWrapper: {
-        width: 240,
+        width: '100%',
         marginBottom: 12,
     },
     buttonWrapperSecondary: {
-        width: 240,
+        width: '100%',
     },
 }));
 
 export function EmptyMainScreen() {
     const router = useRouter();
-    const machines = useAllMachines();
+    const { theme } = useUnistyles();
+    const machines = useAllMachines({ includeOffline: true });
+    const hasRegisteredMachines = machines.length > 0;
     const hasOnlineMachines = React.useMemo(() => {
-        return machines.some(machine => isMachineOnline(machine));
+        return machines.some((machine) => isMachineOnline(machine));
     }, [machines]);
     const { connectTerminal, connectWithUrl, isLoading } = useConnectTerminal({
         onSuccess: () => {
@@ -104,88 +83,58 @@ export function EmptyMainScreen() {
 
     return (
         <View style={styles.container}>
-            {/* Terminal-style code block */}
-            <Text style={styles.title}>
-                {hasOnlineMachines ? t('newSession.title') : t('components.emptyMainScreen.readyToCode')}
-            </Text>
-            {!hasOnlineMachines && (
-                <View style={styles.terminalBlock}>
-                    <Text style={[styles.terminalText, styles.terminalTextFirst]}>
-                        $ npm i -g orbit
-                    </Text>
-                    <Text style={styles.terminalText}>
-                        $ orbit
-                    </Text>
+            <View style={styles.hero}>
+                <View style={styles.heroIconWrap}>
+                    <Ionicons name="chatbubbles-outline" size={24} color={theme.colors.text} />
                 </View>
-            )}
+                <Text style={styles.title}>
+                    {hasRegisteredMachines ? t('newSession.title') : t('components.emptyMainScreen.readyToCode')}
+                </Text>
+                <Text style={styles.subtitle}>
+                    {hasOnlineMachines
+                        ? t('newSession.switchMachinesHint')
+                        : hasRegisteredMachines
+                            ? t('components.emptySessionsTablet.offlineDescription')
+                        : t('welcome.subtitle')}
+                </Text>
+            </View>
 
-
-            {Platform.OS !== 'web' && (
-                <>
-                    {!hasOnlineMachines && (
-                        <View style={styles.stepsContainer}>
-                            <View style={styles.stepRow}>
-                                <View style={styles.stepNumber}>
-                                    <Text style={styles.stepNumberText}>1</Text>
-                                </View>
-                                <Text style={styles.stepText}>
-                                    {t('components.emptyMainScreen.installCli')}
-                                </Text>
-                            </View>
-                            <View style={styles.stepRow}>
-                                <View style={styles.stepNumber}>
-                                    <Text style={styles.stepNumberText}>2</Text>
-                                </View>
-                                <Text style={styles.stepText}>
-                                    {t('components.emptyMainScreen.runIt')}
-                                </Text>
-                            </View>
-                            <View style={styles.stepRowLast}>
-                                <View style={styles.stepNumber}>
-                                    <Text style={styles.stepNumberText}>3</Text>
-                                </View>
-                                <Text style={styles.stepText}>
-                                    {t('components.emptyMainScreen.scanQrCode')}
-                                </Text>
-                            </View>
-                        </View>
-                    )}
-                    <View style={styles.buttonsContainer}>
-                        <View style={styles.buttonWrapper}>
+            {(
+                <View style={styles.buttonsContainer}>
+                    <View style={styles.buttonWrapper}>
+                        <RoundButton
+                            title={hasRegisteredMachines ? t('newSession.title') : t('components.emptyMainScreen.openCamera')}
+                            size="large"
+                            loading={isLoading}
+                            onPress={hasRegisteredMachines ? (() => router.navigate('/new')) : connectTerminal}
+                        />
+                    </View>
+                    {!hasRegisteredMachines && (
+                        <View style={styles.buttonWrapperSecondary}>
                             <RoundButton
-                                title={hasOnlineMachines ? t('newSession.title') : t('components.emptyMainScreen.openCamera')}
-                                size="large"
-                                loading={isLoading}
-                                onPress={hasOnlineMachines ? (() => router.navigate('/new')) : connectTerminal}
+                                title={t('connect.enterUrlManually')}
+                                size="normal"
+                                display="inverted"
+                                onPress={async () => {
+                                    const url = await Modal.prompt(
+                                        t('modals.authenticateTerminal'),
+                                        t('modals.pasteUrlFromTerminal'),
+                                        {
+                                            placeholder: getTerminalAuthPlaceholder(),
+                                            cancelText: t('common.cancel'),
+                                            confirmText: t('common.authenticate'),
+                                            inputType: 'url',
+                                        }
+                                    );
+
+                                    if (url?.trim()) {
+                                        connectWithUrl(url.trim());
+                                    }
+                                }}
                             />
                         </View>
-                        {!hasOnlineMachines && (
-                            <View style={styles.buttonWrapperSecondary}>
-                                <RoundButton
-                                    title={t('connect.enterUrlManually')}
-                                    size="normal"
-                                    display="inverted"
-                                    onPress={async () => {
-                                        const url = await Modal.prompt(
-                                            t('modals.authenticateTerminal'),
-                                            t('modals.pasteUrlFromTerminal'),
-                                            {
-                                                placeholder: getTerminalAuthPlaceholder(),
-                                                cancelText: t('common.cancel'),
-                                                confirmText: t('common.authenticate'),
-                                                inputType: 'url',
-                                            }
-                                        );
-
-                                        if (url?.trim()) {
-                                            connectWithUrl(url.trim());
-                                        }
-                                    }}
-                                />
-                            </View>
-                        )}
-                    </View>
-                </>
+                    )}
+                </View>
             )}
         </View>
     );

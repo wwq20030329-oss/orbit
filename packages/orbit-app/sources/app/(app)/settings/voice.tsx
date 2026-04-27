@@ -17,6 +17,7 @@ import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { getVoiceExperimentStatus, getVoiceUpsellVariantLabel } from '@/realtime/voiceExperiment';
 import { getVoiceLocalCounters, resetVoiceLocalCounters } from '@/sync/persistence';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 function formatVoiceTime(totalSeconds: number): string {
     const mins = Math.floor(totalSeconds / 60);
@@ -24,7 +25,21 @@ function formatVoiceTime(totalSeconds: number): string {
     return `${mins}m ${secs}s`;
 }
 
+const stylesheet = StyleSheet.create((theme) => ({
+    usageCard: {
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+    },
+    usageMetaText: {
+        fontSize: 13,
+        color: theme.colors.textSecondary,
+        marginTop: 4,
+    },
+}));
+
 export default React.memo(function VoiceSettingsScreen() {
+    const { theme } = useUnistyles();
+    const styles = stylesheet;
     const router = useRouter();
     const auth = useAuth();
     const [voiceAssistantLanguage] = useSettingMutable('voiceAssistantLanguage');
@@ -74,23 +89,23 @@ export default React.memo(function VoiceSettingsScreen() {
 
     const handleVoiceExperimentOverride = React.useCallback(() => {
         Modal.alert(
-            'Voice Experiment Override',
-            'Select a local override for the voice-upsell experiment.',
+            t('settingsVoice.developerOverrideTitle'),
+            t('settingsVoice.developerOverrideSubtitle'),
             [
-                { text: 'No Override', onPress: () => setVoiceUpsellOverride(null) },
-                { text: 'Control', onPress: () => setVoiceUpsellOverride('control') },
-                { text: 'Soft Paywall', onPress: () => setVoiceUpsellOverride('show-paywall-before-first-voice-chat') },
-                { text: 'Onboarding + Upsell', onPress: () => setVoiceUpsellOverride('voice-onboarding-and-upsell') },
+                { text: t('settingsVoice.developerNoOverride'), onPress: () => setVoiceUpsellOverride(null) },
+                { text: t('settingsVoice.developerControl'), onPress: () => setVoiceUpsellOverride('control') },
+                { text: t('settingsVoice.developerSoftPaywall'), onPress: () => setVoiceUpsellOverride('show-paywall-before-first-voice-chat') },
+                { text: t('settingsVoice.developerOnboardingUpsell'), onPress: () => setVoiceUpsellOverride('voice-onboarding-and-upsell') },
             ],
         );
     }, [setVoiceUpsellOverride]);
 
     const handleResetVoiceCounters = React.useCallback(async () => {
         const confirmed = await Modal.confirm(
-            'Reset Voice Counters',
-            'Clear local voice counters used for onboarding and soft-paywall behavior on this device?',
+            t('settingsVoice.developerResetCountersTitle'),
+            t('settingsVoice.developerResetCountersSubtitle'),
             {
-                confirmText: 'Reset',
+                confirmText: t('common.reset'),
                 destructive: true,
             },
         );
@@ -114,29 +129,29 @@ export default React.memo(function VoiceSettingsScreen() {
     const developerExperimentSubtitle = React.useMemo(() => {
         const upsellVariant = getVoiceUpsellVariantLabel(voiceExperimentStatus.upsellVariant);
         const gatingMode = voiceExperimentStatus.gatingMode === 'direct-byo-agent'
-            ? 'direct BYO agent bypass'
-            : 'Orbit server gate';
+            ? t('settingsVoice.developerGateDirect')
+            : t('settingsVoice.developerGateOrbit');
 
         return [
-            `voice-upsell: ${upsellVariant}`,
-            `source: ${voiceExperimentStatus.upsellVariantSource}`,
-            `gate: ${gatingMode}`,
-            `experiments setting: ${experiments ? 'on' : 'off'}`,
+            t('settingsVoice.developerUpsellLine', { variant: upsellVariant }),
+            t('settingsVoice.developerSourceLine', { source: voiceExperimentStatus.upsellVariantSource }),
+            t('settingsVoice.developerGateLine', { gate: gatingMode }),
+            t('settingsVoice.developerExperimentsLine', { enabled: experiments }),
         ].join('\n');
     }, [experiments, voiceExperimentStatus]);
 
     const developerOverrideLabel = React.useMemo(() => {
         if (!voiceUpsellOverride) {
-            return 'No Override';
+            return t('settingsVoice.developerNoOverride');
         }
         return getVoiceUpsellVariantLabel(voiceUpsellOverride);
     }, [voiceUpsellOverride]);
 
     const developerCountersSubtitle = React.useMemo(() => {
         return [
-            `soft paywall shown: ${voiceLocalCounters.softPaywallShownCount}`,
-            `onboarding prompt loads: ${voiceLocalCounters.onboardingPromptLoadCount}`,
-            `voice messages: ${voiceLocalCounters.voiceMessageCount}`,
+            t('settingsVoice.developerCountersSoftPaywall', { count: voiceLocalCounters.softPaywallShownCount }),
+            t('settingsVoice.developerCountersOnboarding', { count: voiceLocalCounters.onboardingPromptLoadCount }),
+            t('settingsVoice.developerCountersVoiceMessages', { count: voiceLocalCounters.voiceMessageCount }),
         ].join('\n');
     }, [voiceLocalCounters]);
 
@@ -152,23 +167,23 @@ export default React.memo(function VoiceSettingsScreen() {
                     title={t('settingsVoice.usageTitle')}
                     footer={t('settingsVoice.usageFooter')}
                 >
-                    <View style={{ paddingHorizontal: 16, paddingVertical: 8 }}>
+                    <View style={styles.usageCard}>
                         <UsageBar
                             label={t('settingsVoice.usageLabel')}
                             value={usage.usedSeconds}
                             maxValue={usage.limitSeconds}
-                            color={usage.usedSeconds >= usage.limitSeconds ? '#FF3B30' : '#007AFF'}
+                            color={usage.usedSeconds >= usage.limitSeconds ? theme.colors.textDestructive : theme.colors.status.connected}
                         />
-                        <Text style={{ fontSize: 13, color: '#8E8E93', marginTop: 4 }}>
+                        <Text style={styles.usageMetaText}>
                             {formatVoiceTime(usage.usedSeconds)} / {formatVoiceTime(usage.limitSeconds)}
                         </Text>
                         <UsageBar
                             label={t('settingsVoice.conversationsLabel')}
                             value={usage.conversationCount}
                             maxValue={usage.conversationLimit}
-                            color={usage.conversationCount >= usage.conversationLimit ? '#FF3B30' : '#007AFF'}
+                            color={usage.conversationCount >= usage.conversationLimit ? theme.colors.textDestructive : theme.colors.status.connected}
                         />
-                        <Text style={{ fontSize: 13, color: '#8E8E93', marginTop: 4 }}>
+                        <Text style={styles.usageMetaText}>
                             {usage.conversationCount} / {usage.conversationLimit}
                         </Text>
                     </View>
@@ -189,18 +204,18 @@ export default React.memo(function VoiceSettingsScreen() {
 
             {devModeEnabled && (
                 <ItemGroup
-                    title="Developer"
-                    footer="Developer-only diagnostics and local override controls for the current voice rollout. The paid voice gate runs through Orbit server unless Direct Connection and a custom ElevenLabs agent are both enabled."
+                    title={t('settingsVoice.developerTitle')}
+                    footer={t('settingsVoice.developerFooter')}
                 >
                     <Item
-                        title="Voice Experiment Override"
-                        subtitle="Simple local override for the voice-upsell flag"
+                        title={t('settingsVoice.developerOverrideTitle')}
+                        subtitle={t('settingsVoice.developerOverrideSubtitle')}
                         detail={developerOverrideLabel}
                         icon={<Ionicons name="options-outline" size={29} color="#007AFF" />}
                         onPress={handleVoiceExperimentOverride}
                     />
                     <Item
-                        title="Voice Experiment Status"
+                        title={t('settingsVoice.developerStatusTitle')}
                         subtitle={developerExperimentSubtitle}
                         subtitleLines={0}
                         icon={<Ionicons name="flask-outline" size={29} color="#5856D6" />}
@@ -208,7 +223,7 @@ export default React.memo(function VoiceSettingsScreen() {
                         copy={developerExperimentSubtitle}
                     />
                     <Item
-                        title="Reset Voice Counters"
+                        title={t('settingsVoice.developerResetCountersTitle')}
                         subtitle={developerCountersSubtitle}
                         subtitleLines={0}
                         icon={<Ionicons name="refresh-outline" size={29} color="#FF9500" />}

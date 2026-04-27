@@ -22,11 +22,11 @@ function parseArgs(argv: string[]): { url: string | null } {
 
 async function main() {
   const { url: urlFromArgs } = parseArgs(process.argv.slice(2));
-  const baseUrl = urlFromArgs || process.env.ORBIT_HTTP_MCP_URL || process.env.HAPPY_HTTP_MCP_URL || '';
+  const baseUrl = urlFromArgs || process.env.ORBIT_HTTP_MCP_URL || '';
 
   if (!baseUrl) {
     process.stderr.write(
-      '[orbit-mcp] Missing target URL. Set ORBIT_HTTP_MCP_URL, HAPPY_HTTP_MCP_URL, or pass --url <http://127.0.0.1:PORT>\n'
+      '[orbit-mcp] Missing target URL. Set ORBIT_HTTP_MCP_URL or pass --url <http://127.0.0.1:PORT>\n'
     );
     process.exit(2);
   }

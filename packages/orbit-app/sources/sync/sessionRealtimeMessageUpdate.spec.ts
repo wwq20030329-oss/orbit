@@ -50,6 +50,7 @@ describe('handleRealtimeMessageUpdate', () => {
     beforeEach(() => {
         deps = {
             isSessionVisible: vi.fn(() => true),
+            hasLocalMessageHistory: vi.fn(() => true),
             getSessionEncryption: vi.fn(() => ({
                 decryptMessage: vi.fn(async () => ({
                     id: 'message-1',
@@ -110,6 +111,29 @@ describe('handleRealtimeMessageUpdate', () => {
 
         expect(deps.enqueueMessages).not.toHaveBeenCalled();
         expect(deps.invalidateMessages).toHaveBeenCalledWith('session-1');
+    });
+
+    it('shows the first visible realtime message immediately before bootstrapping history', async () => {
+        deps.getLastSeq = vi.fn(() => undefined);
+        deps.hasLocalMessageHistory = vi.fn(() => false);
+
+        await handleRealtimeMessageUpdate(createUpdate(), deps);
+
+        expect(deps.enqueueMessages).toHaveBeenCalledWith(
+            'session-1',
+            [expect.objectContaining({ id: 'message-1' })],
+        );
+        expect(deps.invalidateMessages).toHaveBeenCalledWith('session-1');
+        expect(deps.setLastSeq).not.toHaveBeenCalled();
+    });
+
+    it('ignores duplicate or stale realtime messages without refreshing', async () => {
+        deps.getLastSeq = vi.fn(() => 4);
+
+        await handleRealtimeMessageUpdate(createUpdate(), deps);
+
+        expect(deps.enqueueMessages).not.toHaveBeenCalled();
+        expect(deps.invalidateMessages).not.toHaveBeenCalled();
     });
 
     it('refreshes sessions if the session is missing locally', async () => {

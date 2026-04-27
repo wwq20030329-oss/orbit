@@ -59,11 +59,12 @@ async function getVoiceUsage(
 
 async function hasActiveSubscription(userId: string): Promise<boolean> {
     const revenueCatApiKey = process.env.REVENUECAT_API_KEY;
-    if (!revenueCatApiKey) return false;
+    const revenueCatProjectId = process.env.REVENUECAT_PROJECT_ID;
+    if (!revenueCatApiKey || !revenueCatProjectId) return false;
 
     try {
         const response = await fetch(
-            `https://api.revenuecat.com/v2/projects/proj493735ad/customers/${userId}/active_entitlements`,
+            `https://api.revenuecat.com/v2/projects/${revenueCatProjectId}/customers/${userId}/active_entitlements`,
             {
                 method: "GET",
                 headers: {
@@ -106,6 +107,9 @@ export function voiceRoutes(app: Fastify) {
         }
         if (!process.env.REVENUECAT_API_KEY) {
             return reply.code(500).send({ error: 'REVENUECAT_API_KEY not configured' });
+        }
+        if (!process.env.REVENUECAT_PROJECT_ID) {
+            return reply.code(500).send({ error: 'REVENUECAT_PROJECT_ID not configured' });
         }
 
         const elevenUserId = deriveElevenUserId(userId);

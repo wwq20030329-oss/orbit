@@ -27,21 +27,63 @@ export interface SessionResumeOptions {
     nativeResumeRequest?: PersistedNativeCliResumeRequest | null;
 }
 
+function pickNativeResumeRequestTitle(session: Session, fallbackPath: string): string {
+    const summaryText = session.metadata?.summary?.text?.trim();
+    if (summaryText) {
+        return summaryText;
+    }
+
+    const lastPathPart = fallbackPath.split('/').filter(Boolean).at(-1)?.trim();
+    return lastPathPart || 'Recovered Session';
+}
+
+function buildNativeResumeRequestFromSession(session: Session): PersistedNativeCliResumeRequest | null {
+    const metadata = session.metadata;
+    const machineId = metadata?.machineId?.trim();
+    if (!metadata || !machineId) {
+        return null;
+    }
+
+    const target = metadata.claudeSessionId
+        ? { tool: 'claude' as const, backendId: metadata.claudeSessionId }
+        : metadata.codexThreadId
+            ? { tool: 'codex' as const, backendId: metadata.codexThreadId }
+            : metadata.geminiSessionId
+                ? { tool: 'gemini' as const, backendId: metadata.geminiSessionId }
+                : metadata.nativeHistorySourceTool && metadata.nativeHistorySourceBackendId
+                    ? { tool: metadata.nativeHistorySourceTool, backendId: metadata.nativeHistorySourceBackendId }
+                    : null;
+    const workingDirectory = metadata.path?.trim() || metadata.projectRoot?.trim() || null;
+    if (!target || !workingDirectory) {
+        return null;
+    }
+
+    return {
+        machineId,
+        tool: target.tool,
+        backendId: target.backendId,
+        workingDirectory,
+        title: pickNativeResumeRequestTitle(session, workingDirectory),
+        summary: metadata.summary?.text?.trim() || null,
+        updatedAt: session.updatedAt,
+    };
+}
+
 export function resolveSessionResumeTarget(
     session: Session,
     options: SessionResumeOptions = {},
 ): SessionResumeTarget | null {
-    const interactionBlocked = options.interactionBlocked === true;
     const nativeResumeRequest = options.nativeResumeRequest ?? null;
     const machineId = session.metadata?.machineId?.trim() ?? '';
     const canResumeOrbitSession = Boolean(machineId && buildResumeCommand(session.metadata ?? {}));
+    const inferredNativeResumeRequest = nativeResumeRequest ?? buildNativeResumeRequestFromSession(session);
 
-    if (nativeResumeRequest && (interactionBlocked || !canResumeOrbitSession)) {
+    if (inferredNativeResumeRequest) {
         return {
             type: 'native-cli-history',
-            machineId: nativeResumeRequest.machineId,
+            machineId: inferredNativeResumeRequest.machineId,
             sessionId: session.id,
-            request: nativeResumeRequest,
+            request: inferredNativeResumeRequest,
         };
     }
 

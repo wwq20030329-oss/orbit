@@ -7,6 +7,8 @@ import { Context } from "@/context";
 import { friendRemove } from "@/app/social/friendRemove";
 import { friendList } from "@/app/social/friendList";
 import { buildUserProfile } from "@/app/social/type";
+import { userDelete } from "@/app/social/userDelete";
+import { auth } from "@/app/auth/auth";
 
 export async function userRoutes(app: Fastify) {
 
@@ -161,6 +163,20 @@ export async function userRoutes(app: Fastify) {
     }, async (request, reply) => {
         const friends = await friendList(Context.create(request.userId));
         return reply.send({ friends });
+    });
+
+    // Delete user account
+    app.delete('/v1/user', {
+        schema: {
+            response: {
+                204: z.object({})
+            }
+        },
+        preHandler: app.authenticate
+    }, async (request, reply) => {
+        await userDelete(Context.create(request.userId));
+        auth.invalidateUserTokens(request.userId);
+        return reply.code(204).send({});
     });
 };
 

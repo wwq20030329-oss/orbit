@@ -1,11 +1,12 @@
 import type { CliThreadListItem } from '@/utils/cliThreadList';
+import type { NavigateToSessionOptions } from '@/hooks/useNavigateToSession';
 import { storage } from '@/sync/storage';
 import { findExistingOrbitSessionIdForNativeEntry } from '@/utils/nativeCliHistory';
 import { isImportedNativeHistoryWrapperSession } from '@/utils/nativeCliSessionResolver';
 import { openNativeCliHistoryEntry, prepareNativeCliPlaceholderSession, primeNativeCliHistoryEntryOpen } from '@/utils/openNativeCliSession';
 
 export interface CliThreadNavigationActions {
-    navigateToSession: (sessionId: string) => Promise<void>;
+    navigateToSession: (sessionId: string, options?: NavigateToSessionOptions) => Promise<void>;
     navigateDirectlyToSession: (sessionId: string) => void;
 }
 
@@ -14,7 +15,9 @@ export async function openCliThreadItem(
     actions: CliThreadNavigationActions,
 ): Promise<void> {
     if (item.source === 'session' && item.session) {
-        await actions.navigateToSession(item.session.id);
+        await actions.navigateToSession(item.session.id, item.session.metadata?.lifecycleState === 'archived'
+            ? { preferHistoryEntry: true }
+            : undefined);
         return;
     }
 

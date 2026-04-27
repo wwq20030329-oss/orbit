@@ -1,11 +1,11 @@
 import * as React from 'react';
 import { ScrollView, View } from 'react-native';
 import { DiffView } from '@/components/diff/DiffView';
-import { useSetting } from '@/sync/storage';
 
 interface ToolDiffViewProps {
     oldText: string;
     newText: string;
+    wrapLines: boolean;
     style?: any;
     showLineNumbers?: boolean;
     showPlusMinusSymbols?: boolean;
@@ -14,12 +14,11 @@ interface ToolDiffViewProps {
 export const ToolDiffView = React.memo<ToolDiffViewProps>(({ 
     oldText, 
     newText, 
+    wrapLines,
     style, 
     showLineNumbers = false,
     showPlusMinusSymbols = false 
 }) => {
-    const wrapLines = useSetting('wrapLinesInDiffs');
-    
     const diffView = (
         <DiffView 
             oldText={oldText} 

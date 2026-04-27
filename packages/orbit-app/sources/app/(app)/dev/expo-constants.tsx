@@ -12,6 +12,7 @@ import { Modal } from '@/modal';
 import { requireOptionalNativeModule } from 'expo-modules-core';
 import { config } from '@/config';
 import { getExpoUpdatesState } from '@/utils/expoUpdates';
+import { t } from '@/text';
 
 interface JsonViewerProps {
     title: string;
@@ -25,9 +26,9 @@ function JsonViewer({ title, data, defaultExpanded = false }: JsonViewerProps) {
     const handleCopy = async () => {
         try {
             await Clipboard.setStringAsync(JSON.stringify(data, null, 2));
-            Modal.alert('Copied', 'JSON data copied to clipboard');
+            Modal.alert(t('common.copied'), t('devTools.jsonCopied'));
         } catch (error) {
-            Modal.alert('Error', 'Failed to copy to clipboard');
+            Modal.alert(t('common.error'), t('devTools.failedToCopyJson'));
         }
     };
     
@@ -35,7 +36,7 @@ function JsonViewer({ title, data, defaultExpanded = false }: JsonViewerProps) {
         return (
             <Item
                 title={title}
-                detail="Not available"
+                detail={t('devTools.notAvailable')}
                 showChevron={false}
             />
         );
@@ -166,13 +167,13 @@ export default function ExpoConstantsScreen() {
         <>
             <Stack.Screen
                 options={{
-                    title: 'Expo Constants',
+                    title: t('devTools.expoConstantsTitle'),
                     headerLargeTitle: false,
                 }}
             />
             <ItemList>
                 {/* Main Configuration */}
-                <ItemGroup title="Configuration from Constants API">
+                <ItemGroup title={t('devTools.configurationFromConstantsApi')}>
                     <JsonViewer
                         title="expoConfig (Current)"
                         data={expoConfig}
@@ -195,10 +196,10 @@ export default function ExpoConstantsScreen() {
                 </ItemGroup>
                 
                 {/* Raw Native Module Manifests */}
-                <ItemGroup title="Raw Native Module Manifests">
+                <ItemGroup title={t('devTools.rawNativeModuleManifests')}>
                     <Item
-                        title="Is Embedded Launch"
-                        detail={isEmbedded !== undefined ? (isEmbedded ? 'Yes' : 'No') : 'Not available'}
+                        title={t('devTools.isEmbeddedLaunch')}
+                        detail={isEmbedded !== undefined ? (isEmbedded ? t('common.yes') : t('common.no')) : t('devTools.notAvailable')}
                         showChevron={false}
                     />
                     {parsedExponentManifest && (
@@ -222,7 +223,7 @@ export default function ExpoConstantsScreen() {
                 </ItemGroup>
                 
                 {/* Raw String Manifests (for debugging) */}
-                <ItemGroup title="Raw Manifest Strings">
+                <ItemGroup title={t('devTools.rawManifestStrings')}>
                     {typeof rawExponentManifest === 'string' && (
                         <JsonViewer
                             title="ExponentConstants.manifest (raw string)"
@@ -244,16 +245,16 @@ export default function ExpoConstantsScreen() {
                 </ItemGroup>
                 
                 {/* Resolved App Config */}
-                <ItemGroup title="Resolved App Config">
+                <ItemGroup title={t('devTools.resolvedAppConfig')}>
                     <JsonViewer
-                        title="Loaded App Config (from @/config)"
+                        title={t('devTools.loadedAppConfig')}
                         data={config}
                         defaultExpanded={true}
                     />
                 </ItemGroup>
                 
                 {/* System Constants */}
-                <ItemGroup title="System Constants">
+                <ItemGroup title={t('devTools.systemConstants')}>
                     <Item
                         title="Device ID"
                         detail={Constants.deviceId || 'Not available'}

@@ -13,6 +13,15 @@
 
 const path = require('path');
 const fs = require('fs');
+const { format } = require('util');
+
+function logDiagnostic(...args) {
+    if (process.env.ORBIT_RIPGREP_DEBUG !== '1') {
+        return;
+    }
+
+    process.stderr.write(`${format(...args)}\n`);
+}
 
 // Runtime detection (minimal, focused)
 function detectRuntime() {
@@ -126,8 +135,8 @@ function loadRipgrepNative() {
         try {
             return require(nativePath);
         } catch (error) {
-            console.warn('Failed to load ripgrep native addon:', error.message);
-            console.warn('Falling back to ripgrep binary...');
+            logDiagnostic('Failed to load ripgrep native addon:', error.message);
+            logDiagnostic('Falling back to ripgrep binary...');
             // Fall through to binary fallback
         }
     }
@@ -135,28 +144,28 @@ function loadRipgrepNative() {
     // Bun or Node.js fallback: Try system ripgrep
     const systemRipgrep = findSystemRipgrep();
     if (systemRipgrep) {
-        console.info(`Using system ripgrep: ${systemRipgrep}`);
+        logDiagnostic('Using system ripgrep: %s', systemRipgrep);
         return createRipgrepWrapper(systemRipgrep);
     }
 
     // Local binary fallback
     if (fs.existsSync(binaryPath)) {
-        console.info('Using packaged ripgrep binary');
+        logDiagnostic('Using packaged ripgrep binary');
         return createRipgrepWrapper(binaryPath);
     }
 
     // Final fallback: Return mock implementation that provides helpful guidance
-    console.warn('\n⚠️  ripgrep not available - search functionality limited');
-    console.warn('Install ripgrep for full functionality:');
+    logDiagnostic('\n⚠️  ripgrep not available - search functionality limited');
+    logDiagnostic('Install ripgrep for full functionality:');
 
     if (process.platform === 'win32') {
-        console.warn('  • Windows: winget install BurntSushi.ripgrep');
-        console.warn('  • Or download from: https://github.com/BurntSushi/ripgrep/releases');
+        logDiagnostic('  • Windows: winget install BurntSushi.ripgrep');
+        logDiagnostic('  • Or download from: https://github.com/BurntSushi/ripgrep/releases');
     } else {
-        console.warn('  • macOS/Linux: brew install ripgrep');
-        console.warn('  • npm: npm install -g @silentsilas/ripgrep-bin');
+        logDiagnostic('  • macOS/Linux: brew install ripgrep');
+        logDiagnostic('  • npm: npm install -g @silentsilas/ripgrep-bin');
     }
-    console.warn('');
+    logDiagnostic('');
 
     return createMockRipgrep();
 }

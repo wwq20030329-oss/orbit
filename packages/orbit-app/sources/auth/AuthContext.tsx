@@ -60,14 +60,10 @@ export function AuthProvider({ children, initialCredentials }: { children: React
         setCredentials(null);
         setIsAuthenticated(false);
         
-        if (Platform.OS === 'web') {
-            window.location.reload();
-        } else {
-            try {
-                await reloadFromExpoUpdatesAsync();
-            } catch (error) {
-                console.log('Reload failed:', error);
-            }
+        try {
+            await reloadFromExpoUpdatesAsync();
+        } catch (error) {
+            console.log('Reload failed:', error);
         }
     };
 

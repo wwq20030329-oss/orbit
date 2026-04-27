@@ -18,6 +18,7 @@ type NewMessageUpdate = ApiUpdateContainer & { body: ApiUpdateNewMessage };
 
 export type HandleRealtimeMessageUpdateDependencies = {
     isSessionVisible: (sessionId: string) => boolean;
+    hasLocalMessageHistory: (sessionId: string) => boolean;
     getSessionEncryption: (sessionId: string) => RealtimeMessageEncryption | null;
     getSession: (sessionId: string) => Session | undefined;
     applySessions: (sessions: Session[]) => void;
@@ -82,15 +83,33 @@ export async function handleRealtimeMessageUpdate(
         deps.fetchSessions();
     }
 
-    if (!isVisibleSession || !update.body.message) {
+    if (!update.body.message) {
+        return;
+    }
+
+    const hasLocalHistory = deps.hasLocalMessageHistory(sessionId);
+    if (!isVisibleSession && !hasLocalHistory) {
+        // Drop realtime messages only if we're not looking at this session
+        // AND we haven't loaded its history yet. Otherwise, keep accumulating
+        // them in the background so the list stays fresh when navigating back.
         return;
     }
 
     const currentLastSeq = deps.getLastSeq(sessionId);
     const incomingSeq = update.body.message.seq;
-    if (lastMessage && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1) {
+    
+    // We tolerate gaps now. If incomingSeq is strictly greater, enqueue it 
+    // to provide instant UI feedback without a loading spinner. If there's 
+    // a gap (e.g. dropped a packet), we silently invalidate and fetch the 
+    // missing messages in the background.
+    if (lastMessage && currentLastSeq !== undefined && incomingSeq > currentLastSeq) {
         deps.enqueueMessages(sessionId, [lastMessage]);
         deps.setLastSeq(sessionId, incomingSeq);
+
+        if (incomingSeq > currentLastSeq + 1) {
+            // Background repair for the gap
+            deps.invalidateMessages(sessionId);
+        }
 
         let hasMutableTool = false;
         if (lastMessage.role === 'agent' && lastMessage.content[0]?.type === 'tool-result') {
@@ -99,6 +118,16 @@ export async function handleRealtimeMessageUpdate(
         if (hasMutableTool) {
             deps.invalidateGitStatus(sessionId);
         }
+        return;
+    }
+
+    if (lastMessage && currentLastSeq === undefined && !hasLocalHistory) {
+        deps.enqueueMessages(sessionId, [lastMessage]);
+        deps.invalidateMessages(sessionId);
+        return;
+    }
+
+    if (currentLastSeq !== undefined && incomingSeq <= currentLastSeq) {
         return;
     }
 

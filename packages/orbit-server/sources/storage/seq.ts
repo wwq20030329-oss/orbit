@@ -8,10 +8,16 @@ function resolveClient(tx?: SeqClient) {
 }
 
 export async function allocateUserSeq(accountId: string) {
-    const user = await db.account.update({
+    const user = await db.account.upsert({
         where: { id: accountId },
         select: { seq: true },
-        data: { seq: { increment: 1 } }
+        update: { seq: { increment: 1 } },
+        create: {
+            id: accountId,
+            // Placeholder publicKey to avoid P2025 after DB resets.
+            publicKey: accountId,
+            seq: 1
+        }
     });
     const seq = user.seq;
     return seq;

@@ -8,12 +8,18 @@ import { allocateUserSeq } from "@/storage/seq";
 import { log } from "@/utils/log";
 import { AccountProfile } from "@/types";
 
+async function getAccountRecord(accountId: string) {
+    return db.account.findUnique({
+        where: { id: accountId },
+    });
+}
+
 export function accountRoutes(app: Fastify) {
     app.get('/v1/account/profile', {
         preHandler: app.authenticate,
     }, async (request, reply) => {
         const userId = request.userId;
-        const user = await db.account.findUniqueOrThrow({
+        const user = await db.account.findUnique({
             where: { id: userId },
             select: {
                 firstName: true,
@@ -23,6 +29,9 @@ export function accountRoutes(app: Fastify) {
                 githubUser: true
             }
         });
+        if (!user) {
+            return reply.code(404).send({ error: 'Account not found' });
+        }
         const connectedVendors = new Set((await db.serviceAccountToken.findMany({ where: { accountId: userId } })).map(t => t.vendor));
         return reply.send({
             id: userId,
@@ -45,6 +54,9 @@ export function accountRoutes(app: Fastify) {
                     settings: z.string().nullable(),
                     settingsVersion: z.number()
                 }),
+                404: z.object({
+                    error: z.literal('Account not found')
+                }),
                 500: z.object({
                     error: z.literal('Failed to get account settings')
                 })
@@ -56,9 +68,8 @@ export function accountRoutes(app: Fastify) {
                 where: { id: request.userId },
                 select: { settings: true, settingsVersion: true }
             });
-
             if (!user) {
-                return reply.code(500).send({ error: 'Failed to get account settings' });
+                return reply.code(404).send({ error: 'Account not found' });
             }
 
             return reply.send({
@@ -87,6 +98,10 @@ export function accountRoutes(app: Fastify) {
                     currentVersion: z.number(),
                     currentSettings: z.string().nullable()
                 })]),
+                404: z.object({
+                    success: z.literal(false),
+                    error: z.literal('Account not found')
+                }),
                 500: z.object({
                     success: z.literal(false),
                     error: z.literal('Failed to update account settings')
@@ -104,11 +119,10 @@ export function accountRoutes(app: Fastify) {
                 where: { id: userId },
                 select: { settings: true, settingsVersion: true }
             });
-
             if (!currentUser) {
-                return reply.code(500).send({
+                return reply.code(404).send({
                     success: false,
-                    error: 'Failed to update account settings'
+                    error: 'Account not found'
                 });
             }
 

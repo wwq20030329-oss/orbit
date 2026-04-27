@@ -84,7 +84,7 @@ type PickerType = 'machine' | 'path' | 'worktree';
 // Permission mode colors & icons matching Claude Code CLI
 type PermissionStyle = { color: string; icon: 'play-forward' | 'pause' };
 
-const COMPOSER_INPUT_VERTICAL_PADDING = Platform.OS === 'web' ? 10 : 8;
+const COMPOSER_INPUT_VERTICAL_PADDING = 8;
 const COMPOSER_SEND_BUTTON_SIZE = 32;
 const COMPOSER_SEND_BUTTON_MARGIN_BOTTOM = Math.max(
     0,
@@ -545,21 +545,7 @@ function SessionComposerDemo() {
                         )}
                     </View>
 
-                    {/* Web: inline popover */}
-                    {Platform.OS === 'web' && activePicker && pickerData && (
-                        <View style={[styles.popover, { backgroundColor: theme.colors.header.background }]}>
-                            <PickerContent {...pickerData} onSelect={handlePickerSelect} />
-                        </View>
-                    )}
                 </View>
-
-                {/* Web: click-away backdrop */}
-                {Platform.OS === 'web' && activePicker && (
-                    <Pressable
-                        style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: -1 }}
-                        onPress={() => setActivePicker(null)}
-                    />
-                )}
 
                 {/* Spacer */}
                 <View style={{ flex: 1 }} />
@@ -598,7 +584,7 @@ function SessionComposerDemo() {
                                         name="arrow-up"
                                         size={16}
                                         color={theme.colors.button.primary.tint}
-                                        style={{ marginTop: Platform.OS === 'web' ? 2 : 0 }}
+                                        style={{ marginTop: 0 }}
                                     />
                                 </Pressable>
                             </View>
@@ -610,7 +596,7 @@ function SessionComposerDemo() {
             </View>
 
             {/* Native: picker bottom sheet */}
-            {Platform.OS !== 'web' && (
+            {(
                 <BottomSheet
                     visible={!!activePicker}
                     onClose={() => setActivePicker(null)}

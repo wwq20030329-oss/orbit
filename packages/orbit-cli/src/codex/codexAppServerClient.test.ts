@@ -791,6 +791,314 @@ describe('CodexAppServerClient sandbox integration', () => {
         await client.disconnect();
     });
 
+    it('aggregates raw agent message deltas into legacy agent_message events', async () => {
+        const proc = createMockProcess({
+            pid: 3008,
+            onRequest: (msg, stdout) => {
+                if (msg.method === 'thread/start' && msg.id != null) {
+                    setTimeout(() => {
+                        pushJsonLine(stdout, {
+                            id: msg.id,
+                            result: {
+                                thread: { id: 'thread-raw-8', path: '/tmp/thread-raw-8' },
+                                model: 'gpt-test',
+                                modelProvider: 'openai',
+                                cwd: '/tmp/project',
+                                approvalPolicy: 'never',
+                                sandbox: { type: 'dangerFullAccess' },
+                                reasoningEffort: null,
+                            },
+                        });
+                    }, 0);
+                }
+
+                if (msg.method === 'turn/start' && msg.id != null) {
+                    setTimeout(() => {
+                        pushJsonLine(stdout, {
+                            id: msg.id,
+                            result: {
+                                turn: { id: 'turn-raw-8', items: [], status: 'inProgress', error: null },
+                            },
+                        });
+                        pushJsonLine(stdout, {
+                            method: 'turn/started',
+                            params: {
+                                threadId: 'thread-raw-8',
+                                turn: { id: 'turn-raw-8', items: [], status: 'inProgress', error: null },
+                            },
+                        });
+                        pushJsonLine(stdout, {
+                            method: 'item/agentMessage/delta',
+                            params: {
+                                threadId: 'thread-raw-8',
+                                turnId: 'turn-raw-8',
+                                itemId: 'msg-8',
+                                delta: 'steady-',
+                            },
+                        });
+                        pushJsonLine(stdout, {
+                            method: 'item/agentMessage/delta',
+                            params: {
+                                threadId: 'thread-raw-8',
+                                turnId: 'turn-raw-8',
+                                itemId: 'msg-8',
+                                delta: 'orchid-19',
+                            },
+                        });
+                        pushJsonLine(stdout, {
+                            method: 'item/completed',
+                            params: {
+                                threadId: 'thread-raw-8',
+                                turnId: 'turn-raw-8',
+                                item: {
+                                    type: 'agentMessage',
+                                    id: 'msg-8',
+                                    text: '',
+                                    phase: 'final_answer',
+                                },
+                            },
+                        });
+                    }, 0);
+                }
+            },
+        });
+
+        mockSpawn.mockImplementation(() => proc);
+
+        const { CodexAppServerClient } = await import('./codexAppServerClient');
+        const client = new CodexAppServerClient();
+        const events: Array<Record<string, unknown>> = [];
+        client.setEventHandler((msg) => {
+            events.push(msg as Record<string, unknown>);
+        });
+
+        await client.connect();
+        await client.startThread({
+            model: 'gpt-test',
+            cwd: '/tmp/project',
+            approvalPolicy: 'never',
+            sandbox: 'danger-full-access',
+        });
+
+        await expect(client.sendTurnAndWait('say the codename')).resolves.toEqual({ aborted: false });
+
+        const agentMessages = events
+            .filter((event) => event.type === 'agent_message');
+        expect(agentMessages).toHaveLength(1);
+        expect(agentMessages[0]).toEqual(expect.objectContaining({
+            type: 'agent_message',
+            message: 'steady-orchid-19',
+            item_id: 'msg-8',
+            phase: 'final_answer',
+        }));
+        expect(agentMessages[0]).not.toHaveProperty('partial');
+
+        await client.disconnect();
+    });
+
+    it('ignores duplicate raw completion from the previous turn while a new turn is starting', async () => {
+        const requests: MockRpcMessage[] = [];
+        const proc = createMockProcess({
+            pid: 3002,
+            onRequest: (msg, stdout) => {
+                requests.push(msg);
+
+                if (msg.method === 'thread/start' && msg.id != null) {
+                    setTimeout(() => {
+                        pushJsonLine(stdout, {
+                            id: msg.id,
+                            result: {
+                                thread: { id: 'thread-race-1', path: '/tmp/thread-race-1' },
+                                model: 'gpt-test',
+                                modelProvider: 'openai',
+                                cwd: '/tmp/project',
+                                approvalPolicy: 'never',
+                                sandbox: { type: 'dangerFullAccess' },
+                                reasoningEffort: null,
+                            },
+                        });
+                    }, 0);
+                }
+
+                if (msg.method === 'turn/start' && msg.id != null) {
+                    const turnStartCount = requests.filter((request) => request.method === 'turn/start').length;
+
+                    if (turnStartCount === 1) {
+                        setTimeout(() => {
+                            pushJsonLine(stdout, {
+                                id: msg.id,
+                                result: {
+                                    turn: { id: 'turn-race-1', items: [], status: 'inProgress', error: null },
+                                },
+                            });
+                            pushJsonLine(stdout, {
+                                method: 'turn/started',
+                                params: {
+                                    threadId: 'thread-race-1',
+                                    turn: { id: 'turn-race-1', items: [], status: 'inProgress', error: null },
+                                },
+                            });
+                            pushJsonLine(stdout, {
+                                method: 'turn/completed',
+                                params: {
+                                    threadId: 'thread-race-1',
+                                    turn: { id: 'turn-race-1', items: [], status: 'completed', error: null },
+                                },
+                            });
+                        }, 0);
+                    }
+
+                    if (turnStartCount === 2) {
+                        // Duplicate completion from turn 1 arrives while turn 2 is still starting.
+                        setTimeout(() => {
+                            pushJsonLine(stdout, {
+                                method: 'turn/completed',
+                                params: {
+                                    threadId: 'thread-race-1',
+                                    turn: { id: 'turn-race-1', items: [], status: 'completed', error: null },
+                                },
+                            });
+                        }, 0);
+
+                        setTimeout(() => {
+                            pushJsonLine(stdout, {
+                                id: msg.id,
+                                result: {
+                                    turn: { id: 'turn-race-2', items: [], status: 'inProgress', error: null },
+                                },
+                            });
+                            pushJsonLine(stdout, {
+                                method: 'turn/started',
+                                params: {
+                                    threadId: 'thread-race-1',
+                                    turn: { id: 'turn-race-2', items: [], status: 'inProgress', error: null },
+                                },
+                            });
+                            pushJsonLine(stdout, {
+                                method: 'turn/completed',
+                                params: {
+                                    threadId: 'thread-race-1',
+                                    turn: { id: 'turn-race-2', items: [], status: 'completed', error: null },
+                                },
+                            });
+                        }, 25);
+                    }
+                }
+            },
+        });
+
+        mockSpawn.mockImplementation(() => proc);
+
+        const { CodexAppServerClient } = await import('./codexAppServerClient');
+        const client = new CodexAppServerClient();
+
+        await client.connect();
+        await client.startThread({
+            model: 'gpt-test',
+            cwd: '/tmp/project',
+            approvalPolicy: 'never',
+            sandbox: 'danger-full-access',
+        });
+
+        await expect(client.sendTurnAndWait('first turn')).resolves.toEqual({ aborted: false });
+
+        let settled = false;
+        const secondTurn = client.sendTurnAndWait('second turn');
+        void secondTurn.then(() => {
+            settled = true;
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(settled).toBe(false);
+
+        await expect(secondTurn).resolves.toEqual({ aborted: false });
+
+        await client.disconnect();
+    });
+
+    it('responds to permission approval requests with granted permissions and scope', async () => {
+        const approvals: Array<Record<string, unknown>> = [];
+        const requests: MockRpcMessage[] = [];
+        const proc = createMockProcess({
+            pid: 3009,
+            onRequest: (msg, stdout) => {
+                requests.push(msg);
+                if (msg.method === 'thread/start' && msg.id != null) {
+                    setTimeout(() => {
+                        pushJsonLine(stdout, {
+                            id: msg.id,
+                            result: {
+                                thread: { id: 'thread-raw-9', path: '/tmp/thread-raw-9' },
+                                model: 'gpt-test',
+                                modelProvider: 'openai',
+                                cwd: '/tmp/project',
+                                approvalPolicy: 'on-request',
+                                sandbox: { type: 'workspaceWrite', writableRoots: [], networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+                                reasoningEffort: null,
+                            },
+                        });
+                        pushJsonLine(stdout, {
+                            id: 109,
+                            method: 'item/permissions/requestApproval',
+                            params: {
+                                threadId: 'thread-raw-9',
+                                turnId: 'turn-raw-9',
+                                itemId: 'permissions-1',
+                                reason: 'Need write access',
+                                permissions: {
+                                    network: { enabled: true },
+                                    fileSystem: { read: null, write: ['/tmp/project/output.txt'] },
+                                },
+                            },
+                        });
+                    }, 0);
+                }
+            },
+        });
+
+        mockSpawn.mockImplementation(() => proc);
+
+        const { CodexAppServerClient } = await import('./codexAppServerClient');
+        const client = new CodexAppServerClient();
+        client.setApprovalHandler(async (params) => {
+            approvals.push(params as Record<string, unknown>);
+            return 'approved_for_session';
+        });
+
+        await client.connect();
+        await client.startThread({
+            model: 'gpt-test',
+            cwd: '/tmp/project',
+            approvalPolicy: 'on-request',
+            sandbox: 'workspace-write',
+        });
+
+        await waitFor(() => approvals.length === 1);
+        expect(approvals[0]).toEqual(expect.objectContaining({
+            type: 'permissions',
+            callId: 'permissions-1',
+            reason: 'Need write access',
+            permissions: {
+                network: { enabled: true },
+                fileSystem: { read: null, write: ['/tmp/project/output.txt'] },
+            },
+        }));
+
+        await waitFor(() => requests.some((msg) => msg.id === 109 && msg.result?.scope === 'session'));
+        expect(requests).toContainEqual(expect.objectContaining({
+            id: 109,
+            result: {
+                permissions: {
+                    network: { enabled: true },
+                    fileSystem: { read: null, write: ['/tmp/project/output.txt'] },
+                },
+                scope: 'session',
+            },
+        }));
+
+        await client.disconnect();
+    });
+
     it('responds to MCP elicitation requests with an action payload', async () => {
         const approvals: Array<Record<string, unknown>> = [];
         const requests: MockRpcMessage[] = [];

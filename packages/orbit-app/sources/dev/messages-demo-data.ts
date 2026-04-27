@@ -257,15 +257,11 @@ Inline code now renders as \`orbit render\` without a background highlight.
     // Read tool examples
     createReadToolCall('read-1', '/src/index.tsx', 1, 20, 
 `import React from 'react';
-import ReactDOM from 'react-dom/client';
-import './index.css';
+import { AppRegistry } from 'react-native';
 import App from './App';
+import { name as appName } from './app.json';
 
-const root = ReactDOM.createRoot(
-  document.getElementById('root') as HTMLElement
-);
-
-root.render(
+AppRegistry.registerComponent(appName, () => 
   <React.StrictMode>
     <App />
   </React.StrictMode>

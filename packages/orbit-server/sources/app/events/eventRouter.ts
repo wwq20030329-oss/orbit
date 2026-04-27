@@ -81,6 +81,10 @@ export type UpdateEvent = {
         value: string | null;
         version: number;
     } | null | undefined;
+    firstName?: string | null | undefined;
+    lastName?: string | null | undefined;
+    username?: string | null | undefined;
+    avatar?: AccountProfile["avatar"] | null | undefined;
     github?: GitHubProfile | null | undefined;
 } | {
     type: 'new-machine';

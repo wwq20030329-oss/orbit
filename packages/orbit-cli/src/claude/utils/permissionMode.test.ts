@@ -33,16 +33,24 @@ describe('mapToClaudeMode', () => {
         it('passes through plan', () => {
             expect(mapToClaudeMode('plan')).toBe('plan');
         });
+
+        it('passes through auto', () => {
+            expect(mapToClaudeMode('auto')).toBe('auto');
+        });
+
+        it('passes through dontAsk', () => {
+            expect(mapToClaudeMode('dontAsk')).toBe('dontAsk');
+        });
     });
 
-    describe('all 7 PermissionMode values are handled', () => {
+    describe('all supported PermissionMode values are handled', () => {
         const allModes: PermissionMode[] = [
-            'default', 'acceptEdits', 'bypassPermissions', 'plan',  // Claude modes
+            'default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto', 'dontAsk', // Claude modes
             'read-only', 'safe-yolo', 'yolo'  // Codex modes
         ];
 
         it('returns a valid Claude mode for every PermissionMode', () => {
-            const validClaudeModes = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
+            const validClaudeModes = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto', 'dontAsk'];
 
             allModes.forEach(mode => {
                 const result = mapToClaudeMode(mode);
@@ -59,6 +67,14 @@ describe('extractPermissionModeFromClaudeArgs', () => {
 
     it('extracts mode from --permission-mode=VALUE', () => {
         expect(extractPermissionModeFromClaudeArgs(['--foo', '--permission-mode=plan'])).toBe('plan');
+    });
+
+    it('extracts official auto mode from Claude args', () => {
+        expect(extractPermissionModeFromClaudeArgs(['--permission-mode', 'auto'])).toBe('auto');
+    });
+
+    it('extracts official dontAsk mode from Claude args', () => {
+        expect(extractPermissionModeFromClaudeArgs(['--permission-mode=dontAsk'])).toBe('dontAsk');
     });
 
     it('returns undefined for invalid mode', () => {

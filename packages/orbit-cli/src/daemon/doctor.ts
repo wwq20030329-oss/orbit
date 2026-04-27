@@ -11,10 +11,10 @@ import spawn from 'cross-spawn';
 /**
  * Find all Orbit CLI processes (including current process)
  */
-export async function findAllOrbitProcesses(): Promise<Array<{ pid: number, command: string, type: string }>> {
+export async function findAllOrbitProcesses(): Promise<Array<{ pid: number, ppid: number, command: string, type: string }>> {
   try {
     const processes = await psList();
-    const allProcesses: Array<{ pid: number, command: string, type: string }> = [];
+    const allProcesses: Array<{ pid: number, ppid: number, command: string, type: string }> = [];
     
     for (const proc of processes) {
       const cmd = proc.cmd || '';
@@ -47,7 +47,7 @@ export async function findAllOrbitProcesses(): Promise<Array<{ pid: number, comm
         type = cmd.includes('tsx') ? 'dev-related' : 'user-session';
       }
 
-      allProcesses.push({ pid: proc.pid, command: cmd || name, type });
+      allProcesses.push({ pid: proc.pid, ppid: proc.ppid ?? 0, command: cmd || name, type });
     }
 
     return allProcesses;
@@ -75,6 +75,141 @@ export async function findRunawayOrbitProcesses(): Promise<Array<{ pid: number, 
       )
     )
     .map(p => ({ pid: p.pid, command: p.command }));
+}
+
+function extractDaemonSpawnedResumeKey(command: string): string | null {
+  if (!command.includes('--started-by daemon')) {
+    return null;
+  }
+
+  const resumeMatch = command.match(/--resume\s+([^\s]+)/);
+  if (!resumeMatch) {
+    return null;
+  }
+
+  const toolMatch = command.match(/\b(claude|codex|gemini|openclaw)\b/);
+  if (!toolMatch) {
+    return null;
+  }
+
+  return `${toolMatch[1]}:${resumeMatch[1]}`;
+}
+
+export async function findDuplicateDaemonSpawnedSessionProcesses(): Promise<Array<{ pid: number, ppid: number, command: string }>> {
+  const allProcesses = await findAllOrbitProcesses();
+  const grouped = new Map<string, Array<{ pid: number, ppid: number, command: string }>>();
+
+  for (const proc of allProcesses) {
+    if (proc.type !== 'daemon-spawned-session' && proc.type !== 'dev-daemon-spawned') {
+      continue;
+    }
+
+    const resumeKey = extractDaemonSpawnedResumeKey(proc.command);
+    if (!resumeKey) {
+      continue;
+    }
+
+    const existing = grouped.get(resumeKey);
+    if (existing) {
+      existing.push(proc);
+      continue;
+    }
+    grouped.set(resumeKey, [proc]);
+  }
+
+  const duplicates: Array<{ pid: number, ppid: number, command: string }> = [];
+
+  for (const processes of grouped.values()) {
+    if (processes.length < 2) {
+      continue;
+    }
+
+    const sorted = [...processes].sort((left, right) => {
+      const leftOrphan = left.ppid === 1 || left.ppid === 0;
+      const rightOrphan = right.ppid === 1 || right.ppid === 0;
+      if (leftOrphan !== rightOrphan) {
+        return leftOrphan ? 1 : -1;
+      }
+      return right.pid - left.pid;
+    });
+
+    duplicates.push(...sorted.slice(1).map((process) => ({
+      pid: process.pid,
+      ppid: process.ppid,
+      command: process.command,
+    })));
+  }
+
+  return duplicates;
+}
+
+export async function findOrphanDaemonSpawnedSessionProcesses(): Promise<Array<{ pid: number, ppid: number, command: string }>> {
+  const allProcesses = await findAllOrbitProcesses();
+
+  return allProcesses
+    .filter((proc) => proc.type === 'daemon-spawned-session' || proc.type === 'dev-daemon-spawned')
+    .filter((proc) => proc.ppid === 1 || proc.ppid === 0)
+    .map((proc) => ({
+      pid: proc.pid,
+      ppid: proc.ppid,
+      command: proc.command,
+    }));
+}
+
+export async function killOrphanDaemonSpawnedSessionProcesses(): Promise<{ killed: number, errors: Array<{ pid: number, error: string }> }> {
+  const orphans = await findOrphanDaemonSpawnedSessionProcesses();
+  const errors: Array<{ pid: number, error: string }> = [];
+  let killed = 0;
+
+  for (const { pid } of orphans) {
+    try {
+      process.kill(pid, 'SIGTERM');
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const processes = await psList();
+      const stillAlive = processes.find((proc) => proc.pid === pid);
+      if (stillAlive) {
+        process.kill(pid, 'SIGKILL');
+      }
+
+      killed += 1;
+    } catch (error) {
+      errors.push({
+        pid,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return { killed, errors };
+}
+
+export async function killDuplicateDaemonSpawnedSessionProcesses(): Promise<{ killed: number, errors: Array<{ pid: number, error: string }> }> {
+  const duplicates = await findDuplicateDaemonSpawnedSessionProcesses();
+  const errors: Array<{ pid: number, error: string }> = [];
+  let killed = 0;
+
+  for (const { pid } of duplicates) {
+    try {
+      process.kill(pid, 'SIGTERM');
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const processes = await psList();
+      const stillAlive = processes.find((proc) => proc.pid === pid);
+      if (stillAlive) {
+        process.kill(pid, 'SIGKILL');
+      }
+
+      killed += 1;
+    } catch (error) {
+      errors.push({
+        pid,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return { killed, errors };
 }
 
 /**

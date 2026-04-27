@@ -2,13 +2,12 @@ import React from 'react';
 import { View, Pressable, Platform } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
-import { Session, Machine } from '@/sync/storageTypes';
+import { Session, GitStatus } from '@/sync/storageTypes';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { getSessionName, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
-import { useAllMachines, useSessionProjectGitStatus, useSessionGitStatus } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useNavigateDirectlyToSession, useNavigateToSession } from '@/hooks/useNavigateToSession';
@@ -20,32 +19,39 @@ import { isWorktreePath, getRepoPath, getWorktreeName } from '@/utils/worktree';
 import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
 import { useRouter } from 'expo-router';
 import { useSessionControlState } from '@/utils/sessionControlState';
+import { useMachine, useSessionProjectGitStatus } from '@/sync/storage';
+import { useShallow } from 'zustand/react/shallow';
 
 interface ActiveSessionsGroupProps {
     sessions: Session[];
     selectedSessionId?: string;
 }
 
-/**
- * Hook to get git display info for a section header:
- * branch name, line changes, and worktree status.
- */
-function useSectionGitInfo(sessionId: string) {
-    const projectGitStatus = useSessionProjectGitStatus(sessionId);
-    const sessionGitStatus = useSessionGitStatus(sessionId);
-    const gitStatus = projectGitStatus || sessionGitStatus;
+type SectionGitInfo = {
+    branch: string | null;
+    linesAdded: number;
+    linesRemoved: number;
+    hasChanges: boolean;
+};
 
-    return React.useMemo(() => {
-        if (!gitStatus || gitStatus.lastUpdatedAt === 0) {
-            return { branch: null, linesAdded: 0, linesRemoved: 0, hasChanges: false };
-        }
-        return {
-            branch: gitStatus.branch,
-            linesAdded: gitStatus.unstagedLinesAdded,
-            linesRemoved: gitStatus.unstagedLinesRemoved,
-            hasChanges: gitStatus.unstagedLinesAdded > 0 || gitStatus.unstagedLinesRemoved > 0,
-        };
-    }, [gitStatus]);
+const EMPTY_SECTION_GIT_INFO: SectionGitInfo = {
+    branch: null,
+    linesAdded: 0,
+    linesRemoved: 0,
+    hasChanges: false,
+};
+
+function buildSectionGitInfo(gitStatus: GitStatus | null | undefined): SectionGitInfo {
+    if (!gitStatus || gitStatus.lastUpdatedAt === 0) {
+        return EMPTY_SECTION_GIT_INFO;
+    }
+
+    return {
+        branch: gitStatus.branch,
+        linesAdded: gitStatus.unstagedLinesAdded,
+        linesRemoved: gitStatus.unstagedLinesRemoved,
+        hasChanges: gitStatus.unstagedLinesAdded > 0 || gitStatus.unstagedLinesRemoved > 0,
+    };
 }
 
 // Section header: avatar | path + branch + tree icon + line changes | + button
@@ -53,7 +59,16 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: Session; 
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const router = useRouter();
-    const draft = useNewSessionDraft();
+    const projectGitStatus = useSessionProjectGitStatus(session.id);
+    const gitInfo = React.useMemo(
+        () => buildSectionGitInfo(projectGitStatus),
+        [projectGitStatus],
+    );
+    const draftActions = useNewSessionDraft(useShallow((state) => ({
+        setMachineId: state.setMachineId,
+        setPath: state.setPath,
+        setSessionType: state.setSessionType,
+    })));
 
     const sessionPath = session.metadata?.path || '';
     const isWorktree = isWorktreePath(sessionPath);
@@ -62,8 +77,6 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: Session; 
         ? formatPathRelativeToHome(repoPath, session.metadata?.homeDir)
         : displayPath;
     const worktreeName = isWorktree ? getWorktreeName(sessionPath) : null;
-
-    const gitInfo = useSectionGitInfo(session.id);
     const branchName = worktreeName || gitInfo.branch;
     const hasBranch = !!branchName;
 
@@ -72,14 +85,14 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: Session; 
     const handleAdd = React.useCallback(() => {
         const machineId = session.metadata?.machineId;
         if (machineId) {
-            draft.setMachineId(machineId);
+            draftActions.setMachineId(machineId);
         }
         // setMachineId resets path, so set path after
         const pathToSet = formatPathRelativeToHome(repoPath, session.metadata?.homeDir);
-        draft.setPath(pathToSet);
-        draft.setSessionType(isWorktree ? 'worktree' : 'simple');
+        draftActions.setPath(pathToSet);
+        draftActions.setSessionType(isWorktree ? 'worktree' : 'simple');
         router.navigate('/new');
-    }, [session.metadata, repoPath, isWorktree, draft, router]);
+    }, [session.metadata, repoPath, isWorktree, draftActions, router]);
 
     return (
         <View style={hasBranch ? styles.sectionHeader : styles.sectionHeaderSingleLine}>
@@ -129,10 +142,14 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: Session; 
 });
 
 // Full-width separator between machine groups: ——— 🖥 name ———
-const MachineSeparator = React.memo(({ machineName, machineId }: { machineName: string; machineId: string }) => {
+const MachineSeparator = React.memo(({ fallbackName, machineId }: { fallbackName: string; machineId: string }) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const router = useRouter();
+    const machine = useMachine(machineId);
+    const machineName = machine?.metadata?.displayName
+        || machine?.metadata?.host
+        || fallbackName;
 
     const handlePress = React.useCallback(() => {
         router.navigate(`/machine/${machineId}` as any);
@@ -150,17 +167,8 @@ const MachineSeparator = React.memo(({ machineName, machineId }: { machineName: 
     );
 });
 
-export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: ActiveSessionsGroupProps) {
+function ActiveSessionsGroupCompactView({ sessions, selectedSessionId }: ActiveSessionsGroupProps) {
     const styles = stylesheet;
-    const machines = useAllMachines();
-
-    const machinesMap = React.useMemo(() => {
-        const map: Record<string, Machine> = {};
-        machines.forEach(machine => {
-            map[machine.id] = machine;
-        });
-        return map;
-    }, [machines]);
 
     // Group sessions by machine, then by project within each machine
     const { machineGroups, hasMultipleMachines } = React.useMemo(() => {
@@ -168,6 +176,11 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
         const byMachine = new Map<string, {
             machineId: string;
             machineName: string;
+            sortedProjects?: Array<{
+                projectPath: string;
+                displayPath: string;
+                sessions: Session[];
+            }>;
             projects: Map<string, {
                 displayPath: string;
                 sessions: Session[];
@@ -176,10 +189,8 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
 
         sessions.forEach(session => {
             const machineId = session.metadata?.machineId || unknownText;
-            const machine = machineId !== unknownText ? machinesMap[machineId] : null;
-            const machineName = machine?.metadata?.displayName ||
-                machine?.metadata?.host ||
-                (machineId !== unknownText ? machineId : `<${unknownText}>`);
+            const machineName = session.metadata?.host
+                || (machineId !== unknownText ? machineId : `<${unknownText}>`);
 
             let machineGroup = byMachine.get(machineId);
             if (!machineGroup) {
@@ -203,6 +214,13 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
             mg.projects.forEach(pg => {
                 pg.sessions.sort((a, b) => b.createdAt - a.createdAt);
             });
+            mg.sortedProjects = Array.from(mg.projects.entries())
+                .map(([projectPath, projectGroup]) => ({
+                    projectPath,
+                    displayPath: projectGroup.displayPath,
+                    sessions: projectGroup.sessions,
+                }))
+                .sort((left, right) => left.displayPath.localeCompare(right.displayPath));
         });
 
         const sorted = Array.from(byMachine.values()).sort((a, b) =>
@@ -210,29 +228,25 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
         );
 
         return { machineGroups: sorted, hasMultipleMachines: byMachine.size > 1 };
-    }, [sessions, machinesMap]);
+    }, [sessions]);
 
     return (
         <View style={styles.container}>
             {machineGroups.map(machineGroup => {
-                const sortedProjects = Array.from(machineGroup.projects.entries()).sort(
-                    ([, a], [, b]) => a.displayPath.localeCompare(b.displayPath)
-                );
-
                 return (
                     <React.Fragment key={machineGroup.machineId}>
                         {hasMultipleMachines && (
                             <MachineSeparator
-                                machineName={machineGroup.machineName}
+                                fallbackName={machineGroup.machineName}
                                 machineId={machineGroup.machineId}
                             />
                         )}
-                        {sortedProjects.map(([projectPath, projectGroup]) => {
+                        {machineGroup.sortedProjects?.map((projectGroup) => {
                             const firstSession = projectGroup.sessions[0];
                             if (!firstSession) return null;
 
                             return (
-                                <View key={projectPath}>
+                                <View key={projectGroup.projectPath}>
                                     <SectionHeader
                                         session={firstSession}
                                         displayPath={projectGroup.displayPath}
@@ -257,6 +271,8 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
     );
 }
 
+export const ActiveSessionsGroupCompact = React.memo(ActiveSessionsGroupCompactView);
+
 // Compact session row with status dot indicator
 const CompactSessionRow = React.memo(({ session, selected, showBorder }: { session: Session; selected?: boolean; showBorder?: boolean }) => {
     const styles = stylesheet;
@@ -267,7 +283,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
     const navigateToSession = useNavigateToSession();
     const navigateDirectlyToSession = useNavigateDirectlyToSession();
     const swipeableRef = React.useRef<Swipeable | null>(null);
-    const swipeEnabled = Platform.OS !== 'web';
+    const swipeEnabled = true;
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
 
     const [archivingSession, performArchive] = useOrbitAction(async () => {
@@ -300,10 +316,6 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
         });
     }, []);
 
-    const webMenuProps = Platform.OS === 'web' ? {
-        onContextMenu: handleContextMenu,
-    } as any : {};
-
     const itemContent = (
         <Pressable
             style={[
@@ -312,7 +324,6 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                 selected && styles.sessionRowSelected
             ]}
             onPress={handlePress}
-            {...webMenuProps}
         >
             <View style={styles.sessionContent}>
                 <View style={styles.sessionTitleRow}>

@@ -31,17 +31,10 @@ export function parseMessageAsEvent(msg: NormalizedMessage): AgentEvent | null {
         for (const content of msg.content) {
             // Check for Claude AI usage limit messages
             if (content.type === 'text') {
-                const limitMatch = content.text.match(/^Claude AI usage limit reached\|(\d+)$/);
-                if (limitMatch) {
-                    const timestamp = parseInt(limitMatch[1], 10);
-                    if (!isNaN(timestamp)) {
-                        return {
-                            type: 'limit-reached',
-                            endsAt: timestamp
-                        } as AgentEvent;
-                    }
+                const usageLimitEvent = parseUsageLimitText(content.text, msg.createdAt);
+                if (usageLimitEvent) {
+                    return usageLimitEvent;
                 }
-                
             }
             
             // Check for Orbit title-change tool calls.
@@ -85,4 +78,61 @@ export function parseMessageAsEvent(msg: NormalizedMessage): AgentEvent | null {
 export function shouldSkipNormalProcessing(msg: NormalizedMessage): boolean {
     // If a message converts to an event, it should skip normal processing
     return parseMessageAsEvent(msg) !== null;
+}
+
+function parseUsageLimitText(text: string, messageCreatedAt: number): AgentEvent | null {
+    const claudeLimitMatch = text.match(/^Claude AI usage limit reached\|(\d+)$/);
+    if (claudeLimitMatch) {
+        const timestamp = parseInt(claudeLimitMatch[1], 10);
+        if (!Number.isNaN(timestamp)) {
+            return {
+                type: 'limit-reached',
+                endsAt: timestamp,
+            };
+        }
+    }
+
+    if (!/^(You've|You have) hit your usage limit\./i.test(text.trim())) {
+        return null;
+    }
+
+    const retryAt = parseRetryAtTimestamp(text, messageCreatedAt);
+    if (retryAt !== null) {
+        return {
+            type: 'limit-reached',
+            endsAt: retryAt,
+        };
+    }
+
+    return {
+        type: 'message',
+        message: 'Usage limit reached. Please try again later.',
+    };
+}
+
+function parseRetryAtTimestamp(text: string, messageCreatedAt: number): number | null {
+    const match = text.match(/try again at\s+(\d{1,2}):(\d{2})\s*([AP]M)/i);
+    if (!match) {
+        return null;
+    }
+
+    const hour12 = parseInt(match[1], 10);
+    const minute = parseInt(match[2], 10);
+    const meridiem = match[3].toUpperCase();
+    if (hour12 < 1 || hour12 > 12 || minute < 0 || minute > 59) {
+        return null;
+    }
+
+    const createdAtMs = messageCreatedAt > 1_000_000_000_000
+        ? messageCreatedAt
+        : messageCreatedAt * 1000;
+    const retryAt = new Date(createdAtMs);
+    const hour24 = (hour12 % 12) + (meridiem === 'PM' ? 12 : 0);
+    retryAt.setHours(hour24, minute, 0, 0);
+
+    if (retryAt.getTime() < createdAtMs - 60_000) {
+        retryAt.setDate(retryAt.getDate() + 1);
+    }
+
+    return Math.floor(retryAt.getTime() / 1000);
 }

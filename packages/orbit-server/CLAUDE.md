@@ -234,7 +234,7 @@ The project includes a multi-stage Dockerfile:
 #### Environment Variables
 - CLI: Use `yarn dev:local-server` (NOT `yarn dev`) to load `.env.dev-local-server`
 - Server: Use `yarn dev` to start with proper env files
-- **Tell**: Wrong server URL = check `ORBIT_SERVER_URL` (legacy `HAPPY_SERVER_URL` still works)
+- **Tell**: Wrong server URL = check `ORBIT_SERVER_URL`
 - **Tell**: Wrong home dir = check `ORBIT_HOME_DIR` (should be `~/.orbit-dev` for local)
 
 ### Quick Diagnostic Commands

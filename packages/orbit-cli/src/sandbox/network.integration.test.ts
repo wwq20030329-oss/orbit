@@ -8,7 +8,7 @@ import { initializeSandbox, wrapCommand } from './manager';
 
 const RUN_NETWORK_INTEGRATION =
   process.env.ORBIT_RUN_SANDBOX_NETWORK_TESTS === '1' ||
-  process.env.HAPPY_RUN_SANDBOX_NETWORK_TESTS === '1';
+  process.env.ORBIT_RUN_SANDBOX_NETWORK_TESTS === '1';
 
 function hasCommand(command: string): boolean {
     const result = spawnSync('sh', ['-lc', `command -v ${command}`], {
@@ -44,7 +44,9 @@ describe('sandbox network integration', () => {
 
         const cleanup = await initializeSandbox(sandboxConfig, sessionPath);
         try {
-            const wrappedCommand = await wrapCommand('curl -sS -I --max-time 20 https://example.com');
+            const wrappedCommand = await wrapCommand(
+                'curl -sS -I --max-time 20 --retry 3 --retry-delay 1 --retry-all-errors https://example.com'
+            );
             const result = spawnSync('sh', ['-lc', wrappedCommand], {
                 encoding: 'utf8',
                 timeout: 30000,

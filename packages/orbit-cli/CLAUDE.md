@@ -154,7 +154,7 @@ ORBIT_SERVER_URL=http://localhost:3005 ./bin/orbit.mjs daemon start
 ```
 
 ## Daemon Logs
-- Daemon logs are stored in `~/.orbit-dev/logs/` (or `$ORBIT_HOME_DIR/logs/`, with legacy `HAPPY_HOME_DIR` still accepted)
+- Daemon logs are stored in `~/.orbit-dev/logs/` (or `$ORBIT_HOME_DIR/logs/`)
 - Named with format: `YYYY-MM-DD-HH-MM-SS-daemon.log`
 
 # Session Forking `claude` and sdk behavior

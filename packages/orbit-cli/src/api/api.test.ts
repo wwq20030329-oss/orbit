@@ -27,7 +27,7 @@ vi.mock('@/ui/logger', () => ({
 vi.mock('./encryption', () => ({
     decodeBase64: vi.fn((data: string) => data),
     encodeBase64: vi.fn((data: any) => data),
-    decrypt: vi.fn((data: any) => data),
+    decrypt: vi.fn((_key: any, _variant: any, data: any) => data),
     encrypt: vi.fn((data: any) => data)
 }));
 
@@ -254,6 +254,33 @@ describe('Api server error handling', () => {
                 expect.stringContaining('⚠️  Orbit server unreachable')
             );
             consoleSpy.mockRestore();
+        });
+
+        it('should fall back to startup metadata when a loaded session has null metadata', async () => {
+            mockPost.mockResolvedValue({
+                data: {
+                    session: {
+                        id: 'session-1',
+                        tag: 'native-session:claude:test-backend',
+                        seq: 1,
+                        createdAt: 1,
+                        updatedAt: 1,
+                        metadata: null,
+                        metadataVersion: 3,
+                        agentState: null,
+                        agentStateVersion: 0,
+                    },
+                },
+            });
+
+            const result = await api.getOrCreateSession({
+                tag: 'native-session:claude:test-backend',
+                metadata: testMetadata,
+                state: null,
+            });
+
+            expect(result).not.toBeNull();
+            expect(result?.metadata).toEqual(testMetadata);
         });
     });
 

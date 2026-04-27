@@ -20,7 +20,6 @@ declare global {
 export async function installIntegrationEnvironment(profile: IntegrationEnvironmentProfile) {
     const previousEnv = {
         ORBIT_SERVER_URL: process.env.ORBIT_SERVER_URL,
-        ORBIT_WEBAPP_URL: process.env.ORBIT_WEBAPP_URL,
         ORBIT_HOME_DIR: process.env.ORBIT_HOME_DIR,
         ORBIT_PROJECT_DIR: process.env.ORBIT_PROJECT_DIR,
         ORBIT_VARIANT: process.env.ORBIT_VARIANT,

@@ -64,7 +64,6 @@ To connect third-party agent APIs:
 
 ```bash
 orbit connect gemini
-orbit connect claude
 orbit connect codex
 orbit connect status
 ```
@@ -91,7 +90,6 @@ orbit connect status
 | Variable | Description |
 |----------|-------------|
 | `ORBIT_SERVER_URL` | Custom server URL (default: `https://api.cluster-fluster.com`) |
-| `ORBIT_WEBAPP_URL` | Custom web app URL (default: `https://app.orbit.engineering`) |
 | `ORBIT_HOME_DIR` | Custom home directory for Orbit data (default: `~/.orbit`) |
 | `ORBIT_DISABLE_CAFFEINATE` | Disable macOS sleep prevention |
 | `ORBIT_EXPERIMENTAL` | Enable experimental features |

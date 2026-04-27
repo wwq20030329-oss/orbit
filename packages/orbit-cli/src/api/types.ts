@@ -24,15 +24,26 @@ export type {
  * Permission mode type - includes both Claude and Codex modes
  * Must match MessageMetaSchema.permissionMode enum values
  *
- * Claude modes: default, acceptEdits, bypassPermissions, plan
+ * Claude modes: default, acceptEdits, bypassPermissions, plan, auto, dontAsk
  * Codex modes: read-only, safe-yolo, yolo
+ * Gemini UI aliases: auto_edit
  *
  * When calling Claude SDK, Codex modes are mapped at the SDK boundary:
  * - yolo → bypassPermissions
  * - safe-yolo → default
  * - read-only → default
  */
-export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'read-only' | 'safe-yolo' | 'yolo'
+export type PermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'bypassPermissions'
+  | 'plan'
+  | 'auto'
+  | 'dontAsk'
+  | 'auto_edit'
+  | 'read-only'
+  | 'safe-yolo'
+  | 'yolo'
 
 /**
  * Usage data type from Claude
@@ -188,8 +199,9 @@ export type Machine = {
  */
 export const MessageMetaSchema = z.object({
   sentFrom: z.string().optional(), // Source identifier
-  permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo']).optional(), // Permission mode for this message
+  permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto', 'dontAsk', 'auto_edit', 'read-only', 'safe-yolo', 'yolo']).optional(), // Permission mode for this message
   model: z.string().nullable().optional(), // Model name for this message (null = reset)
+  effortLevel: z.string().optional(), // Thought/effort level for this message
   fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
   customSystemPrompt: z.string().nullable().optional(), // Custom system prompt for this message (null = reset)
   appendSystemPrompt: z.string().nullable().optional(), // Append to system prompt for this message (null = reset)
@@ -268,21 +280,27 @@ export type Metadata = {
   machineId?: string,
   claudeSessionId?: string, // Claude Code session ID
   codexThreadId?: string, // Codex app-server thread ID
+  geminiSessionId?: string, // Gemini local session ID
   tools?: string[],
   slashCommands?: string[],
   homeDir: string,
   orbitHomeDir: string,
   orbitLibDir: string,
   orbitToolsDir: string,
+  nativeHistorySourceTool?: 'claude' | 'codex' | 'gemini',
+  nativeHistorySourceBackendId?: string,
+  nativeHistoryImportedAt?: number,
   startedFromDaemon?: boolean,
   hostPid?: number,
   startedBy?: 'daemon' | 'terminal',
+  sessionRole?: 'user' | 'native-live-mirror',
   // Lifecycle state management
   lifecycleState?: 'running' | 'archiveRequested' | 'archived' | string,
   lifecycleStateSince?: number,
   archivedBy?: string,
   archiveReason?: string,
   flavor?: string
+  projectRoot?: string
   sandbox?: SandboxConfig | null
   dangerouslySkipPermissions?: boolean | null
 };

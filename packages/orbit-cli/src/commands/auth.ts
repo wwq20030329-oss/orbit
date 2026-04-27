@@ -5,6 +5,7 @@ import { configuration } from '@/configuration';
 import { existsSync, rmSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { stopDaemon, checkIfDaemonRunningAndCleanupStaleState } from '@/daemon/controlClient';
+import { ensureDaemonRunning } from '@/daemon/ensureDaemonRunning';
 import { logger } from '@/ui/logger';
 import os from 'node:os';
 
@@ -46,7 +47,7 @@ ${chalk.bold('Usage:')}
 ${chalk.bold('Options:')}
   --force    Clear credentials, machine ID, and stop daemon before re-auth
 
-${chalk.gray('PS: Your master secret never leaves your mobile/web device. Each CLI machine')}
+${chalk.gray('PS: Your master secret never leaves your mobile device. Each CLI machine')}
 ${chalk.gray('receives only a derived key for per-machine encryption, so backup codes')}
 ${chalk.gray('cannot be displayed from the CLI.')}
 `);
@@ -90,7 +91,9 @@ async function handleAuthLogin(args: string[]): Promise<void> {
     const settings = await readSettings();
 
     if (existingCreds && settings?.machineId) {
+      await ensureDaemonRunning();
       console.log(chalk.green('✓ Already authenticated'));
+      console.log(chalk.gray('  Daemon running'));
       console.log(chalk.gray(`  Machine ID: ${settings.machineId}`));
       console.log(chalk.gray(`  Host: ${os.hostname()}`));
       console.log(chalk.gray(`  Use 'orbit auth login --force' to re-authenticate`));
@@ -106,7 +109,9 @@ async function handleAuthLogin(args: string[]): Promise<void> {
   // "Finally we'll run the auth and setup machine if needed"
   try {
     const result = await authAndSetupMachineIfNeeded();
+    await ensureDaemonRunning();
     console.log(chalk.green('\n✓ Authentication successful'));
+    console.log(chalk.gray('  Daemon running'));
     console.log(chalk.gray(`  Machine ID: ${result.machineId}`));
   } catch (error) {
     console.error(chalk.red('Authentication failed:'), error instanceof Error ? error.message : 'Unknown error');

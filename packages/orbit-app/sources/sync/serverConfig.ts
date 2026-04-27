@@ -1,5 +1,4 @@
 import { MMKV } from 'react-native-mmkv';
-import { Platform } from 'react-native';
 import { normalizeServerUrl } from './serverUrlNormalize';
 import { loadAppConfig } from './appConfig';
 
@@ -21,7 +20,6 @@ const DEFAULT_SERVER_URL = BUILD_CONFIG.serverUrl || 'https://api.2003383.xyz';
 const FALLBACK_SERVER_URLS: string[] = Array.isArray(BUILD_CONFIG.fallbackServerUrls)
     ? BUILD_CONFIG.fallbackServerUrls
     : [];
-const IS_NATIVE_RUNTIME = Platform.OS !== 'web';
 const SERVER_PROBE_TIMEOUT_MS = 4000;
 
 function clearLegacyServerOverride(): void {
@@ -41,7 +39,7 @@ function getRuntimeServerUrl(): string | null {
 }
 
 function normalizeCandidate(url: string): string {
-    return normalizeServerUrl(url, IS_NATIVE_RUNTIME).replace(/\/$/, '');
+    return normalizeServerUrl(url, true).replace(/\/$/, '');
 }
 
 function getConfiguredServerUrls(): string[] {

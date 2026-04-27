@@ -1,50 +1,132 @@
 import * as React from "react";
-import { View, Text } from "react-native";
-import { StyleSheet } from 'react-native-unistyles';
-import { MarkdownView } from "./markdown/MarkdownView";
+import { View, Text, Pressable, Share } from "react-native";
+import * as Clipboard from 'expo-clipboard';
+import { Octicons } from '@expo/vector-icons';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { MarkdownContentView } from "./markdown/MarkdownView";
 import { t } from '@/text';
 import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage } from "@/sync/typesMessage";
 import { Metadata } from "@/sync/storageTypes";
 import { layout } from "./layout";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
-import { sync } from '@/sync/sync';
 import { Option } from './markdown/MarkdownView';
+import { hapticsLight } from '@/components/haptics';
 
-
-export const MessageView = (props: {
+type MessageViewProps = {
   message: Message;
   metadata: Metadata | null;
   sessionId: string;
+  markdownCopyV2: boolean;
+  onOptionPress?: (option: Option) => void;
   getMessageById?: (id: string) => Message | null;
-}) => {
+};
+
+function MessageViewComponent(props: MessageViewProps) {
   return (
-    <View style={styles.messageContainer} renderToHardwareTextureAndroid={true}>
+    <View style={styles.messageContainer}>
       <View style={styles.messageContent}>
         <RenderBlock
           message={props.message}
           metadata={props.metadata}
           sessionId={props.sessionId}
+          markdownCopyV2={props.markdownCopyV2}
+          onOptionPress={props.onOptionPress}
           getMessageById={props.getMessageById}
         />
       </View>
     </View>
   );
-};
+}
+
+function areMessageContentsEqual(prevMessage: Message, nextMessage: Message): boolean {
+  if (prevMessage === nextMessage) {
+    return true;
+  }
+
+  if (prevMessage.kind !== nextMessage.kind || prevMessage.id !== nextMessage.id || prevMessage.createdAt !== nextMessage.createdAt) {
+    return false;
+  }
+
+  if (prevMessage.kind === 'user-text' && nextMessage.kind === 'user-text') {
+    return prevMessage.text === nextMessage.text
+      && prevMessage.displayText === nextMessage.displayText
+      && prevMessage.meta === nextMessage.meta;
+  }
+
+  if (prevMessage.kind === 'agent-text' && nextMessage.kind === 'agent-text') {
+    return prevMessage.text === nextMessage.text
+      && prevMessage.isThinking === nextMessage.isThinking
+      && prevMessage.meta === nextMessage.meta;
+  }
+
+  if (prevMessage.kind === 'tool-call' && nextMessage.kind === 'tool-call') {
+    return prevMessage.tool === nextMessage.tool
+      && prevMessage.children === nextMessage.children
+      && prevMessage.meta === nextMessage.meta;
+  }
+
+  if (prevMessage.kind === 'agent-event' && nextMessage.kind === 'agent-event') {
+    return prevMessage.event === nextMessage.event
+      && prevMessage.meta === nextMessage.meta;
+  }
+
+  return false;
+}
+
+function shouldCompareMetadata(message: Message): boolean {
+  return message.kind === 'tool-call';
+}
+
+function areToolMetadataEqual(prevMetadata: Metadata | null, nextMetadata: Metadata | null): boolean {
+  if (prevMetadata === nextMetadata) {
+    return true;
+  }
+
+  return prevMetadata?.flavor === nextMetadata?.flavor
+    && prevMetadata?.path === nextMetadata?.path;
+}
+
+export const MessageView = React.memo(MessageViewComponent, (prevProps, nextProps) => (
+  areMessageContentsEqual(prevProps.message, nextProps.message)
+  && (
+    !shouldCompareMetadata(nextProps.message)
+    || areToolMetadataEqual(prevProps.metadata, nextProps.metadata)
+  )
+  && prevProps.sessionId === nextProps.sessionId
+  && prevProps.markdownCopyV2 === nextProps.markdownCopyV2
+  && prevProps.onOptionPress === nextProps.onOptionPress
+));
 
 // RenderBlock function that dispatches to the correct component based on message kind
 function RenderBlock(props: {
   message: Message;
   metadata: Metadata | null;
   sessionId: string;
+  markdownCopyV2: boolean;
+  onOptionPress?: (option: Option) => void;
   getMessageById?: (id: string) => Message | null;
 }): React.ReactElement {
   switch (props.message.kind) {
     case 'user-text':
-      return <UserTextBlock message={props.message} sessionId={props.sessionId} />;
+      return (
+        <UserTextBlock
+          message={props.message}
+          sessionId={props.sessionId}
+          markdownCopyV2={props.markdownCopyV2}
+          onOptionPress={props.onOptionPress}
+        />
+      );
 
     case 'agent-text':
-      return <AgentTextBlock message={props.message} sessionId={props.sessionId} />;
+      return (
+        <AgentTextBlock
+          message={props.message}
+          sessionId={props.sessionId}
+          markdownCopyV2={props.markdownCopyV2}
+          onOptionPress={props.onOptionPress}
+        />
+      );
 
     case 'tool-call':
       return <ToolCallBlock
@@ -55,7 +137,7 @@ function RenderBlock(props: {
       />;
 
     case 'agent-event':
-      return <AgentEventBlock event={props.message.event} metadata={props.metadata} />;
+      return <AgentEventBlock event={props.message.event} />;
 
 
     default:
@@ -68,15 +150,18 @@ function RenderBlock(props: {
 function UserTextBlock(props: {
   message: UserTextMessage;
   sessionId: string;
+  markdownCopyV2: boolean;
+  onOptionPress?: (option: Option) => void;
 }) {
-  const handleOptionPress = React.useCallback((option: Option) => {
-    sync.sendMessage(props.sessionId, option.title, { source: 'option' });
-  }, [props.sessionId]);
-
   return (
     <View style={styles.userMessageContainer}>
       <View style={styles.userMessageBubble}>
-        <MarkdownView markdown={props.message.displayText || props.message.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+        <MarkdownContentView
+          markdown={props.message.displayText || props.message.text}
+          onOptionPress={props.onOptionPress}
+          sessionId={props.sessionId}
+          markdownCopyV2={props.markdownCopyV2}
+        />
         {/* {__DEV__ && (
           <Text style={styles.debugText}>{JSON.stringify(props.message.meta)}</Text>
         )} */}
@@ -88,26 +173,96 @@ function UserTextBlock(props: {
 function AgentTextBlock(props: {
   message: AgentTextMessage;
   sessionId: string;
+  markdownCopyV2: boolean;
+  onOptionPress?: (option: Option) => void;
 }) {
-  const handleOptionPress = React.useCallback((option: Option) => {
-    sync.sendMessage(props.sessionId, option.title, { source: 'option' });
-  }, [props.sessionId]);
-
   // Hide thinking messages
   if (props.message.isThinking) {
     return null;
   }
 
+  const usageLimitText = getUsageLimitText(props.message.text);
+  if (usageLimitText) {
+    return (
+      <View style={styles.agentEventContainer}>
+        <Text style={styles.agentEventText}>{usageLimitText}</Text>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.agentMessageContainer}>
-      <MarkdownView markdown={props.message.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+      <MarkdownContentView
+        markdown={props.message.text}
+        onOptionPress={props.onOptionPress}
+        sessionId={props.sessionId}
+        markdownCopyV2={props.markdownCopyV2}
+      />
+      <AgentMessageActions text={props.message.text} />
     </View>
   );
 }
 
+function AgentMessageActions(props: { text: string }) {
+  const { theme } = useUnistyles();
+  const [copied, setCopied] = React.useState(false);
+
+  const handleCopy = React.useCallback(async () => {
+    hapticsLight();
+    try {
+      await Clipboard.setStringAsync(props.text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch {}
+  }, [props.text]);
+
+  const handleShare = React.useCallback(async () => {
+    hapticsLight();
+    try {
+      await Share.share({ message: props.text });
+    } catch {}
+  }, [props.text]);
+
+  return (
+    <View style={styles.agentActionsRow}>
+      <Pressable
+        hitSlop={8}
+        onPress={handleCopy}
+        style={({ pressed }) => [styles.agentActionButton, pressed && { opacity: 0.5, transform: [{ scale: 0.94 }] }]}
+      >
+        <Octicons
+          name={copied ? 'check' : 'copy'}
+          size={14}
+          color={copied ? theme.colors.success : theme.colors.textSecondary}
+        />
+      </Pressable>
+      <Pressable
+        hitSlop={8}
+        onPress={handleShare}
+        style={({ pressed }) => [styles.agentActionButton, pressed && { opacity: 0.5, transform: [{ scale: 0.94 }] }]}
+      >
+        <Octicons name="share" size={14} color={theme.colors.textSecondary} />
+      </Pressable>
+    </View>
+  );
+}
+
+function getUsageLimitText(text: string): string | null {
+  const trimmed = text.trim();
+  if (!/^(You've|You have) hit your usage limit\./i.test(trimmed)) {
+    return null;
+  }
+
+  const retryAt = trimmed.match(/try again at\s+(\d{1,2}:\d{2}\s*[AP]M)/i);
+  if (retryAt) {
+    return t('message.usageLimitUntil', { time: retryAt[1].replace(/\s+/g, ' ') });
+  }
+
+  return t('message.usageLimitUntil', { time: t('message.unknownTime') });
+}
+
 function AgentEventBlock(props: {
   event: AgentEvent;
-  metadata: Metadata | null;
 }) {
   if (props.event.type === 'switch') {
     return (
@@ -124,19 +279,10 @@ function AgentEventBlock(props: {
     );
   }
   if (props.event.type === 'limit-reached') {
-    const formatTime = (timestamp: number): string => {
-      try {
-        const date = new Date(timestamp * 1000); // Convert from Unix timestamp
-        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      } catch {
-        return t('message.unknownTime');
-      }
-    };
-
     return (
       <View style={styles.agentEventContainer}>
         <Text style={styles.agentEventText}>
-          {t('message.usageLimitUntil', { time: formatTime(props.event.endsAt) })}
+          {t('message.usageLimitUntil', { time: formatLimitReachedTime(props.event.endsAt) })}
         </Text>
       </View>
     );
@@ -146,6 +292,15 @@ function AgentEventBlock(props: {
       <Text style={styles.agentEventText}>{t('message.unknownEvent')}</Text>
     </View>
   );
+}
+
+function formatLimitReachedTime(timestamp: number): string {
+  try {
+    const date = new Date(timestamp * 1000); // Convert from Unix timestamp
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return t('message.unknownTime');
+  }
 }
 
 function ToolCallBlock(props: {
@@ -201,6 +356,17 @@ const styles = StyleSheet.create((theme) => ({
     marginBottom: 12,
     borderRadius: 16,
     alignSelf: 'flex-start',
+  },
+  agentActionsRow: {
+    flexDirection: 'row',
+    gap: 4,
+    marginTop: 4,
+    marginLeft: -6,
+  },
+  agentActionButton: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 6,
   },
   agentEventContainer: {
     marginHorizontal: 8,
