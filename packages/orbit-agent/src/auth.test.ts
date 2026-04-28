@@ -46,7 +46,7 @@ import { authLogin, authLogout, authStatus } from './auth';
 const mockedAxiosPost = vi.mocked(axios.post);
 
 function makeTestConfig(): Config {
-    const homeDir = mkdtempSync(join(tmpdir(), 'happy-agent-auth-test-'));
+    const homeDir = mkdtempSync(join(tmpdir(), 'orbit-agent-auth-test-'));
     return {
         serverUrl: 'https://test-server.example.com',
         homeDir,

@@ -27,7 +27,7 @@ describe('sandbox network integration', () => {
             return;
         }
 
-        const sessionPath = mkdtempSync(join(tmpdir(), 'happy-sandbox-network-'));
+        const sessionPath = mkdtempSync(join(tmpdir(), 'orbit-sandbox-network-'));
         const sandboxConfig: SandboxConfig = {
             enabled: true,
             workspaceRoot: sessionPath,

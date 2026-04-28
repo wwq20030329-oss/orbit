@@ -55,10 +55,10 @@ Update `initialMachineMetadata` construction to call `detectCLIAvailability()` a
 export const initialMachineMetadata: MachineMetadata = {
   host: os.hostname(),
   platform: os.platform(),
-  happyCliVersion: packageJson.version,
+  orbitCliVersion: packageJson.version,
   homeDir: os.homedir(),
-  happyHomeDir: configuration.happyHomeDir,
-  happyLibDir: projectPath(),
+  orbitHomeDir: configuration.orbitHomeDir,
+  orbitLibDir: projectPath(),
   cliAvailability: detectCLIAvailability(),
 };
 ```
@@ -248,7 +248,7 @@ APP (new session screen)
 
 ## Verification
 
-1. **Typecheck:** `yarn typecheck` in `happy-app` and `happy-cli` — must pass with no errors
+1. **Typecheck:** `yarn typecheck` in `orbit-app` and `orbit-cli` — must pass with no errors
 2. **Daemon boot:** Start daemon, verify `initialMachineMetadata` includes `cliAvailability` in logs
 3. **Keep-alive re-detection:** Install/uninstall a CLI tool, verify metadata updates within 20s
 4. **App reads availability:** Open app, select a machine, verify availability shows from metadata (no bash RPC)

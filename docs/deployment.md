@@ -25,7 +25,7 @@ This document describes how to deploy the Orbit backend (`packages/orbit-server`
 ## Environment variables
 **Required**
 - `DATABASE_URL`: Postgres connection string.
-- `HANDY_MASTER_SECRET`: master key for auth tokens and server-side encryption.
+- `ORBIT_MASTER_SECRET`: master key for auth tokens and server-side encryption.
 - `REDIS_URL`: Redis connection string.
 - `S3_HOST`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_PUBLIC_URL`: object storage config.
 
@@ -53,12 +53,12 @@ Key notes:
 
 ## Kubernetes manifests
 Example manifests live in `packages/orbit-server/deploy`:
-- `handy.yaml`: Deployment + Service + ExternalSecrets for the server.
-- `happy-redis.yaml`: Redis StatefulSet + Service + ConfigMap.
+- `Orbit.yaml`: Deployment + Service + ExternalSecrets for the server.
+- `orbit-redis.yaml`: Redis StatefulSet + Service + ConfigMap.
 
 The deployment config expects:
 - Prometheus scraping annotations on port `9090`.
-- A secret named `handy-secrets` populated by ExternalSecrets.
+- A secret named `orbit-secrets` populated by ExternalSecrets.
 - A service mapping port `3000` to container port `3005`.
 
 ## Local dev helpers

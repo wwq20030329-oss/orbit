@@ -25,7 +25,7 @@ describe('resumeExistingThread', () => {
             messageBuffer,
             threadId: '019ccca2-1a77-7481-9873-de72f3464372',
             cwd: '/tmp/project',
-            mcpServers: { happy: { command: 'happy-mcp' } },
+            mcpServers: { orbit: { command: 'orbit-mcp' } },
         });
 
         expect(result).toEqual({
@@ -35,7 +35,7 @@ describe('resumeExistingThread', () => {
         expect(client.resumeThread).toHaveBeenCalledWith({
             threadId: '019ccca2-1a77-7481-9873-de72f3464372',
             cwd: '/tmp/project',
-            mcpServers: { happy: { command: 'happy-mcp' } },
+            mcpServers: { orbit: { command: 'orbit-mcp' } },
         });
         expect(metadataHandlers).toHaveLength(1);
         expect(metadataHandlers[0]({ existing: true })).toEqual({

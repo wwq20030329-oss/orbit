@@ -24,13 +24,13 @@ class AuthModule {
         log({ module: 'auth' }, 'Initializing auth module...');
         
         const generator = await privacyKit.createPersistentTokenGenerator({
-            service: 'handy',
-            seed: process.env.HANDY_MASTER_SECRET!
+            service: 'orbit',
+            seed: process.env.ORBIT_MASTER_SECRET!
         });
 
         
         const verifier = await privacyKit.createPersistentTokenVerifier({
-            service: 'handy',
+            service: 'orbit',
             publicKey: Uint8Array.from(generator.publicKey)
         });
         

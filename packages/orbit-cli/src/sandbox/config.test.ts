@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { buildSandboxRuntimeConfig } from './config';
 import type { SandboxConfig } from '@/persistence';
 
-const sessionPath = '/tmp/happy-session';
+const sessionPath = '/tmp/orbit-session';
 
 function resolveLikeRuntime(pathValue: string): string {
     const expandedHome = pathValue.replace(/^~(?=\/|$)/, homedir());

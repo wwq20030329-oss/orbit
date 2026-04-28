@@ -44,7 +44,7 @@ function runCli(...args: string[]): { stdout: string; stderr: string; exitCode: 
             '--no-deprecation',
             binPath,
             ...args,
-        ], { encoding: 'utf-8', env: { ...process.env, ORBIT_HOME_DIR: '/tmp/nonexistent-happy-acceptance' } });
+        ], { encoding: 'utf-8', env: { ...process.env, ORBIT_HOME_DIR: '/tmp/nonexistent-orbit-acceptance' } });
         return { stdout, stderr: '', exitCode: 0 };
     } catch (err: unknown) {
         const e = err as { stdout?: string; stderr?: string; status?: number };

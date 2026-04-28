@@ -2,7 +2,7 @@
 
 ## Overview
 
-Implement `docs/session-protocol.md` as the new message format for Codex sessions in the CLI, and add client-side support in `happy-app` to parse, normalize, and render these messages alongside existing legacy formats (output, codex, acp).
+Implement `docs/session-protocol.md` as the new message format for Codex sessions in the CLI, and add client-side support in `orbit-app` to parse, normalize, and render these messages alongside existing legacy formats (output, codex, acp).
 
 **Key decisions from planning:**
 - CLI (Codex only): Emit session-protocol events **instead of** current codex/acp format to the server
@@ -27,12 +27,12 @@ Implement `docs/session-protocol.md` as the new message format for Codex session
 
 ### Files involved
 
-**CLI (happy-cli):**
+**CLI (orbit-cli):**
 - `src/api/apiSession.ts` — new `sendSessionProtocolMessage()` method
 - `src/codex/runCodex.ts` — convert from `sendCodexMessage()` to session-protocol events
 - `src/codex/utils/reasoningProcessor.ts` — emit thinking events
 
-**App (happy-app):**
+**App (orbit-app):**
 - `sources/sync/typesRaw.ts` — new Zod schema for session-protocol envelope + events, new normalizer branch
 - `sources/sync/reducer/reducer.ts` — turn tracking (optional, for grouping)
 - `sources/sync/reducer/messageToEvent.ts` — handle session-protocol `turn-start`/`turn-end`
@@ -160,7 +160,7 @@ The reducer already handles `NormalizedMessage` well. Minor updates for the new 
 - [x] Verify app still handles legacy formats (output, codex, acp) correctly
 - [x] Verify subagent nesting works via invoke field
 - [x] Verify turn lifecycle (turn-start/turn-end) works correctly
-- [x] Run full test suite — `yarn test` in happy-cli, happy-app
+- [x] Run full test suite — `yarn test` in orbit-cli, orbit-app
 - [x] Run linter — all issues must be fixed
 
 ### Task 8: [Final] Update documentation

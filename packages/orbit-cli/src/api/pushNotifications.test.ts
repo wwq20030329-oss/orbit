@@ -8,12 +8,12 @@ import {
 
 function makeMetadata(overrides: Partial<Metadata> = {}): Metadata {
     return {
-        path: '/Users/test/projects/happy',
+        path: '/Users/test/projects/orbit',
         host: 'test-host',
         homeDir: '/Users/test',
-        orbitHomeDir: '/Users/test/.happy',
-        orbitLibDir: '/Users/test/.happy/lib',
-        orbitToolsDir: '/Users/test/.happy/tools',
+        orbitHomeDir: '/Users/test/.orbit',
+        orbitLibDir: '/Users/test/.orbit/lib',
+        orbitToolsDir: '/Users/test/.orbit/tools',
         ...overrides,
     };
 }

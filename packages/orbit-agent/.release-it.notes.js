@@ -11,7 +11,7 @@ import { execFileSync, execSync } from "child_process";
  * @returns {string | null}
  */
 function getLatestStableTag() {
-  const tagsRaw = execSync(`git tag --list "happy-agent-v*" --sort=-v:refname`, {
+  const tagsRaw = execSync(`git tag --list "orbit-agent-v*" --sort=-v:refname`, {
     encoding: "utf8",
   });
 
@@ -20,8 +20,8 @@ function getLatestStableTag() {
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
 
-  // Only accept stable semver tags like happy-agent-v1.2.3 (no prerelease suffix).
-  const stableTag = tags.find((t) => /^happy-agent-v\d+\.\d+\.\d+$/.test(t));
+  // Only accept stable semver tags like orbit-agent-v1.2.3 (no prerelease suffix).
+  const stableTag = tags.find((t) => /^orbit-agent-v\d+\.\d+\.\d+$/.test(t));
   return stableTag ?? null;
 }
 
@@ -40,7 +40,7 @@ async function generateReleaseNotes() {
     let gitLog;
     try {
       gitLog = execSync(
-        `git log ${commitRange} --pretty=format:"%h - %s (%an, %ar)" --no-merges -- packages/happy-agent`,
+        `git log ${commitRange} --pretty=format:"%h - %s (%an, %ar)" --no-merges -- packages/orbit-agent`,
         { encoding: "utf8" }
       );
     } catch (error) {
@@ -48,7 +48,7 @@ async function generateReleaseNotes() {
         `Tag ${fromTag ?? "(none)"} not found, using recent commits instead`
       );
       gitLog = execSync(
-        `git log -10 --pretty=format:"%h - %s (%an, %ar)" --no-merges -- packages/happy-agent`,
+        `git log -10 --pretty=format:"%h - %s (%an, %ar)" --no-merges -- packages/orbit-agent`,
         { encoding: "utf8" }
       );
     }
@@ -58,9 +58,9 @@ async function generateReleaseNotes() {
       process.exit(1);
     }
 
-    const prompt = `Please analyze these git commits and generate professional release notes for version ${toVersion} of the Happy Agent CLI tool (a remote agent control CLI).
+    const prompt = `Please analyze these git commits and generate professional release notes for version ${toVersion} of the Orbit Agent CLI tool (a remote agent control CLI).
 
-The release should cover commits since the latest stable happy-agent tag (happy-agent-vX.Y.Z): ${
+The release should cover commits since the latest stable orbit-agent tag (orbit-agent-vX.Y.Z): ${
       fromTag ?? "(none)"
     }.
 

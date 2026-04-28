@@ -117,15 +117,15 @@ function writeFile(path: string, content: string): void {
 }
 
 function createGitProject(envDir: string): { projectDir: string; worktreeDir: string } {
-    const projectDir = join(envDir, 'happy-agent-test-project');
+    const projectDir = join(envDir, 'orbit-agent-test-project');
     const worktreeDir = join(projectDir, '.dev', 'worktree', 'feature-branch');
 
     mkdirSync(projectDir, { recursive: true });
     runCommand('git', ['init', '--initial-branch=main'], projectDir);
-    runCommand('git', ['config', 'user.name', 'Happy Agent Test'], projectDir);
-    runCommand('git', ['config', 'user.email', 'happy-agent-tests@example.com'], projectDir);
+    runCommand('git', ['config', 'user.name', 'Orbit Agent Test'], projectDir);
+    runCommand('git', ['config', 'user.email', 'orbit-agent-tests@example.com'], projectDir);
 
-    writeFile(join(projectDir, 'README.md'), '# Happy Agent Test Project\n');
+    writeFile(join(projectDir, 'README.md'), '# Orbit Agent Test Project\n');
     writeFile(join(projectDir, 'src', 'index.ts'), 'export const answer = 42;\n');
     runCommand('git', ['add', '.'], projectDir);
     runCommand('git', ['commit', '-m', 'Initial commit'], projectDir);
@@ -160,7 +160,7 @@ async function waitForSessionInList(sessionId: string, env: NodeJS.ProcessEnv): 
     await waitFor(async () => {
         const sessions = parseJson<Array<{ id: string }>>(runAgentCli(['list', '--json'], env));
         return sessions.some(session => session.id === sessionId);
-    }, 20_000, `session ${sessionId} to appear in happy-agent list`);
+    }, 20_000, `session ${sessionId} to appear in orbit-agent list`);
 }
 
 async function waitForHistoryMessage(sessionId: string, expectedText: string, env: NodeJS.ProcessEnv): Promise<void> {
@@ -338,7 +338,7 @@ async function stopDaemonSession(httpPort: number, sessionId: string): Promise<b
     return parsed.success === true;
 }
 
-describe('happy-agent integration', { timeout: 180_000 }, () => {
+describe('orbit-agent integration', { timeout: 180_000 }, () => {
     beforeAll(async () => {
         previousCurrentEnv = readCurrentEnvName();
 
@@ -358,8 +358,8 @@ describe('happy-agent integration', { timeout: 180_000 }, () => {
         testWorktreeDir = testProject.worktreeDir;
 
         if (keepIntegrationEnv) {
-            console.log(`[happy-agent integration] keeping environment: ${integrationEnvName}`);
-            console.log(`[happy-agent integration] environment dir: ${integrationEnvDir}`);
+            console.log(`[orbit-agent integration] keeping environment: ${integrationEnvName}`);
+            console.log(`[orbit-agent integration] environment dir: ${integrationEnvDir}`);
         }
     });
 
@@ -505,13 +505,13 @@ describe('happy-agent integration', { timeout: 180_000 }, () => {
         }, 20_000, 'spawned session to be tracked by daemon');
     });
 
-    it('spawns in the test project root and sends a message through happy-agent CLI', async () => {
+    it('spawns in the test project root and sends a message through orbit-agent CLI', async () => {
         if (!activeMachineId || !integrationConfig || !agentHomeDir || !testProjectDir) {
             throw new Error('Integration environment not initialized');
         }
 
         const agentEnv = agentEnvVars(integrationConfig.serverPort, agentHomeDir);
-        const prompt = 'happy-agent root message';
+        const prompt = 'orbit-agent root message';
         const spawnResult = parseJson<{
             type: 'success' | 'requestToApproveDirectoryCreation' | 'error';
             sessionId?: string;
@@ -556,13 +556,13 @@ describe('happy-agent integration', { timeout: 180_000 }, () => {
         await waitForHistoryMessage(sessionId, prompt, agentEnv);
     });
 
-    it('spawns in a git worktree and sends a message through happy-agent CLI', async () => {
+    it('spawns in a git worktree and sends a message through orbit-agent CLI', async () => {
         if (!activeMachineId || !integrationConfig || !agentHomeDir || !testWorktreeDir) {
             throw new Error('Integration environment not initialized');
         }
 
         const agentEnv = agentEnvVars(integrationConfig.serverPort, agentHomeDir);
-        const prompt = 'happy-agent worktree message';
+        const prompt = 'orbit-agent worktree message';
         const spawnResult = parseJson<{
             type: 'success' | 'requestToApproveDirectoryCreation' | 'error';
             sessionId?: string;

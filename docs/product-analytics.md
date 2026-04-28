@@ -33,7 +33,7 @@
   - source
   - session_agent
   - session_started_source
-  - happy_cli_version
+  - orbit_cli_version
   - ota_version
   - ota_runtime_version
 - session_switched

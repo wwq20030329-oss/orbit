@@ -3,7 +3,7 @@
  * Session Hook Forwarder
  * 
  * This script is executed by Claude's SessionStart hook.
- * It reads JSON data from stdin and forwards it to Happy's hook server.
+ * It reads JSON data from stdin and forwards it to Orbit's hook server.
  * 
  * Usage: echo '{"session_id":"..."}' | node session_hook_forwarder.cjs <port>
  */

@@ -51,7 +51,7 @@
 - Document issues/blockers with ⚠️ prefix
 - Update plan if implementation deviates from original scope
 - Keep plan in sync with actual work done
-- ⚠️ `yarn workspace happy-app lint` is unavailable because the package has no `lint` script
+- ⚠️ `yarn workspace orbit-app lint` is unavailable because the package has no `lint` script
 
 ## Implementation Steps
 

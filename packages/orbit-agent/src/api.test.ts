@@ -54,8 +54,8 @@ const mockedAxios = axios as any as {
 function makeConfig(): Config {
     return {
         serverUrl: 'https://test-server.example.com',
-        homeDir: '/tmp/happy-test',
-        credentialPath: '/tmp/happy-test/agent.key',
+        homeDir: '/tmp/orbit-test',
+        credentialPath: '/tmp/orbit-test/agent.key',
     };
 }
 

@@ -1,16 +1,16 @@
-# happy-agent CLI Tool
+# orbit-agent CLI Tool
 
 ## Overview
-A new standalone CLI tool (`happy-agent`) in `packages/orbit-agent` that acts as a dedicated client for controlling Happy Coder agents remotely. Unlike `happy-cli` which both runs and controls agents, `happy-agent` only controls them — listing machines, spawning sessions on a machine, creating sessions, sending messages, reading history, monitoring state, and stopping sessions.
+A new standalone CLI tool (`orbit-agent`) in `packages/orbit-agent` that acts as a dedicated client for controlling Orbit agents remotely. Unlike `orbit-cli` which both runs and controls agents, `orbit-agent` only controls them — listing machines, spawning sessions on a machine, creating sessions, sending messages, reading history, monitoring state, and stopping sessions.
 
-This is a completely separate client from `happy-cli`. It has its own authentication flow (account auth via QR code, same as device linking in the mobile app), its own credential storage (`~/.happy/agent.key`), and is written from scratch with no code sharing.
+This is a completely separate client from `orbit-cli`. It has its own authentication flow (account auth via QR code, same as device linking in the mobile app), its own credential storage (`~/.orbit/agent.key`), and is written from scratch with no code sharing.
 
 ## Context
-- **Existing system**: Monorepo with `happy-cli` (agent runtime + control), `happy-server` (Fastify + PostgreSQL + Redis), `happy-app` (React Native mobile)
+- **Existing system**: Monorepo with `orbit-cli` (agent runtime + control), `orbit-server` (Fastify + PostgreSQL + Redis), `orbit-app` (React Native mobile)
 - **Server API**: REST endpoints at `https://api.cluster-fluster.com` + Socket.IO at `/v1/updates`
-- **Authentication**: Uses account auth flow (`/v1/auth/account/request` + `/v1/auth/account/response`) — generates ephemeral keypair, displays QR code (`happy:///account?[base64url-publicKey]`), user scans with existing Happy mobile app to approve, receives encrypted account secret
-- **Credential storage**: `~/.happy/agent.key` (separate from happy-cli's `~/.happy/access.key`)
-- **Encryption**: AES-256-GCM (dataKey) for all new sessions. The master content keypair is derived deterministically from the account secret via `deriveKey(secret, 'Happy EnCoder', ['content'])` → seed → `crypto_box_seed_keypair(seed)`. Per-session random keys are encrypted with the master public key and stored on the server.
+- **Authentication**: Uses account auth flow (`/v1/auth/account/request` + `/v1/auth/account/response`) — generates ephemeral keypair, displays QR code (`orbit:///account?[base64url-publicKey]`), user scans with existing Orbit mobile app to approve, receives encrypted account secret
+- **Credential storage**: `~/.orbit/agent.key` (separate from orbit-cli's `~/.orbit/access.key`)
+- **Encryption**: AES-256-GCM (dataKey) for all new sessions. The master content keypair is derived deterministically from the account secret via `deriveKey(secret, 'Orbit EnCoder', ['content'])` → seed → `crypto_box_seed_keypair(seed)`. Per-session random keys are encrypted with the master public key and stored on the server.
 - **Session protocol**: HTTP POST to create sessions, Socket.IO for real-time messages/state updates
 - **Agent state**: `AgentState.controlledByUser` indicates if agent is actively processing; `requests` field tracks pending tool calls
 
@@ -25,7 +25,7 @@ This is a completely separate client from `happy-cli`. It has its own authentica
 
 ## Testing Strategy
 - **Unit tests**: Required for every task — encryption, key derivation, API client logic, CLI argument parsing, auth flow
-- **Integration tests**: Use the real environment bootstrap (`yarn env:up:authenticated`) and exercise the live server + daemon + CLI stack. Do not use mocked acceptance coverage for `happy-agent spawn`.
+- **Integration tests**: Use the real environment bootstrap (`yarn env:up:authenticated`) and exercise the live server + daemon + CLI stack. Do not use mocked acceptance coverage for `orbit-agent spawn`.
 
 ## Progress Tracking
 - Mark completed items with `[x]` immediately when done
@@ -35,9 +35,9 @@ This is a completely separate client from `happy-cli`. It has its own authentica
 ## Implementation Steps
 
 ### Task 1: Package scaffolding and build setup
-- [x] Create `packages/orbit-agent/` directory with `package.json` (name: `happy-agent`, type: module, bin: `./bin/happy-agent.mjs`)
+- [x] Create `packages/orbit-agent/` directory with `package.json` (name: `orbit-agent`, type: module, bin: `./bin/orbit-agent.mjs`)
 - [x] Create `tsconfig.json` with strict mode, path aliases (`@/` → `src/`), ESM output
-- [x] Create `bin/happy-agent.mjs` entry point wrapper (mirrors happy-cli pattern: spawns node with `--no-warnings`)
+- [x] Create `bin/orbit-agent.mjs` entry point wrapper (mirrors orbit-cli pattern: spawns node with `--no-warnings`)
 - [x] Create `src/index.ts` as main entry point with argument parsing shell
 - [x] Add package to root `package.json` workspaces
 - [x] Add dependencies: `axios`, `socket.io-client`, `tweetnacl`, `zod`, `chalk`, `commander`, `qrcode-terminal`
@@ -54,7 +54,7 @@ This is a completely separate client from `happy-cli`. It has its own authentica
   - `deriveSecretKeyTreeRoot(seed, usage)` — HMAC-SHA512 with key = `usage + ' Master Seed'` (UTF-8), data = seed. Split 64-byte result: key = `[0:32]`, chainCode = `[32:64]`
   - `deriveSecretKeyTreeChild(chainCode, index)` — HMAC-SHA512 with key = chainCode, data = `[0x00, ...UTF-8(index)]`. Split same way.
   - `deriveKey(master, usage, path)` — derives root, then iterates path elements through child derivation
-  - `deriveContentKeyPair(secret)` — calls `deriveKey(secret, 'Happy EnCoder', ['content'])` → seed → `sha512(seed)[0:32]` → `tweetnacl.box.keyPair.fromSecretKey()` → returns `{ publicKey, secretKey }`
+  - `deriveContentKeyPair(secret)` — calls `deriveKey(secret, 'Orbit EnCoder', ['content'])` → seed → `sha512(seed)[0:32]` → `tweetnacl.box.keyPair.fromSecretKey()` → returns `{ publicKey, secretKey }`
 - [x] Implement AES-256-GCM encryption:
   - `encryptWithDataKey(data, dataKey)` — AES-256-GCM: `[1-byte version=0][12-byte nonce][ciphertext][16-byte auth tag]`
   - `decryptWithDataKey(bundle, dataKey)` — reverse of above
@@ -80,30 +80,30 @@ This is a completely separate client from `happy-cli`. It has its own authentica
 - [x] Create `src/config.ts` — reads `ORBIT_SERVER_URL` (default: `https://api.2003383.xyz`), `ORBIT_HOME_DIR` (default: `~/.orbit`), derives credential file path as `${orbitHomeDir}/agent.key`
 - [x] Create `src/credentials.ts`:
   - `Credentials` type: `{ token: string, secret: Uint8Array, contentKeyPair: { publicKey: Uint8Array, secretKey: Uint8Array } }`
-  - `readCredentials(config)` — parses `~/.happy/agent.key` JSON `{ token, secret }`, decodes secret from base64, derives contentKeyPair via `deriveContentKeyPair(secret)`. Returns `Credentials` or `null` if file missing.
-  - `writeCredentials(config, token, secret)` — writes `{ token, secret: base64(secret) }` to `~/.happy/agent.key`
-  - `clearCredentials(config)` — deletes `~/.happy/agent.key`
-  - `requireCredentials(config)` — calls `readCredentials`, throws with "Run `happy-agent auth login` first" if null
+  - `readCredentials(config)` — parses `~/.orbit/agent.key` JSON `{ token, secret }`, decodes secret from base64, derives contentKeyPair via `deriveContentKeyPair(secret)`. Returns `Credentials` or `null` if file missing.
+  - `writeCredentials(config, token, secret)` — writes `{ token, secret: base64(secret) }` to `~/.orbit/agent.key`
+  - `clearCredentials(config)` — deletes `~/.orbit/agent.key`
+  - `requireCredentials(config)` — calls `readCredentials`, throws with "Run `orbit-agent auth login` first" if null
 - [x] Write tests for credential read/write round-trip (use temp directory)
 - [x] Write tests for contentKeyPair derivation from secret
 - [x] Write tests for missing file returns null
 - [x] Write tests for config defaults and env var overrides
 - [x] Run tests — must pass before task 4
 
-### Task 4: Authentication command (`happy-agent auth`)
+### Task 4: Authentication command (`orbit-agent auth`)
 - [x] Create `src/auth.ts` implementing the account auth flow:
   1. Generate ephemeral box keypair: `tweetnacl.box.keyPair.fromSecretKey(randomBytes(32))`
   2. POST `/v1/auth/account/request` with `{ publicKey: base64(keypair.publicKey) }`
-  3. Generate QR code data: `happy:///account?` + base64url(keypair.publicKey)
+  3. Generate QR code data: `orbit:///account?` + base64url(keypair.publicKey)
   4. Display QR code in terminal using `qrcode-terminal`
-  5. Print instructions: "Scan this QR code with the Happy app (Settings → Account → Link New Device)"
+  5. Print instructions: "Scan this QR code with the Orbit app (Settings → Account → Link New Device)"
   6. Poll `/v1/auth/account/request` every 1 second with same publicKey
   7. When `state === 'authorized'`: decrypt `response` using `decryptBoxBundle(decodeBase64(response), keypair.secretKey)` to get the account secret (32 bytes)
   8. Save token + secret via `writeCredentials(config, token, secret)`
   9. Print success message
-- [x] Add `happy-agent auth login` subcommand that runs the flow above
-- [x] Add `happy-agent auth logout` subcommand that calls `clearCredentials()`
-- [x] Add `happy-agent auth status` subcommand that reads credentials and prints auth status (authenticated / not authenticated)
+- [x] Add `orbit-agent auth login` subcommand that runs the flow above
+- [x] Add `orbit-agent auth logout` subcommand that calls `clearCredentials()`
+- [x] Add `orbit-agent auth status` subcommand that reads credentials and prints auth status (authenticated / not authenticated)
 - [x] Write tests for auth flow with mocked HTTP (polling, success case)
 - [x] Write tests for auth flow error cases (server unreachable, timeout)
 - [x] Write tests for logout (credential deletion)
@@ -148,25 +148,25 @@ This is a completely separate client from `happy-cli`. It has its own authentica
 - [x] Run tests — must pass before task 7
 
 ### Task 7: CLI commands — `list` and `status`
-- [x] Create `src/index.ts` using `commander` with program name `happy-agent`
-- [x] `happy-agent list` — calls `listSessions`, displays table: ID (truncated), name/summary, path, status (active/inactive), last active time. With `--json` outputs raw JSON. With `--active` filters to active only.
-- [x] `happy-agent status <session-id>` — fetches session via list + filter by ID prefix, connects Socket.IO to get live state, displays: session ID, metadata (path, host, lifecycle state), agent state (idle/busy, pending requests count), last message preview. With `--json` outputs raw JSON. Disconnects after displaying.
+- [x] Create `src/index.ts` using `commander` with program name `orbit-agent`
+- [x] `orbit-agent list` — calls `listSessions`, displays table: ID (truncated), name/summary, path, status (active/inactive), last active time. With `--json` outputs raw JSON. With `--active` filters to active only.
+- [x] `orbit-agent status <session-id>` — fetches session via list + filter by ID prefix, connects Socket.IO to get live state, displays: session ID, metadata (path, host, lifecycle state), agent state (idle/busy, pending requests count), last message preview. With `--json` outputs raw JSON. Disconnects after displaying.
 - [x] Create `src/output.ts` — helper for human-readable vs JSON formatting based on `--json` flag
 - [x] Write tests for output formatting (human-readable table, JSON mode)
 - [x] Write tests for CLI argument parsing (list, list --active, list --json, status <id>)
 - [x] Run tests — must pass before task 8
 
 ### Task 8: CLI commands — `create` and `send`
-- [x] `happy-agent create --tag <tag> [--path <path>]` — creates new session with given tag and metadata (path defaults to cwd, host to hostname). Prints session ID. With `--json` outputs full session JSON.
-- [x] `happy-agent send <session-id> <message>` — resolves session key, connects Socket.IO, sends user message (encrypted with AES-256-GCM), optionally waits for idle with `--wait`, and supports `--yolo` to send `permissionMode=yolo`. Disconnects after. Prints confirmation. With `--json` outputs message details.
+- [x] `orbit-agent create --tag <tag> [--path <path>]` — creates new session with given tag and metadata (path defaults to cwd, host to hostname). Prints session ID. With `--json` outputs full session JSON.
+- [x] `orbit-agent send <session-id> <message>` — resolves session key, connects Socket.IO, sends user message (encrypted with AES-256-GCM), optionally waits for idle with `--wait`, and supports `--yolo` to send `permissionMode=yolo`. Disconnects after. Prints confirmation. With `--json` outputs message details.
 - [x] Write tests for create command (argument parsing, metadata construction)
 - [x] Write tests for send command (message encryption, --wait flag)
 - [x] Run tests — must pass before task 9
 
 ### Task 9: CLI commands — `history`, `stop`, and `wait`
-- [x] `happy-agent history <session-id>` — fetches messages via HTTP, resolves session encryption key (dataKey or legacy), decrypts each message, displays in chronological order with role/timestamp. With `--json` outputs raw JSON. With `--limit <n>` limits output.
-- [x] `happy-agent stop <session-id>` — connects Socket.IO, sends `session-end` event, disconnects. Prints confirmation.
-- [x] `happy-agent wait <session-id> [--timeout <seconds>]` — connects Socket.IO, waits for agent idle state (no pending requests, not controlled by user), prints when idle or times out (default 300s). Exit code 0 on idle, 1 on timeout.
+- [x] `orbit-agent history <session-id>` — fetches messages via HTTP, resolves session encryption key (dataKey or legacy), decrypts each message, displays in chronological order with role/timestamp. With `--json` outputs raw JSON. With `--limit <n>` limits output.
+- [x] `orbit-agent stop <session-id>` — connects Socket.IO, sends `session-end` event, disconnects. Prints confirmation.
+- [x] `orbit-agent wait <session-id> [--timeout <seconds>]` — connects Socket.IO, waits for agent idle state (no pending requests, not controlled by user), prints when idle or times out (default 300s). Exit code 0 on idle, 1 on timeout.
 - [x] Write tests for history command (message decryption, chronological ordering, --limit)
 - [x] Write tests for stop command
 - [x] Write tests for wait command (idle detection, timeout handling)
@@ -176,8 +176,8 @@ This is a completely separate client from `happy-cli`. It has its own authentica
 - [x] Verify the session control operations work: auth, create, send, stop, history, wait, status, list
 - [x] Verify `--json` flag works on all applicable commands
 - [x] Verify error handling: no credentials, server unreachable, invalid session ID
-- [x] Verify interop: session created by happy-agent is visible and controllable from mobile app
-- [x] Verify interop: session created by happy-cli can be listed and history read by happy-agent
+- [x] Verify interop: session created by orbit-agent is visible and controllable from mobile app
+- [x] Verify interop: session created by orbit-cli can be listed and history read by orbit-agent
 - [x] Run full test suite (unit tests)
 - [x] Run linter — all issues must be fixed
 
@@ -186,41 +186,41 @@ This is a completely separate client from `happy-cli`. It has its own authentica
 - [x] Update root README if it references packages
 
 ### Task 12: Machines and spawn
-- [x] Add `happy-agent machines [--active] [--json]`
+- [x] Add `orbit-agent machines [--active] [--json]`
 - [x] Add machine record decryption using the existing account content key derivation and record data key pattern
-- [x] Add `happy-agent spawn --machine <machine-id> [--path <path>] [--agent <agent>] [--create-dir] [--json]`
-- [x] Reuse the existing machine RPC contract (`spawn-happy-session`) without encryption shortcuts
-- [x] Add a real integration test that boots `yarn env:up:authenticated`, authenticates `happy-agent`, lists machines, spawns via the real daemon RPC path, and verifies the live session
+- [x] Add `orbit-agent spawn --machine <machine-id> [--path <path>] [--agent <agent>] [--create-dir] [--json]`
+- [x] Reuse the existing machine RPC contract (`spawn-orbit-session`) without encryption shortcuts
+- [x] Add a real integration test that boots `yarn env:up:authenticated`, authenticates `orbit-agent`, lists machines, spawns via the real daemon RPC path, and verifies the live session
 
 ## Technical Details
 
 ### CLI Commands Summary
 ```
-happy-agent auth login                          # Authenticate via QR code (scanned by Happy mobile app)
-happy-agent auth logout                         # Clear stored credentials
-happy-agent auth status                         # Show authentication status
+orbit-agent auth login                          # Authenticate via QR code (scanned by Orbit mobile app)
+orbit-agent auth logout                         # Clear stored credentials
+orbit-agent auth status                         # Show authentication status
 
-happy-agent machines [--active] [--json]        # List machines
-happy-agent list [--active] [--json]            # List all sessions
-happy-agent spawn --machine <machine-id> [--path <path>] [--agent <agent>] [--create-dir] [--json]  # Spawn on a machine
-happy-agent status <session-id> [--json]        # Get live session state
-happy-agent create --tag <tag> [--path <path>] [--json]  # Create new session
-happy-agent send <session-id> <message> [--yolo] [--wait] [--json]  # Send message
-happy-agent history <session-id> [--limit <n>] [--json]    # Read message history
-happy-agent stop <session-id>                   # Stop a session
-happy-agent wait <session-id> [--timeout <s>]   # Wait for agent to become idle
+orbit-agent machines [--active] [--json]        # List machines
+orbit-agent list [--active] [--json]            # List all sessions
+orbit-agent spawn --machine <machine-id> [--path <path>] [--agent <agent>] [--create-dir] [--json]  # Spawn on a machine
+orbit-agent status <session-id> [--json]        # Get live session state
+orbit-agent create --tag <tag> [--path <path>] [--json]  # Create new session
+orbit-agent send <session-id> <message> [--yolo] [--wait] [--json]  # Send message
+orbit-agent history <session-id> [--limit <n>] [--json]    # Read message history
+orbit-agent stop <session-id>                   # Stop a session
+orbit-agent wait <session-id> [--timeout <s>]   # Wait for agent to become idle
 ```
 
 ### Authentication Flow (Account Auth)
 ```
-happy-agent                          Happy Server                    Happy Mobile App
+orbit-agent                          Orbit Server                    Orbit Mobile App
      |                                    |                               |
      +-- Generate ephemeral keypair       |                               |
      +-- POST /v1/auth/account/request -> |                               |
      |   { publicKey }                    |                               |
      |                                    |                               |
      +-- Display QR code in terminal      |                               |
-     |   happy:///account?[base64url-key] |                               |
+     |   orbit:///account?[base64url-key] |                               |
      |                                    |                               |
      |                                    |  <-- User scans QR code ------+
      |                                    |                               |
@@ -238,11 +238,11 @@ happy-agent                          Happy Server                    Happy Mobil
      +-- box.open(response, ephemeralSK)  |                               |
      |   -> accountSecret (32 bytes)      |                               |
      +-- Save { token, secret }           |                               |
-     |   to ~/.happy/agent.key            |                               |
+     |   to ~/.orbit/agent.key            |                               |
      |                                    |                               |
      +-- Derive content keypair:          |                               |
      |   deriveKey(secret,                |                               |
-     |     'Happy EnCoder', ['content'])  |                               |
+     |     'Orbit EnCoder', ['content'])  |                               |
      |   -> seed -> box keypair           |                               |
      |   (publicKey for encrypting        |                               |
      |    per-session keys,               |                               |
@@ -250,7 +250,7 @@ happy-agent                          Happy Server                    Happy Mobil
      v Authenticated                      |                               |
 ```
 
-### Credential File Format (`~/.happy/agent.key`)
+### Credential File Format (`~/.orbit/agent.key`)
 ```json
 {
   "token": "jwt-auth-token",
@@ -261,7 +261,7 @@ happy-agent                          Happy Server                    Happy Mobil
 At load time, the content keypair is derived from the secret:
 ```
 secret (32 bytes)
-  -> deriveKey(secret, 'Happy EnCoder', ['content'])
+  -> deriveKey(secret, 'Orbit EnCoder', ['content'])
   -> seed (32 bytes)
   -> sha512(seed)[0:32] -> boxSecretKey
   -> tweetnacl.box.keyPair.fromSecretKey(boxSecretKey)
@@ -295,12 +295,12 @@ Test vectors:
 
 ### Encryption
 
-**For new sessions (created by happy-agent):**
+**For new sessions (created by orbit-agent):**
 1. Generate random 32-byte per-session key
 2. Encrypt per-session key with master publicKey via `libsodiumEncryptForPublicKey` → store as `dataEncryptionKey` on server
 3. Encrypt/decrypt all session data (metadata, messages, agentState) with AES-256-GCM using the per-session key
 
-**For existing sessions (created by happy-cli or other clients):**
+**For existing sessions (created by orbit-cli or other clients):**
 1. If session has `dataEncryptionKey`: strip version byte `[0]`, `decryptBoxBundle(encrypted, contentKeyPair.secretKey)` → per-session AES key, use AES-256-GCM
 2. If session has no `dataEncryptionKey`: use `secret` directly as key with legacy TweetNaCl secretbox
 
@@ -325,12 +325,12 @@ Agent is considered idle when ALL of these are true:
 
 ## Post-Completion
 **Manual verification:**
-- Test full auth flow: run `happy-agent auth login`, scan QR with Happy app, verify credentials saved
+- Test full auth flow: run `orbit-agent auth login`, scan QR with Orbit app, verify credentials saved
 - Test with real server: create session, send message, verify it appears in mobile app
 - Test `wait` command with a running agent session
-- Test `history` command for sessions created by both `happy-agent` and `happy-cli`
-- Test cross-client interop: messages from happy-agent readable by mobile app and vice versa
+- Test `history` command for sessions created by both `orbit-agent` and `orbit-cli`
+- Test cross-client interop: messages from orbit-agent readable by mobile app and vice versa
 
 **Distribution:**
-- Package can be published to npm as `happy-agent`
-- Alternatively, users install from monorepo via `yarn workspace happy-agent build`
+- Package can be published to npm as `orbit-agent`
+- Alternatively, users install from monorepo via `yarn workspace orbit-agent build`

@@ -25,8 +25,8 @@ pnpm-lock.yaml
 # Local installation and data directories
 .orbit/
 .orbit-dev/
-.happy/
-.happy-dev/
+.orbit/
+.orbit-dev/
 
 **/*.log
 .release-notes-temp.md
@@ -37,7 +37,7 @@ bun.lock
 claude-docs/
 note/
 orbit-*.tgz
-happy-*.tgz
+orbit-*.tgz
 
 # npm auth token (never commit)
 .npmrc

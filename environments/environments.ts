@@ -38,7 +38,7 @@ const IOS_PREFERRED_DEVICE_TYPES = [
 // ============================================================================
 
 const adjectives = [
-    "clever", "happy", "swift", "bright", "calm",
+    "clever", "steady", "swift", "bright", "calm",
     "bold", "quiet", "brave", "wise", "eager",
     "gentle", "quick", "sharp", "smooth", "fresh",
     "warm", "cool", "vivid", "lucid", "nimble",
@@ -1154,7 +1154,7 @@ function buildEnvVars(envDir: string, serverPort: number, expoPort: number): Rec
 
     return {
         // Server
-        HANDY_MASTER_SECRET: "orbit-dev-secret",
+        ORBIT_MASTER_SECRET: "orbit-dev-secret-for-local-development",
         PORT: String(serverPort),
         NODE_ENV: "development",
         DATA_DIR: path.join(envDir, "server"),
@@ -1220,7 +1220,7 @@ function buildEnvSh(name: string, envDir: string, serverPort: number, expoPort: 
 
     // Group exports by section
     lines.push("# Server");
-    lines.push(`export HANDY_MASTER_SECRET="${vars.HANDY_MASTER_SECRET}"`);
+    lines.push(`export ORBIT_MASTER_SECRET="${vars.ORBIT_MASTER_SECRET}"`);
     lines.push(`export PORT=${vars.PORT}`);
     lines.push(`export NODE_ENV="${vars.NODE_ENV}"`);
     lines.push(`export DATA_DIR="${vars.DATA_DIR}"`);

@@ -168,8 +168,8 @@ For batch sends with mixed new/existing messages:
 ## Post-Completion
 
 **CLI Migration (separate effort):**
-- Update `happy-agent` to use `POST /v3/sessions/:id/messages` instead of Socket.IO `message` event
-- Update `happy-agent` to poll `GET /v3/sessions/:id/messages` for receiving messages
+- Update `orbit-agent` to use `POST /v3/sessions/:id/messages` instead of Socket.IO `message` event
+- Update `orbit-agent` to poll `GET /v3/sessions/:id/messages` for receiving messages
 - Eventually replace polling with SSE for real-time delivery
 
 **SSE Migration (future):**

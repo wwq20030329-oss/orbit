@@ -219,7 +219,7 @@ Lines 7-8: New messages from current interaction
 {"parentUuid":"...","sessionId":"1433467f-ff14-4292-b5b2-2aac77a808f0","message":{"role":"user","content":"what file did we just see?"},...}
 ```
 
-## Implications for handy-cli
+## Implications for orbit-cli
 
 When using --resume:
 1. Must handle new session ID in responses

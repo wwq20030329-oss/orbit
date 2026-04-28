@@ -82,7 +82,7 @@ Startup sequence:
 1. Connect Postgres (`db.$connect()`).
 2. Init activity cache (presence) and Redis connection check (`redis.ping()`).
 3. Initialize crypto modules:
-   - `initEncrypt()` derives a KeyTree from `HANDY_MASTER_SECRET`.
+   - `initEncrypt()` derives a KeyTree from `ORBIT_MASTER_SECRET`.
    - `initGithub()` configures GitHub App/webhooks if env vars exist.
    - `loadFiles()` verifies S3 bucket access.
    - `auth.init()` prepares token generator/verifier.
@@ -167,7 +167,7 @@ sequenceDiagram
 The backend does not store passwords. Instead:
 - Clients authenticate with a signed challenge (`/v1/auth`) using a public key.
 - The server upserts the account by public key and returns a Bearer token.
-- Tokens are generated and verified by privacy-kit using `HANDY_MASTER_SECRET`.
+- Tokens are generated and verified by privacy-kit using `ORBIT_MASTER_SECRET`.
 - Tokens are cached in-memory for fast verification.
 
 GitHub OAuth uses short-lived "ephemeral" tokens to protect the callback and is separate from normal auth.
@@ -359,7 +359,7 @@ graph TB
     end
 
     C1 & C2 & C3 & C4 & C5 & C6 --> |opaque blobs| DB[(Postgres)]
-    S1 & S2 & S3 & S4 --> |KeyTree from HANDY_MASTER_SECRET| DB
+    S1 & S2 & S3 & S4 --> |KeyTree from ORBIT_MASTER_SECRET| DB
 
     style C1 fill:#e1f5fe
     style C2 fill:#e1f5fe
@@ -375,7 +375,7 @@ graph TB
 
 - Session metadata, agent state, daemon state, and message content are stored as opaque encrypted strings or blobs.
 - Artifacts and KV values are stored encrypted and encoded as base64 on the wire.
-- The server only encrypts/decrypts **service tokens** (GitHub OAuth tokens, vendor tokens) using the KeyTree derived from `HANDY_MASTER_SECRET`.
+- The server only encrypts/decrypts **service tokens** (GitHub OAuth tokens, vendor tokens) using the KeyTree derived from `ORBIT_MASTER_SECRET`.
 
 ## Integrations
 - **GitHub**: OAuth connect + webhook verification, optional if env vars are set.

@@ -1,7 +1,7 @@
 {
   "git": {
-    "commitMessage": "Release happy-agent ${version}",
-    "tagName": "happy-agent-v${version}",
+    "commitMessage": "Release orbit-agent ${version}",
+    "tagName": "orbit-agent-v${version}",
     "push": true,
     "requireCleanWorkingDir": true,
     "requireBranch": "main",
@@ -9,7 +9,7 @@
   },
   "github": {
     "release": true,
-    "releaseName": "happy-agent-v${version}",
+    "releaseName": "orbit-agent-v${version}",
     "releaseNotes": "node .release-it.notes.js ${version}"
   },
   "npm": {

@@ -48,9 +48,9 @@ const testMetadata = {
     path: '/tmp',
     host: 'localhost',
     homeDir: '/home/user',
-    orbitHomeDir: '/home/user/.happy',
-    orbitLibDir: '/home/user/.happy/lib',
-    orbitToolsDir: '/home/user/.happy/tools'
+    orbitHomeDir: '/home/user/.orbit',
+    orbitLibDir: '/home/user/.orbit/lib',
+    orbitToolsDir: '/home/user/.orbit/tools'
 };
 
 const testMachineMetadata = {
@@ -58,8 +58,8 @@ const testMachineMetadata = {
     platform: 'darwin',
     orbitCliVersion: '1.0.0',
     homeDir: '/home/user',
-    orbitHomeDir: '/home/user/.happy',
-    orbitLibDir: '/home/user/.happy/lib'
+    orbitHomeDir: '/home/user/.orbit',
+    orbitLibDir: '/home/user/.orbit/lib'
 };
 
 describe('Api server error handling', () => {

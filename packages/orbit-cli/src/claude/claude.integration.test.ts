@@ -4,14 +4,14 @@
  * Covers:
  *   - clarification + multi-turn context via resume
  *   - real model switching across resumed turns
- *   - Happy MCP tool usage (`mcp__happy__change_title`)
+ *   - Orbit MCP tool usage (`mcp__orbit__change_title`)
  *   - native Claude tool usage against the copied fixture project
  *   - real workspace-boundary behavior against `../sibling-dir`
  *   - permission denial and interrupt handling
  *
  * Notes:
  *   - This is the real current Claude surface we own directly.
- *   - It does not exercise Happy's separate local sandbox wrapper; instead it
+ *   - It does not exercise Orbit's separate local sandbox wrapper; instead it
  *     asserts the real safety controls available here: tool allow/deny and
  *     interrupting pending tool requests.
  */
@@ -145,7 +145,7 @@ type ClaudeTurn = {
 };
 
 class ClaudeQueryDriver {
-    private happyServer: Awaited<ReturnType<typeof startOrbitMcpServer>> | null = null;
+    private orbitServer: Awaited<ReturnType<typeof startOrbitMcpServer>> | null = null;
     private titleSummaries: string[] = [];
 
     async start(): Promise<void> {
@@ -163,12 +163,12 @@ class ClaudeQueryDriver {
             },
         } as unknown as ApiSessionClient;
 
-        this.happyServer = await startOrbitMcpServer(fakeSessionClient);
+        this.orbitServer = await startOrbitMcpServer(fakeSessionClient);
     }
 
     stop(): void {
-        this.happyServer?.stop();
-        this.happyServer = null;
+        this.orbitServer?.stop();
+        this.orbitServer = null;
     }
 
     getTitleSummaries(): string[] {
@@ -182,7 +182,7 @@ class ClaudeQueryDriver {
         model: string;
         resume?: string;
     }): QueryOptions {
-        if (!this.happyServer) {
+        if (!this.orbitServer) {
             throw new Error('ClaudeQueryDriver.start() must be called first');
         }
 
@@ -197,9 +197,9 @@ class ClaudeQueryDriver {
             cwd: integrationEnv.projectPath,
             disallowedTools: options.disallowedTools,
             mcpServers: {
-                happy: {
+                orbit: {
                     type: 'http',
-                    url: this.happyServer.url,
+                    url: this.orbitServer.url,
                 },
             },
             model: options.model,
@@ -328,7 +328,7 @@ describe.skipIf(!claudeAvailable)('Claude Integration (SDK/query)', { timeout: 1
         expect(resultMessage(clarificationMessages)?.result?.trim()).toBe('ACK-OPTION_B');
 
         const execution = await driver!.runTurn({
-            allowedTools: ['mcp__happy__change_title', 'TodoWrite', 'TodoRead', 'Write', 'Edit', 'Read', 'Glob', 'LS'],
+            allowedTools: ['mcp__orbit__change_title', 'TodoWrite', 'TodoRead', 'Write', 'Edit', 'Read', 'Glob', 'LS'],
             disallowedTools: ['Bash'],
             model: MODEL_SONNET,
             prompt: [
@@ -342,7 +342,7 @@ describe.skipIf(!claudeAvailable)('Claude Integration (SDK/query)', { timeout: 1
                 'The sibling file must contain exactly these two lines:',
                 'choice=OPTION_B',
                 'token=ember-orbit-17',
-                'Then update the happy title so it mentions OPTION_B and reply with only DONE.',
+                'Then update the orbit title so it mentions OPTION_B and reply with only DONE.',
             ].join('\n'),
             resume: sessionIdFrom(clarificationMessages),
         });
@@ -351,7 +351,7 @@ describe.skipIf(!claudeAvailable)('Claude Integration (SDK/query)', { timeout: 1
         const todoWrite = executionToolUses.find((toolUse) => toolUse.name === 'TodoWrite');
         expect(execution.init?.model?.toLowerCase()).toContain('sonnet');
         expect(execution.sessionId).toBe(sessionIdFrom(clarificationMessages));
-        expect(execution.toolUseNames).toContain('mcp__happy__change_title');
+        expect(execution.toolUseNames).toContain('mcp__orbit__change_title');
         expect(execution.toolUseNames).toContain('TodoWrite');
         expect(execution.toolUseNames.some((toolName) => WRITE_TOOL_NAMES.has(toolName))).toBe(true);
         expect(execution.toolUseNames).not.toContain('Bash');
@@ -364,7 +364,7 @@ describe.skipIf(!claudeAvailable)('Claude Integration (SDK/query)', { timeout: 1
 
     it('should leave the file untouched and explain the refusal when native write is explicitly disallowed', async () => {
         const denied = await driver!.runTurn({
-            allowedTools: ['mcp__happy__change_title', 'Write', 'Edit', 'Read', 'LS'],
+            allowedTools: ['mcp__orbit__change_title', 'Write', 'Edit', 'Read', 'LS'],
             disallowedTools: ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'],
             model: MODEL_SONNET,
             prompt: [

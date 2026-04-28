@@ -1,4 +1,4 @@
-# Minimal Fix Plan for Happy-CLI Bugs with TDD
+# Minimal Fix Plan for Orbit-CLI Bugs with TDD
 # Date: 2025-01-15
 # Created by: Andrew Hundt
 # Bugs: Session ID conflict + Server crash
@@ -8,14 +8,14 @@ Two targeted fixes with concrete error messages and TDD tests to verify behavior
 
 ## Bug 1: Session ID Conflict with --continue Flag
 
-**Problem**: When running `./bin/happy.mjs --continue`, Claude CLI returns error:
+**Problem**: When running `./bin/orbit.mjs --continue`, Claude CLI returns error:
 ```
 Error: --session-id cannot be used with --continue or --resume
 ```
 
 **Root Cause Analysis**:
-- This is a Claude Code 2.0.64+ design constraint, NOT a happy-cli bug
-- Happy-CLI generates a NEW session ID and adds `--session-id <uuid>` for all local sessions
+- This is a Claude Code 2.0.64+ design constraint, NOT a orbit-cli bug
+- Orbit-CLI generates a NEW session ID and adds `--session-id <uuid>` for all local sessions
 - When user passes `--continue`, Claude Code sees: `--continue --session-id <uuid>` → REJECTS
 - The conflict occurs ONLY in local mode (claudeLocal.ts), not remote mode
 
@@ -23,7 +23,7 @@ Error: --session-id cannot be used with --continue or --resume
 
 1. **Local Mode (Path with conflict)**:
    ```
-   user: happy --continue
+   user: orbit --continue
    → index.ts (claudeArgs = ["--continue"])
    → runClaude.ts
    → loop.ts
@@ -36,10 +36,10 @@ Error: --session-id cannot be used with --continue or --resume
 
 2. **Remote Mode (No conflict)**:
    ```
-   user: happy --continue
+   user: orbit --continue
    → ... → claudeRemote.ts → SDK query.ts
    → SDK passes --continue to Claude
-   → No --session-id added by happy-cli
+   → No --session-id added by orbit-cli
    → Works fine
    ```
 
@@ -92,15 +92,15 @@ if (startFrom) {
 }
 ```
 
-## Bug 2: Happy Server Unavailability Crash
+## Bug 2: Orbit Server Unavailability Crash
 
-**Problem**: Happy-CLI crashes when Happy API server is unreachable
+**Problem**: Orbit-CLI crashes when Orbit API server is unreachable
 
 **Server Details**:
 - Default server: `https://api.cluster-fluster.com`
 - Environment variable: `ORBIT_SERVER_URL` (overrides default)
 - Local development: `http://localhost:3005`
-- The server handles session management and real-time communication for Happy CLI
+- The server handles session management and real-time communication for Orbit CLI
 
 **Fixes with Clear Messages**:
 
@@ -109,7 +109,7 @@ if (startFrom) {
 try {
     this.socket.connect();
 } catch (error) {
-    console.log('⚠️  Cannot connect to Happy server - continuing in local mode');
+    console.log('⚠️  Cannot connect to Orbit server - continuing in local mode');
     logger.debug('[API] Socket connection failed:', error);
     // Don't throw - continue without socket
 }
@@ -119,7 +119,7 @@ try {
 ```typescript
 } catch (error) {
     if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-        console.log('⚠️  Happy server unreachable - working in offline mode');
+        console.log('⚠️  Orbit server unreachable - working in offline mode');
         return null; // Let caller handle fallback
     }
     throw error; // Re-throw other errors
@@ -235,7 +235,7 @@ describe('ApiSessionClient connection handling', () => {
 
         // Should show user-friendly message
         expect(consoleSpy).toHaveBeenCalledWith(
-            '⚠️  Cannot connect to Happy server - continuing in local mode'
+            '⚠️  Cannot connect to Orbit server - continuing in local mode'
         );
 
         consoleSpy.mockRestore();
@@ -249,7 +249,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { Api } from './api';
 
 describe('Api server error handling', () => {
-    it('should return null when Happy server is unreachable', async () => {
+    it('should return null when Orbit server is unreachable', async () => {
         const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
         // Mock axios to throw connection error
@@ -264,7 +264,7 @@ describe('Api server error handling', () => {
 
         expect(result).toBeNull();
         expect(consoleSpy).toHaveBeenCalledWith(
-            '⚠️  Happy server unreachable - working in offline mode'
+            '⚠️  Orbit server unreachable - working in offline mode'
         );
 
         consoleSpy.mockRestore();
@@ -305,13 +305,13 @@ describe('Api server error handling', () => {
    - Add session ID extraction for --continue (future enhancement):
      - Monitor Claude's session file creation
      - Extract real session ID from ~/.claude/projects/*/session-id.jsonl
-     - Update Happy's session metadata with Claude's ID
+     - Update Orbit's session metadata with Claude's ID
    - Ensure code is clean and minimal
 
 6. **Manual Verification**:
    ```bash
    # Test Bug 1 fix:
-   ./bin/happy.mjs --continue  # Should work without error
+   ./bin/orbit.mjs --continue  # Should work without error
    # Verify mobile/daemon still work with session ID
 
    # Test Bug 2 fix:
@@ -323,13 +323,13 @@ describe('Api server error handling', () => {
 ## Success Criteria
 
 **Bug 1 Fixed**:
-- Test: `./bin/happy.mjs --continue` exits with code 0
+- Test: `./bin/orbit.mjs --continue` exits with code 0
 - No "session-id cannot be used" error
 
 **Bug 2 Fixed**:
 - Test: `ORBIT_SERVER_URL=http://invalid:9999 ./bin/orbit.mjs` shows warning message
 - Process continues in local mode instead of crashing
-- Clear user feedback: "⚠️ Happy server unreachable - working in offline mode"
+- Clear user feedback: "⚠️ Orbit server unreachable - working in offline mode"
 
 **All Tests Pass**:
 - Unit tests: 100% pass

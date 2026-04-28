@@ -1,7 +1,7 @@
-# CLI V3 Messages API Migration (happy-cli)
+# CLI V3 Messages API Migration (orbit-cli)
 
 ## Overview
-Migrate `happy-cli`'s `ApiSessionClient` from Socket.IO-based message read/write to the new v3 HTTP endpoints. The client will:
+Migrate `orbit-cli`'s `ApiSessionClient` from Socket.IO-based message read/write to the new v3 HTTP endpoints. The client will:
 - **Send messages** via `POST /v3/sessions/:sessionId/messages` using InvalidateSync to batch outgoing messages from an outbox — fixes the current problem where messages are silently lost on disconnect
 - **Receive messages** via `GET /v3/sessions/:sessionId/messages?after_seq=X` with cursor-based polling, triggered by Socket.IO event invalidation
 - **Track seq per session** — store `lastSeq` from server responses, use it for incremental fetches
@@ -21,7 +21,7 @@ This replaces the current fire-and-forget `socket.emit('message', ...)` (5 separ
 - **Known bug**: Messages silently lost when socket disconnected (see TODO in `sendCodexMessage` line 275)
 - **Encryption**: `encrypt(key, variant, data)` → Uint8Array → `encodeBase64()` → string (same format v3 POST expects as `content`)
 - **HTTP client**: axios (not fetch) — used throughout the codebase
-- **InvalidateSync**: Available in `src/utils/sync.ts` (identical to happy-app's version)
+- **InvalidateSync**: Available in `src/utils/sync.ts` (identical to orbit-app's version)
 - **AsyncLock**: Available in `src/utils/lock.ts`
 - **Tests**: vitest with mocked socket.io-client in `apiSession.test.ts`
 

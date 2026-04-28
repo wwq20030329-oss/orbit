@@ -55,8 +55,8 @@ describe('getProjectPath', () => {
 
     describe('Claude Code path normalization parity', () => {
         // Claude Code replaces ALL non-alphanumeric, non-hyphen characters with hyphens.
-        // Happy must match this exactly, otherwise session files won't be found.
-        // See: https://github.com/slopus/happy/issues/563
+        // Orbit must match this exactly, otherwise session files won't be found.
+        // See: https://github.com/wwq20030329-oss/orbit/issues/563
 
         it('should replace @ symbols with hyphens (Google Drive paths)', () => {
             process.env.CLAUDE_CONFIG_DIR = '/test/home/.claude';

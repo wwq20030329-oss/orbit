@@ -7,7 +7,7 @@ import { getRandomBytes, deriveContentKeyPair, encodeBase64 } from './encryption
 import type { Config } from './config';
 
 function makeTestConfig(): Config {
-    const homeDir = mkdtempSync(join(tmpdir(), 'happy-agent-test-'));
+    const homeDir = mkdtempSync(join(tmpdir(), 'orbit-agent-test-'));
     return {
         serverUrl: 'https://api.cluster-fluster.com',
         homeDir,

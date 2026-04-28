@@ -79,9 +79,9 @@ function makeSession() {
             path: '/tmp',
             host: 'localhost',
             homeDir: '/home/user',
-            orbitHomeDir: '/home/user/.happy',
-            orbitLibDir: '/home/user/.happy/lib',
-            orbitToolsDir: '/home/user/.happy/tools'
+            orbitHomeDir: '/home/user/.orbit',
+            orbitLibDir: '/home/user/.orbit/lib',
+            orbitToolsDir: '/home/user/.orbit/tools'
         },
         metadataVersion: 0,
         agentState: null,

@@ -1,4 +1,4 @@
-# Handy Server - Development Guidelines
+# Orbit Server - Development Guidelines
 
 This document contains the development guidelines and instructions for the Orbit Server project. This guide OVERRIDES any default behaviors and MUST be followed exactly.
 
@@ -37,7 +37,7 @@ yarn standalone:dev
 This loads env from `.env.dev`, runs migrations with PGlite (embedded Postgres), and starts the server on port 3005. Data is stored in `./data/pglite/`.
 
 Only two env vars are required for standalone (both already in `.env.dev`):
-- `HANDY_MASTER_SECRET` - master secret for auth/encryption
+- `ORBIT_MASTER_SECRET` - master secret for auth/encryption
 - `PORT` - server port (default: 3005)
 
 ### Commands

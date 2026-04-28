@@ -11,9 +11,9 @@ function createBaseMetadata(): Metadata {
     path: '/repo',
     host: 'host',
     homeDir: '/home/user',
-    orbitHomeDir: '/home/user/.happy',
-    orbitLibDir: '/repo/.happy/lib',
-    orbitToolsDir: '/repo/.happy/tools',
+    orbitHomeDir: '/home/user/.orbit',
+    orbitLibDir: '/repo/.orbit/lib',
+    orbitToolsDir: '/repo/.orbit/tools',
   };
 }
 

@@ -12,17 +12,17 @@ Source of truth:
 
 ## Layer 2
 
-Layer 2 is full Happy product validation.
+Layer 2 is full Orbit product validation.
 
 Source of truth:
 
 - `./product.md`
 
-## happy-agent spawn
+## orbit-agent spawn
 
-`happy-agent spawn` is product-layer validation work.
+`orbit-agent spawn` is product-layer validation work.
 
 Source of truth:
 
-- `./happy-agent.md`
-- `packages/orbit-agent/src/happy-agent.integration.test.ts`
+- `./orbit-agent.md`
+- `packages/orbit-agent/src/orbit-agent.integration.test.ts`

@@ -11,17 +11,17 @@ import { initEncrypt } from "./modules/encrypt";
 import { loadFiles } from "./storage/files";
 
 function assertRequiredEnv() {
-    const secret = process.env.HANDY_MASTER_SECRET;
+    const secret = process.env.ORBIT_MASTER_SECRET;
     if (!secret || secret.trim().length < 32) {
         throw new Error(
-            'HANDY_MASTER_SECRET is required and must be at least 32 characters. ' +
+            'ORBIT_MASTER_SECRET is required and must be at least 32 characters. ' +
             'All token/encryption derivation depends on it — refusing to start with a weak or missing secret.'
         );
     }
     // In production, reject the well-known development placeholder.
     if (process.env.NODE_ENV === 'production' &&
         secret === 'your-super-secret-key-for-local-development') {
-        throw new Error('HANDY_MASTER_SECRET is set to the development placeholder in production. Refusing to start.');
+        throw new Error('ORBIT_MASTER_SECRET is set to the development placeholder in production. Refusing to start.');
     }
 }
 

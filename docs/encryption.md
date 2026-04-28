@@ -382,9 +382,9 @@ Messages are encrypted as `MessageContent` and then base64 encoded:
   "path": "...",
   "host": "...",
   "homeDir": "...",
-  "happyHomeDir": "...",
-  "happyLibDir": "...",
-  "happyToolsDir": "...",
+  "orbitHomeDir": "...",
+  "orbitLibDir": "...",
+  "orbitToolsDir": "...",
   "version": "...",
   "name": "...",
   "os": "...",
@@ -432,10 +432,10 @@ Messages are encrypted as `MessageContent` and then base64 encoded:
 {
   "host": "...",
   "platform": "...",
-  "happyCliVersion": "...",
+  "orbitCliVersion": "...",
   "homeDir": "...",
-  "happyHomeDir": "...",
-  "happyLibDir": "..."
+  "orbitHomeDir": "...",
+  "orbitLibDir": "..."
 }
 ```
 
@@ -495,7 +495,7 @@ graph LR
     end
 
     subgraph "Server"
-        Secret[HANDY_MASTER_SECRET]
+        Secret[ORBIT_MASTER_SECRET]
         KeyTree[KeyTree]
         Encrypt[Encrypt]
     end
@@ -515,7 +515,7 @@ The server encrypts certain third-party tokens at rest:
 - GitHub OAuth tokens (`GithubUser.token`).
 - Vendor service tokens (`ServiceAccountToken.token`).
 
-These are encrypted with a server-only KeyTree derived from `HANDY_MASTER_SECRET` and are not end-to-end encrypted.
+These are encrypted with a server-only KeyTree derived from `ORBIT_MASTER_SECRET` and are not end-to-end encrypted.
 
 ## Encoding conventions
 

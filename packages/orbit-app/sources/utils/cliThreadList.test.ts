@@ -303,7 +303,7 @@ describe('buildCliThreadToolSections', () => {
           machineId: 'machine-1',
           workingDirectory: '/Users/test/claudeapp/environments/data/envs/merry-grove/project',
           projectRoot: '/Users/test/claudeapp',
-          title: 'Fix happy path',
+          title: 'Fix orbit path',
           summary: null,
           updatedAt: 300,
         },

@@ -1,5 +1,5 @@
 /**
- * Library exports for slopus package
+ * Library exports for wwq20030329-oss package
  * 
  * This file provides the main API classes and types for external consumption
  * without the CLI-specific functionality.

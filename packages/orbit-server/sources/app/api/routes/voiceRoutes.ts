@@ -10,7 +10,7 @@ const VOICE_MAX_CONVERSATIONS = 100;    // Max conversations trackable per 30 da
 const ELEVEN_LABS_API = "https://api.elevenlabs.io/v1/convai";
 
 function deriveElevenUserId(orbitUserId: string): string {
-    const hmac = crypto.createHmac("sha256", process.env.HANDY_MASTER_SECRET!);
+    const hmac = crypto.createHmac("sha256", process.env.ORBIT_MASTER_SECRET!);
     hmac.update(orbitUserId);
     const digest = hmac.digest();
     const base64url = digest

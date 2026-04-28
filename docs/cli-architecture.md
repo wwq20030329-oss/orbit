@@ -101,7 +101,7 @@ graph LR
     E1 -.-> settings & access & daemon & logs
 ```
 
-Local state lives under `~/.orbit` (or `ORBIT_HOME_DIR`, with legacy `HAPPY_HOME_DIR` still supported):
+Local state lives under `~/.orbit` (or `ORBIT_HOME_DIR`, with legacy `ORBIT_HOME_DIR` still supported):
 - `settings.json`: onboarding and profile settings (validated/migrated).
 - `access.key`: local key material for encryption/auth.
 - `daemon.state.json`: daemon PID + control port + version.

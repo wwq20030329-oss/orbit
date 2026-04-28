@@ -46,8 +46,8 @@ const mocks = vi.hoisted(() => {
     mockGetOrCreateSession: vi.fn(async () => ({ id: 'session-1' })),
     mockSetupOfflineReconnection: vi.fn(),
     mockNotifyDaemonSessionStarted: vi.fn(async () => ({ error: null })),
-    mockStartHappyServer: vi.fn(),
-    mockProjectPath: vi.fn(() => '/tmp/happy'),
+    mockStartOrbitServer: vi.fn(),
+    mockProjectPath: vi.fn(() => '/tmp/orbit'),
     mockSetBackend: vi.fn(),
     mockKillRegister: vi.fn((_rpc: unknown, handler: () => Promise<void>) => {
       killHandler = handler;
@@ -83,7 +83,7 @@ vi.mock('@/api/api', () => ({
 }));
 
 vi.mock('@/daemon/run', () => ({
-  initialMachineMetadata: { host: 'host', platform: 'darwin', orbitCliVersion: 'test', homeDir: '/tmp', orbitHomeDir: '/tmp/.happy', orbitLibDir: '/tmp/happy' },
+  initialMachineMetadata: { host: 'host', platform: 'darwin', orbitCliVersion: 'test', homeDir: '/tmp', orbitHomeDir: '/tmp/.orbit', orbitLibDir: '/tmp/orbit' },
 }));
 
 vi.mock('@/utils/setupOfflineReconnection', () => ({
@@ -99,7 +99,7 @@ vi.mock('@/claude/registerKillSessionHandler', () => ({
 }));
 
 vi.mock('@/claude/utils/startOrbitMcpServer', () => ({
-  startOrbitMcpServer: mocks.mockStartHappyServer,
+  startOrbitMcpServer: mocks.mockStartOrbitServer,
 }));
 
 vi.mock('@/projectPath', () => ({
@@ -215,7 +215,7 @@ describe('runAcp', () => {
       reconnectionHandle: { cancel: vi.fn() },
       isOffline: false,
     }));
-    mocks.mockStartHappyServer.mockResolvedValue({
+    mocks.mockStartOrbitServer.mockResolvedValue({
       url: 'http://127.0.0.1:9876',
       stop: vi.fn(),
     });
@@ -496,9 +496,9 @@ describe('runAcp', () => {
       path: '/repo',
       host: 'host',
       homeDir: '/home/user',
-      orbitHomeDir: '/home/user/.happy',
-      orbitLibDir: '/repo/.happy/lib',
-      orbitToolsDir: '/repo/.happy/tools',
+      orbitHomeDir: '/home/user/.orbit',
+      orbitLibDir: '/repo/.orbit/lib',
+      orbitToolsDir: '/repo/.orbit/tools',
     };
     const appliedMetadata = metadataHandlers.map((handler) => handler(baseMetadata));
 

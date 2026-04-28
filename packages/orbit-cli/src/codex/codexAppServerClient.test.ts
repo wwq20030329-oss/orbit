@@ -1126,7 +1126,7 @@ describe('CodexAppServerClient sandbox integration', () => {
                             params: {
                                 threadId: 'thread-raw-7',
                                 turnId: 'turn-raw-7',
-                                serverName: 'happy',
+                                serverName: 'orbit',
                                 mode: 'form',
                                 _meta: {
                                     codex_approval_kind: 'mcp_tool_call',
@@ -1134,7 +1134,7 @@ describe('CodexAppServerClient sandbox integration', () => {
                                     tool_description: 'Change the title of the current chat session',
                                     tool_params: { title: 'Casual Greeting' },
                                 },
-                                message: 'Allow the happy MCP server to run tool "change_title"?',
+                                message: 'Allow the orbit MCP server to run tool "change_title"?',
                                 requestedSchema: {
                                     type: 'object',
                                     properties: {},
@@ -1168,10 +1168,10 @@ describe('CodexAppServerClient sandbox integration', () => {
 
         expect(approvals[0]).toEqual(expect.objectContaining({
             type: 'mcp',
-            callId: 'happy:77',
+            callId: 'orbit:77',
             toolName: 'change_title',
             input: { title: 'Casual Greeting' },
-            serverName: 'happy',
+            serverName: 'orbit',
         }));
         expect(requests).toEqual(expect.arrayContaining([
             expect.objectContaining({

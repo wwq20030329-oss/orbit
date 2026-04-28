@@ -11,7 +11,7 @@ import { displayQRCode } from './qrcode.js'
 
 describe('QR Code Utility', () => {
   it('should render a small QR code without throwing', () => {
-    const testUrl = 'handy://test'
+    const testUrl = 'orbit://test'
     expect(() => displayQRCode(testUrl)).not.toThrow()
   })
 }) 

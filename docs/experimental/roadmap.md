@@ -1,6 +1,6 @@
 # Roadmap
 
-This file is the cross-product execution plan for the current Happy push.
+This file is the cross-product execution plan for the current Orbit push.
 
 # Key Milestones
 
@@ -25,21 +25,21 @@ This file is the cross-product execution plan for the current Happy push.
 - "Background separation like conductor" is not a standalone requirement unless it naturally falls out of simplifying the layout.
 - Use Expo best practices for both native and web, even when web is the only surface being manually validated.
 
-## P0. Happy-agent orchestration and task fan-out
+## P0. orbit-agent orchestration and task fan-out
 
-Goal: make `happy-agent` the reliable control plane for dispatching and monitoring the rest of this roadmap.
+Goal: make `orbit-agent` the reliable control plane for dispatching and monitoring the rest of this roadmap.
 
 ### Required outcomes
 
-- Verify the current `happy-agent` implementation on the real stack from this current environment before using it to spawn work for the rest of the roadmap.
-- Fix any blocking issues in the current branch first, rather than assuming `happy-agent` is ready and immediately branching into many worktrees.
-- Ensure that a spawned agent session appears in the same authenticated Happy environment as the current session, so the user can see those chats later without switching accounts or contexts.
-- Use `happy-agent` to create worktrees and spawn new agent sessions only after the base flow is proven locally.
+- Verify the current `orbit-agent` implementation on the real stack from this current environment before using it to spawn work for the rest of the roadmap.
+- Fix any blocking issues in the current branch first, rather than assuming `orbit-agent` is ready and immediately branching into many worktrees.
+- Ensure that a spawned agent session appears in the same authenticated Orbit environment as the current session, so the user can see those chats later without switching accounts or contexts.
+- Use `orbit-agent` to create worktrees and spawn new agent sessions only after the base flow is proven locally.
 - After the base flow is stable, scale to parallel task fan-out, with a target of roughly 10 concurrent agents only if monitoring and reporting are already reliable.
 
 ### Concrete requirements
 
-- Finish and validate `happy-agent spawn`, mirroring the app's `spawn-happy-session` flow.
+- Finish and validate `orbit-agent spawn`, mirroring the app's `spawn-orbit-session` flow.
 - Spawn must create or choose a worktree for the task rather than reusing the current working tree.
 - Spawned session metadata must clearly retain:
   - machine
@@ -48,7 +48,7 @@ Goal: make `happy-agent` the reliable control plane for dispatching and monitori
   - agent flavor
   - session id
   - thread id or equivalent provider metadata when available
-- Test the current auth path and ensure the agent runs under the same Happy account/environment as the current session.
+- Test the current auth path and ensure the agent runs under the same Orbit account/environment as the current session.
 - If different privilege models are needed, support that explicitly instead of hiding it. The likely split is:
   - same-account control for normal spawned agents
   - elevated flow only where strictly necessary
@@ -76,12 +76,12 @@ Goal: make `happy-agent` the reliable control plane for dispatching and monitori
 - Prove the flow in the current environment first:
   1. authenticate or reuse existing auth in the current env
   2. spawn a real agent into a new worktree
-  3. confirm the session is visible in the same Happy environment
+  3. confirm the session is visible in the same Orbit environment
   4. send work to it
   5. monitor it to idle
   6. collect a real verification link
   7. write the report back into this roadmap
-- Only after this passes should the other roadmap items be delegated through `happy-agent`.
+- Only after this passes should the other roadmap items be delegated through `orbit-agent`.
 
 ## P1. Control-flow, permissions, and protocol bugs
 
@@ -100,8 +100,8 @@ Goal: remove the broken session-control paths that currently make remote agent m
 - Fix "Yes, don't ask again" / session-scoped approval behavior for Claude Code permissions.
 - Fix Claude plan proposals that do not show approve / deny buttons.
   - Repro session:
-    - worktree: `~/projects/happy/happy/.dev/worktree/wise-river`
-    - Happy session id: `cmmbujpkq03iey7lcxyd9fqaw`
+    - worktree: `~/projects/orbit/orbit/.dev/worktree/wise-river`
+    - Orbit session id: `cmmbujpkq03iey7lcxyd9fqaw`
 - Fix Codex sandbox behavior where work is still blocked in non-`yolo` modes when it should be allowed by the selected permission mode.
 - Fix Codex session stopping — currently unreliable / painful.
 - Fix Codex sessions appearing stuck in "thinking" indefinitely with no updates — may be a frontend rendering issue where updates aren't being pushed to the session view.
@@ -117,7 +117,7 @@ Goal: remove the broken session-control paths that currently make remote agent m
   - abort / stop and explain
 - Ensure permission state is not duplicated, dropped, or shown with the wrong buttons for Claude vs Codex.
 - Ensure provider/session metadata needed for orchestration is stored clearly enough to inspect and debug:
-  - Happy session id
+  - Orbit session id
   - provider session/thread id when available
   - flavor / agent type
   - machine / path / worktree context
@@ -178,7 +178,7 @@ Goal: make new-session composition feel like the regular chat composer instead o
 
 ## P2.5. PI-style agent controls, fork, and resume
 
-Goal: make active-session agent controls feel first-class instead of scattered across info screens and one-off flows. The control surface should feel closer to a PI-style agent UI while still preserving Happy's regular chat input shape.
+Goal: make active-session agent controls feel first-class instead of scattered across info screens and one-off flows. The control surface should feel closer to a PI-style agent UI while still preserving Orbit's regular chat input shape.
 
 ### Required outcomes
 
@@ -190,7 +190,7 @@ Goal: make active-session agent controls feel first-class instead of scattered a
   - model / effort or thinking level when relevant
   - machine / project path / worktree
   - provider thread or resume context when available
-- The design should borrow from PI-style control surfaces where useful, but should still fit Happy's chat-first product shape.
+- The design should borrow from PI-style control surfaces where useful, but should still fit Orbit's chat-first product shape.
 
 ### Concrete requirements
 
@@ -291,7 +291,7 @@ Goal: make file references in chat actually useful and make file review/attachme
 
 ## User Research
 
-Goal: talk to users regularly to understand why they use Happy, what their day-to-day problems are, and what to build next.
+Goal: talk to users regularly to understand why they use Orbit, what their day-to-day problems are, and what to build next.
 
 ### Outreach
 
@@ -306,7 +306,7 @@ Goal: talk to users regularly to understand why they use Happy, what their day-t
 
 ### What to learn
 
-- Why they started using Happy
+- Why they started using Orbit
 - What their day-to-day workflow looks like
 - What's painful or missing
 
@@ -326,9 +326,9 @@ Goal: simple pipeline to promote Orbit and maintain the public repo presence.
 - Respond to community issues and PRs
 - Use issues as a lightweight public roadmap signal
 
-## Happy Evolve (self-modifying UI)
+## Orbit Evolve (self-modifying UI)
 
-Goal: make it possible to customize any part of the Happy interface from within Happy itself. The app modifies its own frontend live.
+Goal: make it possible to customize any part of the Orbit interface from within Orbit itself. The app modifies its own frontend live.
 
 ### Approach
 
@@ -339,11 +339,11 @@ Goal: make it possible to customize any part of the Happy interface from within 
 
 ### For later
 
-- Pull in sync engine idea from Kirill's Happy fork where the sync engine is factored out
+- Pull in sync engine idea from Kirill's Orbit fork where the sync engine is factored out
 
 ## Dynamic Session Icons
 
-Goal: the brutalist icons are a big part of what makes Happy feel good to use — lean into that.
+Goal: the brutalist icons are a big part of what makes Orbit feel good to use — lean into that.
 
 - Generate custom brutalist-style vector icons per session based on the topic
 - Keep the same aesthetic — bold, minimal, appealing
@@ -352,7 +352,7 @@ Goal: the brutalist icons are a big part of what makes Happy feel good to use �
 
 ## Session Forking
 
-Goal: right-click a session to fork it — clone the session in Happy + use the resume session API to fork the conversation on the machine. Lets you explicitly parallelize and control both branches.
+Goal: right-click a session to fork it — clone the session in Orbit + use the resume session API to fork the conversation on the machine. Lets you explicitly parallelize and control both branches.
 
 ### Flow
 
@@ -362,22 +362,22 @@ Goal: right-click a session to fork it — clone the session in Happy + use the 
   - ability to pick a different worktree
   - ability to pick a different agent
   - all the usual composer controls (model, permissions, path, etc.)
-- On submit: clones the session in Happy, calls resume session API on the machine to fork the underlying conversation
+- On submit: clones the session in Orbit, calls resume session API on the machine to fork the underlying conversation
 
 ## Session Protocol (UNDER REVIEW — FROZEN)
 
-The session protocol (`role: 'session'` envelopes in `happy-wire/src/sessionProtocol.ts`) is **not used in production** and should not be used in dev environments either until we revisit the design. The legacy protocol (`role: 'user'` / `role: 'agent'`) is the active code path everywhere.
+The session protocol (`role: 'session'` envelopes in `orbit-wire/src/sessionProtocol.ts`) is **not used in production** and should not be used in dev environments either until we revisit the design. The legacy protocol (`role: 'user'` / `role: 'agent'`) is the active code path everywhere.
 
 ### Status
 
-- Types are frozen in `happy-wire` — no new consumers
+- Types are frozen in `orbit-wire` — no new consumers
 - Dev env was using it but should stop
 - Production has never shipped it
 
 ### Before resuming
 
 - Look at how pi.dev standardizes their agent protocol — we may want to align with or build on that instead of rolling our own envelope format
-- Consider whether `happy-wire` should even own this, or if protocol definition belongs closer to the CLI / agent layer
+- Consider whether `orbit-wire` should even own this, or if protocol definition belongs closer to the CLI / agent layer
 - The current design may be over-engineered for what we actually need
 
 ## Deferred / later
@@ -391,7 +391,7 @@ The session protocol (`role: 'session'` envelopes in `happy-wire/src/sessionProt
   - Linear integration
   - more agents (`opencode`, `openclaw`, `conductor`)
   - Claude Code team of agents
-  - software factory / `happy-agent`
+  - software factory / `orbit-agent`
 
 ## Native guardrail when native validation is needed later
 

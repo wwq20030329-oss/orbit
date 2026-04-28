@@ -45,7 +45,7 @@ POST /v1/auth { publicKey, challenge, signature }
   │
   ├─ server verifies signature (tweetnacl)
   ├─ Account.upsert({ where: { publicKey } })  →  CUID
-  ├─ auth.createToken(CUID)  →  JWT (signed with HANDY_MASTER_SECRET)
+  ├─ auth.createToken(CUID)  →  JWT (signed with ORBIT_MASTER_SECRET)
   │
   ▼
 Client stores JWT, sends as Authorization header on all requests
@@ -67,6 +67,6 @@ To derive an ElevenLabs user ID from an Orbit CUID locally:
 
 ```python
 import hmac, hashlib, base64
-digest = hmac.new(MASTER_SECRET.encode(), happy_cuid.encode(), hashlib.sha256).digest()
+digest = hmac.new(MASTER_SECRET.encode(), orbit_cuid.encode(), hashlib.sha256).digest()
 eleven_id = "u_" + base64.b64encode(digest).decode().replace("+","-").replace("/","_").rstrip("=")
 ```

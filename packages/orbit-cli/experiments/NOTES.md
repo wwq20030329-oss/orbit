@@ -36,7 +36,7 @@ using `initialize` -> `thread/start` -> `turn/start`.
 What this demonstrates:
 - The wire-level request/notification flow for app-server
 - That a turn completes (`task_complete`/`turn_aborted`) end-to-end
-- A minimal smoke test for validating protocol assumptions without Happy CLI
+- A minimal smoke test for validating protocol assumptions without Orbit CLI
 
 ## Status
 
