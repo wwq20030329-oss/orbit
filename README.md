@@ -1,97 +1,83 @@
-# Orbit
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="/.github/logotype-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="/.github/logotype-light.png">
+    <img src="/.github/logotype-dark.png" width="400" alt="Orbit">
+  </picture>
+</div>
 
-Remote control for Claude Code, Codex, and Gemini from mobile, web, and CLI.
+<h1 align="center">
+  Orbit: Remote Control for Claude Code & Codex
+</h1>
 
-Orbit lets you start an AI coding session on your computer, follow it from your phone, approve tool permissions, stop a running turn, and resume work without losing the thread. The project is built around encrypted sync, native CLI compatibility, and a phone UI that feels like a real coding companion rather than a status monitor.
+<h4 align="center">
+Operate Claude Code or Codex from anywhere with end-to-end encryption.
+</h4>
 
-## What Orbit Does
+<div align="center">
+  
+[🌐 **Web App**](https://app.orbit.engineering) • [📦 **Repository**](https://github.com/wwq20030329-oss/orbit) • [📚 **Documentation**](https://github.com/wwq20030329-oss/orbit/tree/main/docs)
 
-- **Mobile remote control**: supervise active coding sessions from iOS, Android, or web.
-- **Native CLI support**: wrap Claude Code, Codex, and Gemini sessions from one local CLI.
-- **Live session visibility**: stream messages, tool calls, permission requests, and run state.
-- **Fast handoff**: move between computer and phone while preserving session context.
-- **Encrypted sync**: keep session data encrypted before it leaves your device.
-- **TrollStore-friendly builds**: generate a `.tipa` for sideloading local iOS builds.
+</div>
 
-## Install
+<img width="5178" height="2364" alt="github" src="/.github/header.png" />
+
+
+<h3 align="center">
+Step 1: Download App
+</h3>
+
+<div align="center">
+Orbit mobile builds are being prepared. For now, use the web app and local CLI in this repository.
+</div>
+
+<h3 align="center">
+Step 2: Install Orbit CLI on your computer
+</h3>
 
 ```bash
 npm install -g orbit
 ```
 
-Start a session from your computer:
+<h3 align="center">
+Step 3: Start using `orbit` instead of `claude` or `codex`
+</h3>
 
 ```bash
-orbit claude
+orbit
+# or
 orbit codex
-orbit gemini
 ```
 
-Or use the remote agent control CLI:
+## How does it work?
 
-```bash
-orbit-agent auth login
-orbit-agent sessions
-orbit-agent send <session-id> "continue"
-```
+On your computer, run `orbit` instead of `claude`, or `orbit codex` instead of `codex`, to start your agent through Orbit. Orbit focuses on encrypted remote control, session visibility, device handoff, and cloud-backed synchronization.
 
-## Mobile App
+## Why Orbit?
 
-The Expo app lives in `packages/orbit-app`.
+- 📱 **Mobile access to Claude Code and Codex** - Check what your AI is building while away from your desk
+- 🔔 **Push notifications** - Get alerted when Claude Code and Codex needs permission or encounters errors  
+- ⚡ **Switch devices instantly** - Take control from phone or desktop with one keypress
+- 🔐 **End-to-end encrypted** - Your code never leaves your devices unencrypted
+- 🛠️ **Open source** - Audit the code yourself. No telemetry, no tracking
 
-For local iOS TrollStore builds:
+## 📦 Project Components
 
-```bash
-bash packages/orbit-app/scripts/build-tipa.sh
-```
+- **Orbit App** - Web UI + mobile client (Expo)
+- **Orbit CLI** - Command-line interface for Claude Code and Codex
+- **Orbit Agent** - Remote agent control CLI (create, send, monitor sessions)
+- **Orbit Server** - Backend server for encrypted sync
 
-The generated package is copied to:
+## 🏠 Who We Are
 
-```text
-/Users/wwq/Desktop/Orbit.tipa
-```
+Orbit is being rebuilt around one idea: you should be able to supervise, approve, and hand off coding agents from anywhere without feeling like you are using a second-class companion app.
 
-## Repository Layout
+## 📚 Documentation & Contributing
 
-- `packages/orbit-app`: Expo / React Native mobile and web client.
-- `packages/orbit-cli`: local CLI wrapper for native coding agents.
-- `packages/orbit-agent`: remote control CLI for existing Orbit sessions.
-- `packages/orbit-server`: encrypted sync, presence, auth, and live session backend.
-- `packages/orbit-wire`: shared protocol and message types.
-- `docs`: architecture notes, protocol docs, and development plans.
-
-## Development
-
-Install dependencies:
-
-```bash
-corepack yarn install
-```
-
-Run focused checks:
-
-```bash
-corepack yarn -s workspace orbit-app typecheck
-corepack yarn -s workspace orbit-app test
-```
-
-Build the iOS `.tipa`:
-
-```bash
-bash packages/orbit-app/scripts/build-tipa.sh
-unzip -t /Users/wwq/Desktop/Orbit.tipa
-```
-
-## Current Product Focus
-
-Orbit is focused on making phone-based AI coding control feel calm and continuous:
-
-- inline conversation run state instead of scattered connection badges
-- send button becomes stop while a turn is running
-- floating settings and project session surfaces
-- native live mirror separated from session control ability
-- clearer Claude / Codex / Gemini session metadata
+- **[Documentation](https://github.com/wwq20030329-oss/orbit/tree/main/docs)** - Learn how Orbit is structured today
+- **[Contributing Guide](docs/CONTRIBUTING.md)** - How to contribute, PR guidelines, and development setup
+- **[Project Repository](https://github.com/wwq20030329-oss/orbit)** - Source, issues, and ongoing roadmap
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT License - see [LICENSE](LICENSE) for details.

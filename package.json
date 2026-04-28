@@ -4,8 +4,7 @@
     "scripts": {
         "cli": "yarn workspace orbit cli",
         "release": "node ./scripts/release.cjs",
-        "web": "yarn workspace happy-app web",
-        "app-logs": "yarn workspace happy-app-logs start",
+        "app-logs": "yarn workspace orbit-app-logs start",
         "postinstall": "node ./scripts/postinstall.cjs",
         "env:new": "tsx environments/environments.ts new",
         "env:list": "tsx environments/environments.ts list",
@@ -13,8 +12,9 @@
         "env:remove": "tsx environments/environments.ts remove",
         "env:current": "tsx environments/environments.ts current",
         "env:server": "tsx environments/environments.ts run server",
-        "env:web": "tsx environments/environments.ts run web",
         "env:ios": "tsx environments/environments.ts run ios",
+        "env:ios:sim": "tsx environments/environments.ts run ios",
+        "env:ios:rebuild": "tsx environments/environments.ts run ios --rebuild",
         "env:android": "tsx environments/environments.ts run android",
         "env:cli": "tsx environments/environments.ts run cli",
         "env:seed": "tsx environments/environments.ts seed",
@@ -25,17 +25,16 @@
     },
     "workspaces": {
         "packages": [
-            "packages/happy-app",
-            "packages/happy-agent",
-            "packages/happy-cli",
-            "packages/happy-server",
-            "packages/happy-wire",
-            "packages/happy-app-logs"
+            "packages/orbit-app",
+            "packages/orbit-agent",
+            "packages/orbit-cli",
+            "packages/orbit-server",
+            "packages/orbit-wire",
+            "packages/orbit-app-logs"
         ],
         "nohoist": [
             "**/zod",
             "**/react",
-            "**/react-dom",
             "**/react-native",
             "**/react-native/**",
             "**/react-native-edge-to-edge/**",

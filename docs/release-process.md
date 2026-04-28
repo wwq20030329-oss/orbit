@@ -2,21 +2,21 @@
 
     Component   How to release                  Where it goes
     ---------   --------------                  -------------
-    CLI         yarn release happy-cli           npm (happy)
-    Mobile      yarn release (from happy-app)    App Store, Google Play, TestFlight
-    Web         TeamCity (Lab_HappyWeb)          docker.korshakov.com/happy-app -> K8s
-    Server      TeamCity (Lab_HappyServer)       docker.korshakov.com/handy-server -> K8s
+    CLI         yarn release orbit-cli           npm (orbit)
+    Mobile      yarn release (from orbit-app)    Orbit mobile variants
+    Web         Vercel / static hosting          Orbit web app
+    Server      Docker / self-host / cloud       Orbit sync backend
 
 
 ## CLI
 
-    Package          packages/happy-cli
-    npm name         happy (install via "npm i -g happy")
+    Package          packages/orbit-cli
+    npm name         orbit (install via "npm i -g orbit")
     Versioning       release-it, tags v{version}, branches: main or beta
     npm dist-tag     beta
 
     yarn release                   Interactive workspace picker
-    yarn release happy-cli         Release CLI directly
+    yarn release orbit-cli         Release CLI directly
 
 Flow: build (pkgroll) -> test (vitest) -> bump version -> commit -> tag -> npm publish -> GitHub release
 
@@ -26,10 +26,10 @@ Release notes are AI-generated via `.release-it.notes.js`.
 
 ## Mobile
 
-    Package          packages/happy-app (Expo SDK 54 / React Native 0.81.4)
-    3 variants       development (com.slopus.happy.dev)
-                     preview     (com.slopus.happy.preview)
-                     production  (com.ex3ndr.happy)
+    Package          packages/orbit-app (Expo SDK 54 / React Native 0.81.4)
+    3 variants       development (com.orbit.app.dev)
+                     preview     (com.orbit.app.preview)
+                     production  (com.orbit.app)
 
 ### Commands
 
@@ -59,43 +59,41 @@ Runtime version "20" - bump when native code changes to invalidate OTA.
 
 ### App Store Connect
 
-    Apple ID       steve@bulkovo.com
-    ASC App ID     126165711
     Team ID        466DQWDR8C
 
 
 ## Web
 
-    Package          packages/happy-app (same Expo app, web export)
+    Package          packages/orbit-app (same Expo app, web export)
     Dockerfile       Dockerfile.webapp
-    Image            docker.korshakov.com/happy-app:{version}
-    K8s              packages/happy-app/deploy/happy-app.yaml (3 replicas, nginx on port 80)
+    Image            orbit web container
+    K8s              deployment target TBD
 
 Build: `expo export --platform web` -> nginx:alpine static serve.
 Build args: `POSTHOG_API_KEY`, `REVENUE_CAT_STRIPE`.
 
-CI/CD: TeamCity `Lab_HappyWeb` (config in UI, not in repo) -> Docker build -> push -> K8s deploy.
+CI/CD: build static web assets from the Expo app and deploy them to the current Orbit web host.
 GitHub Actions `typecheck.yml` runs typecheck on push/PR to main.
 
 
 ## Server
 
-    Package          packages/happy-server
+    Package          packages/orbit-server
     Dockerfile       Dockerfile.server (production), Dockerfile (standalone w/ PGlite)
-    Image            docker.korshakov.com/handy-server:{version}
-    K8s              packages/happy-server/deploy/handy.yaml (1 replica, port 3005)
+    Image            orbit-server:{version}
+    K8s              deployment target TBD
 
-Build: node:20 + python3 + ffmpeg, builds happy-wire + happy-server.
-Secrets from Vault: handy-db, handy-master, handy-github, handy-files, handy-e2b, handy-revenuecat, handy-elevenlabs.
-Redis: happy-redis StatefulSet (redis:7-alpine, 1Gi persistent volume).
+Build: node:20 + ffmpeg, builds @orbit/wire + orbit-server.
+Secrets and infrastructure are environment-specific.
+Redis is optional depending on the deployment profile.
 Metrics: Prometheus on port 9090 at /metrics.
 
-CI/CD: TeamCity `Lab_HappyServer` (config in UI, not in repo) -> Docker build -> push -> K8s deploy.
+CI/CD: build the server image and deploy it to the selected Orbit environment.
 
 
 ## Docs
 
-    Site             happy.engineering (GitHub Pages)
-    Repo             github.com/slopus/slopus.github.io
+    Site             current Orbit documentation entrypoint
+    Repo             github.com/wwq20030329-oss/orbit
 
-Separate repo, not part of this monorepo.
+Docs currently live in this monorepo under `docs/`.

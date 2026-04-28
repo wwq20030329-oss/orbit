@@ -12,10 +12,10 @@ This document covers the local environment manager in [`environments/environment
 
 Each environment injects its own:
 
-- `HAPPY_HOME_DIR`
-- `HAPPY_SERVER_URL`
-- `HAPPY_WEBAPP_URL`
-- `HAPPY_PROJECT_DIR`
+- `ORBIT_HOME_DIR`
+- `ORBIT_SERVER_URL`
+- `ORBIT_WEBAPP_URL`
+- `ORBIT_PROJECT_DIR`
 - Expo/server port settings
 - dev auth values when seeded
 
@@ -28,7 +28,7 @@ history still need a later fixture upgrade.
 
 ## `yarn env:cli` Is A Passthrough
 
-`yarn env:cli` forwards extra arguments directly to `happy`.
+`yarn env:cli` forwards extra arguments directly to `orbit`.
 
 Examples:
 
@@ -44,7 +44,7 @@ This is equivalent to sourcing the environment and running the CLI manually:
 
 ```bash
 source environments/data/envs/<name>/env.sh
-happy daemon status
+orbit daemon status
 ```
 
 ## Why `env:cli` Exists
@@ -59,7 +59,7 @@ If you want a lower-level, shell-native workflow, use the generated env file dir
 
 ```bash
 source environments/data/envs/<name>/env.sh
-happy
+orbit
 ```
 
 ## Restarting The Current Environment Daemon
@@ -75,6 +75,6 @@ Or:
 
 ```bash
 source environments/data/envs/<name>/env.sh
-happy daemon stop
-happy daemon start
+orbit daemon stop
+orbit daemon start
 ```

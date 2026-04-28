@@ -1,0 +1,592 @@
+import { randomUUID } from 'node:crypto';
+
+import { ApiClient } from '@/api/api';
+import { logger } from '@/ui/logger';
+import { loop } from '@/claude/loop';
+import { AgentState } from '@/api/types';
+import { Credentials, readSettings } from '@/persistence';
+import { EnhancedMode, PermissionMode } from './loop';
+import { MessageQueue2 } from '@/utils/MessageQueue2';
+import { hashObject } from '@/utils/deterministicJson';
+import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
+import { extractSDKMetadataAsync } from '@/claude/sdk/metadataExtractor';
+import { parseSpecialCommand } from '@/parsers/specialCommands';
+import { getEnvironmentInfo } from '@/ui/doctor';
+import { configuration } from '@/configuration';
+import { notifyDaemonSessionStarted } from '@/daemon/controlClient';
+import { initialMachineMetadata } from '@/daemon/run';
+import { startOrbitMcpServer } from '@/claude/utils/startOrbitMcpServer';
+import { startHookServer } from '@/claude/utils/startHookServer';
+import { generateHookSettingsFile, cleanupHookSettingsFile } from '@/claude/utils/generateHookSettings';
+import { registerKillSessionHandler } from './registerKillSessionHandler';
+import { startOfflineReconnection, connectionState } from '@/utils/serverConnectionErrors';
+import { claudeLocal } from '@/claude/claudeLocal';
+import { createSessionScanner } from '@/claude/utils/sessionScanner';
+import { Session } from './session';
+import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode } from './utils/permissionMode';
+import { sanitizeInheritedClaudeEnv } from './utils/sanitizeInheritedClaudeEnv';
+import { withControlledByUser } from '@/utils/agentState';
+import { createBaseSessionMetadata } from '@/utils/createSessionMetadata';
+import { shouldReportSessionStartToDaemon } from '@/utils/shouldReportSessionStartToDaemon';
+import { applyClaudeSessionConfigMetadata, hasClaudeSessionConfigChange } from './sessionConfigMetadata';
+import {
+    buildNativeCliResumeSessionTag,
+    getRequestedNativeCliHistoryReplay,
+    markNativeCliHistoryImported,
+    replayNativeCliHistoryIfRequested,
+    shouldReplayNativeCliHistory,
+} from '@/history/nativeCliHistoryReplay';
+
+/** JavaScript runtime to use for spawning Claude Code */
+export type JsRuntime = 'node' | 'bun'
+
+export interface StartOptions {
+    model?: string
+    permissionMode?: PermissionMode
+    startingMode?: 'local' | 'remote'
+    shouldStartDaemon?: boolean
+    claudeEnvVars?: Record<string, string>
+    claudeArgs?: string[]
+    startedBy?: 'daemon' | 'terminal'
+    noSandbox?: boolean
+    /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
+    jsRuntime?: JsRuntime
+}
+
+export async function runClaude(credentials: Credentials, options: StartOptions = {}): Promise<void> {
+    logger.debug(`[CLAUDE] ===== CLAUDE MODE STARTING =====`);
+    logger.debug(`[CLAUDE] This is the Claude agent, NOT Gemini`);
+
+    const strippedInheritedEnv = sanitizeInheritedClaudeEnv(options.claudeEnvVars);
+    if (strippedInheritedEnv.length > 0) {
+        logger.debug('[CLAUDE] Removed inherited runtime overrides that would redirect Claude to a foreign provider', {
+            strippedInheritedEnv,
+        });
+    }
+
+    const baseClaudeEnvVars = process.env.CLAUDE_CODE_EFFORT_LEVEL !== undefined
+        && options.claudeEnvVars?.CLAUDE_CODE_EFFORT_LEVEL === undefined
+        ? {
+            ...options.claudeEnvVars,
+            CLAUDE_CODE_EFFORT_LEVEL: process.env.CLAUDE_CODE_EFFORT_LEVEL,
+        }
+        : options.claudeEnvVars;
+    
+    const workingDirectory = process.cwd();
+    // Log environment info at startup
+    logger.debugLargeJson('[START] Orbit process started', getEnvironmentInfo());
+    logger.debug(`[START] Options: startedBy=${options.startedBy}, startingMode=${options.startingMode}`);
+
+    // Validate daemon spawn requirements - fail fast on invalid config
+    if (options.startedBy === 'daemon' && options.startingMode === 'local') {
+        throw new Error('Daemon-spawned sessions cannot use local/interactive mode. Use --orbit-starting-mode remote or spawn sessions directly from terminal.');
+    }
+
+    // Set backend for offline warnings (before any API calls)
+    connectionState.setBackend('Claude');
+
+    // Create session service
+    const api = await ApiClient.create(credentials);
+    const startupRequestTimeoutMs = configuration.startupRequestTimeoutMs;
+    const nativeReplayRequest = getRequestedNativeCliHistoryReplay();
+    const sessionTag = nativeReplayRequest
+        ? buildNativeCliResumeSessionTag(nativeReplayRequest)
+        : randomUUID();
+
+    // Create a new session
+    let state: AgentState = {};
+
+    // Get machine ID from settings (should already be set up)
+    const settings = await readSettings();
+    let machineId = settings?.machineId
+    const sandboxConfig = options.noSandbox ? undefined : settings?.sandboxConfig;
+    const sandboxEnabled = Boolean(sandboxConfig?.enabled);
+    const initialPermissionMode = applySandboxPermissionPolicy(
+        resolveInitialClaudePermissionMode(options.permissionMode, options.claudeArgs),
+        sandboxEnabled,
+    );
+    const dangerouslySkipPermissions =
+        initialPermissionMode === 'bypassPermissions' ||
+        initialPermissionMode === 'yolo' ||
+        sandboxEnabled ||
+        Boolean(options.claudeArgs?.includes('--dangerously-skip-permissions'));
+    if (!machineId) {
+        console.error(`[START] No machine ID found in settings, which is unexpected since authAndSetupMachineIfNeeded should have created it. Please report this issue on https://github.com/wwq20030329-oss/orbit/issues`);
+        process.exit(1);
+    }
+    logger.debug(`Using machineId: ${machineId}`);
+
+    // Do not block Claude startup on machine registration. If the network or
+    // backend is slow, we can reconcile machine state in the background.
+    void api.getOrCreateMachine({
+        machineId,
+        metadata: initialMachineMetadata,
+        timeoutMs: startupRequestTimeoutMs,
+        suppressNetworkFailure: true,
+    }).catch((error) => {
+        logger.debug('[START] Machine registration deferred/failed during startup:', error);
+    });
+
+    const metadata = applyClaudeSessionConfigMetadata(createBaseSessionMetadata({
+        flavor: 'claude',
+        machineId,
+        startedBy: options.startedBy,
+        sandbox: sandboxConfig,
+        dangerouslySkipPermissions,
+        summaryText: nativeReplayRequest?.summary ?? nativeReplayRequest?.title ?? null,
+        nativeHistorySource: nativeReplayRequest
+            ? {
+                tool: nativeReplayRequest.tool,
+                backendId: nativeReplayRequest.backendId,
+            }
+            : null,
+    }), {
+        model: options.model,
+        permissionMode: initialPermissionMode,
+        effortLevel: baseClaudeEnvVars?.CLAUDE_CODE_EFFORT_LEVEL,
+    });
+    const response = await api.getOrCreateSession({
+        tag: sessionTag,
+        metadata,
+        state,
+        timeoutMs: startupRequestTimeoutMs,
+        suppressNetworkFailure: true,
+    });
+
+    // Handle server unreachable case - run Claude locally with hot reconnection
+    // Note: connectionState.notifyOffline() was already called by api.ts with error details
+    if (!response) {
+        let offlineSessionId: string | null = null;
+
+        const reconnection = startOfflineReconnection({
+            serverUrl: configuration.serverUrl,
+            onReconnected: async () => {
+                const resp = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+                if (!resp) throw new Error('Server unavailable');
+                const session = api.sessionSyncClient(resp);
+                const scanner = await createSessionScanner({
+                    sessionId: null,
+                    workingDirectory,
+                    onMessage: (msg) => session.sendClaudeSessionMessage(msg)
+                });
+                if (offlineSessionId) scanner.onNewSession(offlineSessionId);
+                return { session, scanner };
+            },
+            onNotify: console.log,
+            onCleanup: () => {
+                // Scanner cleanup handled automatically when process exits
+            }
+        });
+
+        try {
+            await claudeLocal({
+                path: workingDirectory,
+                sessionId: null,
+                onSessionFound: (id) => { offlineSessionId = id; },
+                onThinkingChange: () => {},
+                abort: new AbortController().signal,
+                claudeEnvVars: baseClaudeEnvVars,
+                claudeArgs: options.claudeArgs,
+                mcpServers: {},
+                allowedTools: [],
+                sandboxConfig,
+            });
+        } finally {
+            reconnection.cancel();
+            stopCaffeinate();
+        }
+        process.exit(0);
+    }
+
+    logger.debug(`Session created: ${response.id}`);
+
+    if (shouldReportSessionStartToDaemon({
+        startedBy: options.startedBy,
+        startingMode: options.startingMode,
+    })) {
+        // Daemon-spawned remote sessions must synchronously report their session id
+        // back to the daemon; otherwise the mobile client stays stuck waiting for a
+        // webhook even though the session already exists.
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            try {
+                logger.debug(`[START] Reporting session ${response.id} to daemon (attempt ${attempt})`);
+                const result = await notifyDaemonSessionStarted(response.id, metadata);
+                if (!result.error) {
+                    logger.debug(`[START] Reported session ${response.id} to daemon`);
+                    break;
+                }
+                logger.debug(`[START] Failed to report to daemon (attempt ${attempt}):`, result.error);
+            } catch (error) {
+                logger.debug(`[START] Failed to report to daemon (attempt ${attempt}):`, error);
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+    }
+
+    // Extract SDK metadata in background and update session when ready
+    extractSDKMetadataAsync(async (sdkMetadata) => {
+        logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
+        try {
+            // Update session metadata with tools and slash commands
+            api.sessionSyncClient(response).updateMetadata((currentMetadata) => ({
+                ...currentMetadata,
+                tools: sdkMetadata.tools,
+                slashCommands: sdkMetadata.slashCommands
+            }));
+            logger.debug('[start] Session metadata updated with SDK capabilities');
+        } catch (error) {
+            logger.debug('[start] Failed to update session metadata:', error);
+        }
+    });
+
+    // Create realtime session
+    const session = api.sessionSyncClient(response);
+    const shouldImportNativeHistory = shouldReplayNativeCliHistory(response.metadata, nativeReplayRequest);
+
+    if (nativeReplayRequest && shouldImportNativeHistory) {
+        await replayNativeCliHistoryIfRequested(session, 'claude', workingDirectory);
+        session.updateMetadata((currentMetadata) => markNativeCliHistoryImported(currentMetadata, nativeReplayRequest));
+    }
+
+    // Start Orbit MCP server
+    const orbitServer = await startOrbitMcpServer(session);
+    logger.debug(`[START] Orbit MCP server started at ${orbitServer.url}`);
+
+    // Variable to track current session instance (updated via onSessionReady callback)
+    // Used by hook server to notify Session when Claude changes session ID
+    let currentSession: Session | null = null;
+
+    // Start Hook server for receiving Claude session notifications
+    const hookServer = await startHookServer({
+        onSessionHook: (sessionId, data) => {
+            logger.debug(`[START] Session hook received: ${sessionId}`, data);
+            
+            // Update session ID in the Session instance
+            if (currentSession) {
+                const previousSessionId = currentSession.sessionId;
+                if (previousSessionId !== sessionId) {
+                    logger.debug(`[START] Claude session ID changed: ${previousSessionId} -> ${sessionId}`);
+                    currentSession.onSessionFound(sessionId);
+                }
+            }
+        }
+    });
+    logger.debug(`[START] Hook server started on port ${hookServer.port}`);
+
+    // Generate hook settings file for Claude
+    const hookSettingsPath = generateHookSettingsFile(hookServer.port);
+    logger.debug(`[START] Generated hook settings file: ${hookSettingsPath}`);
+
+    // Print log file path
+    const logPath = logger.logFilePath;
+    logger.infoDeveloper(`Session: ${response.id}`);
+    logger.infoDeveloper(`Logs: ${logPath}`);
+
+    // Set initial agent state
+    session.updateAgentState((currentState) => withControlledByUser(currentState, options.startingMode !== 'remote'));
+
+    // Start caffeinate to prevent sleep on macOS
+    const caffeinateStarted = startCaffeinate();
+    if (caffeinateStarted) {
+        logger.infoDeveloper('Sleep prevention enabled (macOS)');
+    }
+
+    // Import MessageQueue2 and create message queue
+    const messageQueue = new MessageQueue2<EnhancedMode>(mode => hashObject({
+        isPlan: mode.permissionMode === 'plan',
+        model: mode.model,
+        effortLevel: mode.effortLevel,
+        fallbackModel: mode.fallbackModel,
+        customSystemPrompt: mode.customSystemPrompt,
+        appendSystemPrompt: mode.appendSystemPrompt,
+        allowedTools: mode.allowedTools,
+        disallowedTools: mode.disallowedTools
+    }));
+
+    // Forward messages to the queue
+    // Permission modes: Use the unified 7-mode type, mapping happens at SDK boundary in claudeRemote.ts
+    let currentPermissionMode: PermissionMode | undefined = initialPermissionMode;
+    let currentModel = options.model; // Track current model state
+    let currentEffortLevel: string | undefined = baseClaudeEnvVars?.CLAUDE_CODE_EFFORT_LEVEL; // Track current effort level
+    let currentFallbackModel: string | undefined = undefined; // Track current fallback model
+    let currentCustomSystemPrompt: string | undefined = undefined; // Track current custom system prompt
+    let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
+    let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
+    let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
+    session.onUserMessage((message) => {
+        const previousPermissionMode = currentPermissionMode;
+        const previousModel = currentModel;
+        const previousEffortLevel = currentEffortLevel;
+
+        // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
+        let messagePermissionMode: PermissionMode | undefined = currentPermissionMode;
+        if (message.meta?.permissionMode) {
+            messagePermissionMode = applySandboxPermissionPolicy(message.meta.permissionMode, sandboxEnabled);
+            currentPermissionMode = messagePermissionMode;
+            logger.debug(`[loop] Permission mode updated from user message to: ${currentPermissionMode}`);
+        } else {
+            logger.debug(`[loop] User message received with no permission mode override, using current: ${currentPermissionMode}`);
+        }
+
+        // Resolve model - use message.meta.model if provided, otherwise use current model
+        let messageModel = currentModel;
+        if (message.meta?.hasOwnProperty('model')) {
+            messageModel = message.meta.model || undefined; // null becomes undefined
+            currentModel = messageModel;
+            logger.debug(`[loop] Model updated from user message: ${messageModel || 'reset to default'}`);
+        } else {
+            logger.debug(`[loop] User message received with no model override, using current: ${currentModel || 'default'}`);
+        }
+
+        // Resolve effort level - use message.meta.effortLevel if provided, otherwise use current
+        let messageEffortLevel = currentEffortLevel;
+        if (typeof message.meta?.effortLevel === 'string' && message.meta.effortLevel.length > 0) {
+            messageEffortLevel = message.meta.effortLevel;
+            currentEffortLevel = messageEffortLevel;
+            logger.debug(`[loop] Effort level updated from user message: ${messageEffortLevel}`);
+        } else {
+            logger.debug(`[loop] User message received with no effort level override, using current: ${currentEffortLevel || 'none'}`);
+        }
+
+        // Resolve custom system prompt - use message.meta.customSystemPrompt if provided, otherwise use current
+        let messageCustomSystemPrompt = currentCustomSystemPrompt;
+        if (message.meta?.hasOwnProperty('customSystemPrompt')) {
+            messageCustomSystemPrompt = message.meta.customSystemPrompt || undefined; // null becomes undefined
+            currentCustomSystemPrompt = messageCustomSystemPrompt;
+            logger.debug(`[loop] Custom system prompt updated from user message: ${messageCustomSystemPrompt ? 'set' : 'reset to none'}`);
+        } else {
+            logger.debug(`[loop] User message received with no custom system prompt override, using current: ${currentCustomSystemPrompt ? 'set' : 'none'}`);
+        }
+
+        // Resolve fallback model - use message.meta.fallbackModel if provided, otherwise use current fallback model
+        let messageFallbackModel = currentFallbackModel;
+        if (message.meta?.hasOwnProperty('fallbackModel')) {
+            messageFallbackModel = message.meta.fallbackModel || undefined; // null becomes undefined
+            currentFallbackModel = messageFallbackModel;
+            logger.debug(`[loop] Fallback model updated from user message: ${messageFallbackModel || 'reset to none'}`);
+        } else {
+            logger.debug(`[loop] User message received with no fallback model override, using current: ${currentFallbackModel || 'none'}`);
+        }
+
+        // Resolve append system prompt - use message.meta.appendSystemPrompt if provided, otherwise use current
+        let messageAppendSystemPrompt = currentAppendSystemPrompt;
+        if (message.meta?.hasOwnProperty('appendSystemPrompt')) {
+            messageAppendSystemPrompt = message.meta.appendSystemPrompt || undefined; // null becomes undefined
+            currentAppendSystemPrompt = messageAppendSystemPrompt;
+            logger.debug(`[loop] Append system prompt updated from user message: ${messageAppendSystemPrompt ? 'set' : 'reset to none'}`);
+        } else {
+            logger.debug(`[loop] User message received with no append system prompt override, using current: ${currentAppendSystemPrompt ? 'set' : 'none'}`);
+        }
+
+        // Resolve allowed tools - use message.meta.allowedTools if provided, otherwise use current
+        let messageAllowedTools = currentAllowedTools;
+        if (message.meta?.hasOwnProperty('allowedTools')) {
+            messageAllowedTools = message.meta.allowedTools || undefined; // null becomes undefined
+            currentAllowedTools = messageAllowedTools;
+            logger.debug(`[loop] Allowed tools updated from user message: ${messageAllowedTools ? messageAllowedTools.join(', ') : 'reset to none'}`);
+        } else {
+            logger.debug(`[loop] User message received with no allowed tools override, using current: ${currentAllowedTools ? currentAllowedTools.join(', ') : 'none'}`);
+        }
+
+        // Resolve disallowed tools - use message.meta.disallowedTools if provided, otherwise use current
+        let messageDisallowedTools = currentDisallowedTools;
+        if (message.meta?.hasOwnProperty('disallowedTools')) {
+            messageDisallowedTools = message.meta.disallowedTools || undefined; // null becomes undefined
+            currentDisallowedTools = messageDisallowedTools;
+            logger.debug(`[loop] Disallowed tools updated from user message: ${messageDisallowedTools ? messageDisallowedTools.join(', ') : 'reset to none'}`);
+        } else {
+            logger.debug(`[loop] User message received with no disallowed tools override, using current: ${currentDisallowedTools ? currentDisallowedTools.join(', ') : 'none'}`);
+        }
+
+        // Check for special commands before processing
+        const specialCommand = parseSpecialCommand(message.content.text);
+
+        if (specialCommand.type === 'compact') {
+            logger.debug('[start] Detected /compact command');
+            const enhancedMode: EnhancedMode = {
+                permissionMode: messagePermissionMode || 'default',
+                model: messageModel,
+                effortLevel: messageEffortLevel,
+                fallbackModel: messageFallbackModel,
+                customSystemPrompt: messageCustomSystemPrompt,
+                appendSystemPrompt: messageAppendSystemPrompt,
+                allowedTools: messageAllowedTools,
+                disallowedTools: messageDisallowedTools
+            };
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode);
+            logger.debugLargeJson('[start] /compact command pushed to queue:', message);
+            return;
+        }
+
+        if (specialCommand.type === 'clear') {
+            logger.debug('[start] Detected /clear command');
+            const enhancedMode: EnhancedMode = {
+                permissionMode: messagePermissionMode || 'default',
+                model: messageModel,
+                effortLevel: messageEffortLevel,
+                fallbackModel: messageFallbackModel,
+                customSystemPrompt: messageCustomSystemPrompt,
+                appendSystemPrompt: messageAppendSystemPrompt,
+                allowedTools: messageAllowedTools,
+                disallowedTools: messageDisallowedTools
+            };
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode);
+            logger.debugLargeJson('[start] /compact command pushed to queue:', message);
+            return;
+        }
+
+        // Push with resolved permission mode, model, system prompts, and tools
+        const enhancedMode: EnhancedMode = {
+            permissionMode: messagePermissionMode || 'default',
+            model: messageModel,
+            effortLevel: messageEffortLevel,
+            fallbackModel: messageFallbackModel,
+            customSystemPrompt: messageCustomSystemPrompt,
+            appendSystemPrompt: messageAppendSystemPrompt,
+            allowedTools: messageAllowedTools,
+            disallowedTools: messageDisallowedTools
+        };
+        if (hasClaudeSessionConfigChange(
+            {
+                model: previousModel,
+                permissionMode: previousPermissionMode,
+                effortLevel: previousEffortLevel,
+            },
+            {
+                model: messageModel,
+                permissionMode: messagePermissionMode,
+                effortLevel: messageEffortLevel,
+            },
+        )) {
+            session.updateMetadata((currentMetadata) => applyClaudeSessionConfigMetadata(currentMetadata, {
+                model: messageModel,
+                permissionMode: messagePermissionMode,
+                effortLevel: messageEffortLevel,
+            }));
+        }
+        messageQueue.push(message.content.text, enhancedMode);
+        logger.debugLargeJson('User message pushed to queue:', message)
+    });
+
+    // Setup signal handlers for graceful shutdown
+    const cleanup = async () => {
+        logger.debug('[START] Received termination signal, cleaning up...');
+
+        try {
+            // Update lifecycle state to archived before closing
+            if (session) {
+                session.updateMetadata((currentMetadata) => ({
+                    ...currentMetadata,
+                    lifecycleState: 'archived',
+                    lifecycleStateSince: Date.now(),
+                    archivedBy: 'cli',
+                    archiveReason: 'User terminated'
+                }));
+                
+                // Cleanup session resources (intervals, callbacks)
+                currentSession?.cleanup();
+
+                // Send session death message
+                session.sendSessionDeath();
+                await session.flush();
+                await session.close();
+            }
+
+            // Stop caffeinate
+            stopCaffeinate();
+
+            // Stop Orbit MCP server
+            orbitServer.stop();
+
+            // Stop Hook server and cleanup settings file
+            hookServer.stop();
+            cleanupHookSettingsFile(hookSettingsPath);
+
+            logger.debug('[START] Cleanup complete, exiting');
+            process.exit(0);
+        } catch (error) {
+            logger.debug('[START] Error during cleanup:', error);
+            process.exit(1);
+        }
+    };
+
+    // Handle termination signals
+    process.on('SIGTERM', cleanup);
+    process.on('SIGINT', cleanup);
+
+    // Handle uncaught exceptions and rejections
+    process.on('uncaughtException', (error) => {
+        logger.debug('[START] Uncaught exception:', error);
+        cleanup();
+    });
+
+    process.on('unhandledRejection', (reason) => {
+        logger.debug('[START] Unhandled rejection:', reason);
+        cleanup();
+    });
+
+    registerKillSessionHandler(session.rpcHandlerManager, cleanup);
+
+    // Create claude loop
+    const exitCode = await loop({
+        path: workingDirectory,
+        model: options.model,
+        permissionMode: initialPermissionMode,
+        startingMode: options.startingMode,
+        messageQueue,
+        api,
+        allowedTools: orbitServer.toolNames.map(toolName => `mcp__orbit__${toolName}`),
+        onModeChange: (newMode) => {
+            session.sendSessionEvent({ type: 'switch', mode: newMode });
+            session.updateAgentState((currentState) => withControlledByUser(currentState, newMode === 'local'));
+        },
+        onSessionReady: (sessionInstance) => {
+            // Store reference for hook server callback
+            currentSession = sessionInstance;
+        },
+        mcpServers: {
+            'orbit': {
+                type: 'http' as const,
+                url: orbitServer.url,
+            }
+        },
+        session,
+        claudeEnvVars: baseClaudeEnvVars,
+        claudeArgs: options.claudeArgs,
+        sandboxConfig,
+        hookSettingsPath,
+        jsRuntime: options.jsRuntime
+    });
+
+    // Cleanup session resources (intervals, callbacks) - prevents memory leak
+    // Note: currentSession is set by onSessionReady callback during loop()
+    (currentSession as Session | null)?.cleanup();
+
+    // Send session death message
+    session.sendSessionDeath();
+
+    // Wait for socket to flush
+    logger.debug('Waiting for socket to flush...');
+    await session.flush();
+
+    // Close session
+    logger.debug('Closing session...');
+    await session.close();
+
+    // Stop caffeinate before exiting
+    stopCaffeinate();
+    logger.debug('Stopped sleep prevention');
+
+    // Stop Orbit MCP server
+    orbitServer.stop();
+    logger.debug('Stopped Orbit MCP server');
+
+    // Stop Hook server and cleanup settings file
+    hookServer.stop();
+    cleanupHookSettingsFile(hookSettingsPath);
+    logger.debug('Stopped Hook server and cleaned up settings file');
+
+    // Exit with the code from Claude
+    process.exit(exitCode);
+}

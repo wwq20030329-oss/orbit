@@ -24,19 +24,17 @@ The current `main` implementation does not reliably gate voice usage:
 
 Relevant files:
 
-- Server token route: `packages/happy-server/sources/app/api/routes/voiceRoutes.ts`
-- Client token fetch: `packages/happy-app/sources/sync/apiVoice.ts`
-- Voice start decision: `packages/happy-app/sources/realtime/RealtimeSession.ts`
-- ElevenLabs client session start:
-  - `packages/happy-app/sources/realtime/RealtimeVoiceSession.tsx`
-  - `packages/happy-app/sources/realtime/RealtimeVoiceSession.web.tsx`
+- Server token route: `packages/orbit-server/sources/app/api/routes/voiceRoutes.ts`
+- Client token fetch: `packages/orbit-app/sources/sync/apiVoice.ts`
+- Voice start decision: `packages/orbit-app/sources/realtime/RealtimeSession.ts`
+- ElevenLabs client session start: `packages/orbit-app/sources/realtime/RealtimeVoiceSession.tsx`
 
 ## Existing Secret Assumptions
 
 The repo already assumes ElevenLabs API access exists on the server:
 
-- `packages/happy-server/sources/app/api/routes/voiceRoutes.ts` reads `process.env.ELEVENLABS_API_KEY`.
-- `packages/happy-server/deploy/handy.yaml` extracts `/handy-elevenlabs`.
+- `packages/orbit-server/sources/app/api/routes/voiceRoutes.ts` reads `process.env.ELEVENLABS_API_KEY`.
+- `packages/orbit-server/deploy/orbit.yaml` extracts `/orbit-elevenlabs`.
 - `docs/deployment.md` documents `ELEVENLABS_API_KEY` as required for `/v1/voice/token` in production.
 
 The app does not currently have an ElevenLabs API secret. Client config only carries public values such as RevenueCat public keys and ElevenLabs agent IDs.
@@ -45,7 +43,7 @@ The app does not currently have an ElevenLabs API secret. Client config only car
 
 Implement a stateless-at-runtime preflight check that uses ElevenLabs as the system of record:
 
-1. Derive a stable pseudonymous ElevenLabs `user_id` from the Happy user ID.
+1. Derive a stable pseudonymous ElevenLabs `user_id` from the Orbit user ID.
 2. Before issuing a conversation token, query ElevenLabs conversation history for that `user_id`.
 3. Read only the first page.
 4. Sum `call_duration_secs` across the returned conversations.
@@ -56,9 +54,9 @@ Implement a stateless-at-runtime preflight check that uses ElevenLabs as the sys
 
 Use a stable pseudonymous ID, not a random nonce. Recommended shape:
 
-`elevenUserId = "u_" + base64url(HMAC_SHA256(APP_SECRET, happyUserId))`
+`elevenUserId = "u_" + base64url(HMAC_SHA256(APP_SECRET, orbitUserId))`
 
-This keeps the join key stable across sessions without exposing the raw Happy account ID to ElevenLabs.
+This keeps the join key stable across sessions without exposing the raw Orbit account ID to ElevenLabs.
 
 ## External APIs
 
@@ -97,7 +95,7 @@ POST /v1/voice/token
   v
 Server authenticates JWT
   |
-  +--> request.userId = Happy account id
+  +--> request.userId = Orbit account id
   |
   +--> derive stable elevenUserId from request.userId
   |
@@ -172,7 +170,7 @@ Next mic tap repeats the same preflight check
 
 ### Server
 
-Update `packages/happy-server/sources/app/api/routes/voiceRoutes.ts` to:
+Update `packages/orbit-server/sources/app/api/routes/voiceRoutes.ts` to:
 
 - derive and return `elevenUserId`
 - query ElevenLabs conversation history before minting a token
@@ -206,11 +204,10 @@ type VoiceTokenResponse =
 
 Update:
 
-- `packages/happy-app/sources/realtime/types.ts`
-- `packages/happy-app/sources/realtime/RealtimeVoiceSession.tsx`
-- `packages/happy-app/sources/realtime/RealtimeVoiceSession.web.tsx`
-- `packages/happy-app/sources/realtime/RealtimeSession.ts`
-- `packages/happy-app/sources/sync/apiVoice.ts`
+- `packages/orbit-app/sources/realtime/types.ts`
+- `packages/orbit-app/sources/realtime/RealtimeVoiceSession.tsx`
+- `packages/orbit-app/sources/realtime/RealtimeSession.ts`
+- `packages/orbit-app/sources/sync/apiVoice.ts`
 
 Changes needed:
 
@@ -228,7 +225,7 @@ Current `main` is mismatched:
 
 - the server expects `revenueCatPublicKey` from the client
 - the client no longer sends it
-- the deployment already extracts `/handy-revenuecat`
+- the deployment already extracts `/orbit-revenuecat`
 
 Preferred fix:
 
@@ -275,7 +272,7 @@ Add tests for:
 
 ## Prior Art
 
-There is older server-only free-trial work in the legacy `slopus/happy-server` repository on branch:
+There is older server-only free-trial work in the legacy `wwq20030329-oss/orbit` repository on branch:
 
 - `charge-for-voice-after-3-trail-conversations`
 

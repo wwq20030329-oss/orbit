@@ -1,6 +1,6 @@
 # Encryption and Data Encoding
 
-This document details how client data is encrypted, how encrypted blobs are structured, and how those blobs map onto protocol fields. It is based on `packages/happy-cli/src/api/encryption.ts` and the server routes that accept/emit these values.
+This document details how client data is encrypted, how encrypted blobs are structured, and how those blobs map onto protocol fields. It is based on `packages/orbit-cli/src/api/encryption.ts` and the server routes that accept/emit these values.
 
 For transport and event shapes, see `protocol.md`. For HTTP endpoints, see `api.md`.
 
@@ -346,7 +346,7 @@ POST /v1/kv
 ```
 
 ## Client-side types (shapes used before encryption)
-These are the client-side structures that get encrypted and sent over the wire. They are defined in `packages/happy-cli/src/api/types.ts`.
+These are the client-side structures that get encrypted and sent over the wire. They are defined in `packages/orbit-cli/src/api/types.ts`.
 
 ### Session message content (encrypted)
 The payload stored in `SessionMessage.content` is always encrypted and wrapped as:
@@ -382,9 +382,9 @@ Messages are encrypted as `MessageContent` and then base64 encoded:
   "path": "...",
   "host": "...",
   "homeDir": "...",
-  "happyHomeDir": "...",
-  "happyLibDir": "...",
-  "happyToolsDir": "...",
+  "orbitHomeDir": "...",
+  "orbitLibDir": "...",
+  "orbitToolsDir": "...",
   "version": "...",
   "name": "...",
   "os": "...",
@@ -432,10 +432,10 @@ Messages are encrypted as `MessageContent` and then base64 encoded:
 {
   "host": "...",
   "platform": "...",
-  "happyCliVersion": "...",
+  "orbitCliVersion": "...",
   "homeDir": "...",
-  "happyHomeDir": "...",
-  "happyLibDir": "..."
+  "orbitHomeDir": "...",
+  "orbitLibDir": "..."
 }
 ```
 
@@ -495,7 +495,7 @@ graph LR
     end
 
     subgraph "Server"
-        Secret[HANDY_MASTER_SECRET]
+        Secret[ORBIT_MASTER_SECRET]
         KeyTree[KeyTree]
         Encrypt[Encrypt]
     end
@@ -515,7 +515,7 @@ The server encrypts certain third-party tokens at rest:
 - GitHub OAuth tokens (`GithubUser.token`).
 - Vendor service tokens (`ServiceAccountToken.token`).
 
-These are encrypted with a server-only KeyTree derived from `HANDY_MASTER_SECRET` and are not end-to-end encrypted.
+These are encrypted with a server-only KeyTree derived from `ORBIT_MASTER_SECRET` and are not end-to-end encrypted.
 
 ## Encoding conventions
 
@@ -543,7 +543,7 @@ graph TB
 - Non-encrypted identifiers (ids, tags, versions) are always plain strings/numbers.
 
 ## Implementation references
-- Client crypto: `packages/happy-cli/src/api/encryption.ts`
-- Session message format: `packages/happy-cli/src/api/types.ts`
-- Server message ingestion: `packages/happy-server/sources/app/api/socket/sessionUpdateHandler.ts`
-- Artifact/KV routes: `packages/happy-server/sources/app/api/routes/artifactsRoutes.ts`, `packages/happy-server/sources/app/kv/kvMutate.ts`
+- Client crypto: `packages/orbit-cli/src/api/encryption.ts`
+- Session message format: `packages/orbit-cli/src/api/types.ts`
+- Server message ingestion: `packages/orbit-server/sources/app/api/socket/sessionUpdateHandler.ts`
+- Artifact/KV routes: `packages/orbit-server/sources/app/api/routes/artifactsRoutes.ts`, `packages/orbit-server/sources/app/kv/kvMutate.ts`

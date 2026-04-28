@@ -33,7 +33,7 @@
   - source
   - session_agent
   - session_started_source
-  - happy_cli_version
+  - orbit_cli_version
   - ota_version
   - ota_runtime_version
 - session_switched
@@ -152,11 +152,11 @@ all include flow property which customizes the upsell screen shown by revenue ca
 
 ## Relevant Sources
 
-- packages/happy-app/sources/track/index.ts
-- packages/happy-app/sources/hooks/useNavigateToSession.ts
-- packages/happy-app/sources/-session/SessionView.tsx
-- packages/happy-app/sources/realtime/RealtimeSession.ts
-- packages/happy-app/sources/components/SettingsView.tsx
-- packages/happy-app/sources/sync/sync.ts
-- packages/happy-app/sources/track/useTrackScreens.ts
-- packages/happy-app/sources/track/tracking.ts
+- packages/orbit-app/sources/track/index.ts
+- packages/orbit-app/sources/hooks/useNavigateToSession.ts
+- packages/orbit-app/sources/-session/SessionView.tsx
+- packages/orbit-app/sources/realtime/RealtimeSession.ts
+- packages/orbit-app/sources/components/SettingsView.tsx
+- packages/orbit-app/sources/sync/sync.ts
+- packages/orbit-app/sources/track/useTrackScreens.ts
+- packages/orbit-app/sources/track/tracking.ts

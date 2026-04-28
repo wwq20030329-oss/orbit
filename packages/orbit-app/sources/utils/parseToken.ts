@@ -1,0 +1,29 @@
+import { decodeBase64 } from "@/encryption/base64";
+import { decodeUTF8, encodeUTF8 } from "@/encryption/text";
+
+export function parseToken(token: string) {
+    const parts = token.split('.');
+    if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+        throw new Error('Invalid token format: expected "header.payload.signature" with non-empty parts');
+    }
+    const [, payload] = parts;
+
+    try {
+        const parsedPayload = JSON.parse(decodeUTF8(decodeBase64(payload, 'base64url')));
+        const userId = typeof parsedPayload.sub === 'string'
+            ? parsedPayload.sub
+            : typeof parsedPayload.user === 'string'
+                ? parsedPayload.user
+                : null;
+
+        if (!userId) {
+            throw new Error('Invalid token: missing or invalid user identifier claim');
+        }
+        return userId;
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('Invalid token')) {
+            throw error; // Re-throw our validation errors
+        }
+        throw new Error(`Invalid token: failed to decode payload - ${error instanceof Error ? error.message : 'unknown error'}`);
+    }
+}

@@ -1,0 +1,2690 @@
+import Constants from 'expo-constants';
+import type { LiveMirrorDetach } from '@orbit/wire';
+import { apiSocket } from '@/sync/apiSocket';
+import { AuthCredentials } from '@/auth/tokenStorage';
+import { handleUnauthorizedResponse } from '@/auth/authRecovery';
+import { Encryption } from '@/sync/encryption/encryption';
+import { decodeBase64, encodeBase64 } from '@/encryption/base64';
+import { storage } from './storage';
+import {
+    ApiEphemeralUpdateSchema,
+    ApiMessage,
+    ApiUpdateContainerSchema,
+    type ApiDeleteSession,
+    type ApiUpdateContainer,
+    type ApiUpdateNewMessage,
+    type ApiUpdateNewSession,
+    type ApiUpdateSessionState,
+} from './apiTypes';
+import type { ApiEphemeralActivityUpdate } from './apiTypes';
+import { Session, Machine } from './storageTypes';
+import { InvalidateSync } from '@/utils/sync';
+import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
+import { randomUUID } from 'expo-crypto';
+import * as Notifications from 'expo-notifications';
+import { syncCurrentPushToken } from './pushRegistration';
+import { Platform, AppState, type AppStateStatus } from 'react-native';
+import { isRunningOnMac } from '@/utils/platform';
+import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
+import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
+import { Profile, profileParse } from './profile';
+import { loadPendingSettings, savePendingSettings } from './persistence';
+import {
+    initializeTracking,
+    trackGitHubConnected,
+    trackMessageSent,
+    tracking,
+    trackPaywallCancelled,
+    trackPaywallError,
+    trackPaywallPresented,
+    trackPaywallPurchased,
+    trackPaywallRestored,
+} from '@/track';
+import type { MessageSentSource } from '@/track';
+import { parseToken } from '@/utils/parseToken';
+import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
+import { ensureReachableServerUrl, getServerUrl } from './serverConfig';
+import { config } from '@/config';
+import { log } from '@/log';
+import { gitStatusSync } from './gitStatusSync';
+import { projectManager } from './projectManager';
+import { AsyncLock } from '@/utils/lock';
+import { voiceHooks } from '@/realtime/hooks/voiceHooks';
+import { Message } from './typesMessage';
+import { EncryptionCache } from './encryption/encryptionCache';
+import { systemPrompt } from './prompt/systemPrompt';
+import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
+import { DecryptedArtifact, Artifact, ArtifactCreateRequest, ArtifactUpdateRequest } from './artifactTypes';
+import { ArtifactEncryption } from './encryption/artifactEncryption';
+import { resolveMessageModeMeta } from './messageMeta';
+import { didSessionControlReturnToApp, getSessionControlState } from '@/utils/sessionControlState';
+import { VisibleSessionTracker } from './visibleSessionTracker';
+import {
+    shouldRefreshSessionsOnVisible,
+    shouldRefreshVisibleSessionMessages,
+} from './sessionVisibleRefresh';
+import { invalidateNativeCliHistoryForMachines } from '@/utils/nativeCliHistoryRefresh';
+import { rememberNativeCliHintsForSession } from '@/utils/openNativeCliSession';
+import {
+    INITIAL_VISIBLE_MESSAGE_LIMIT,
+    OLDER_MESSAGES_PAGE_LIMIT,
+    shouldBootstrapVisibleSessionMessages,
+} from './sessionMessageBootstrap';
+import { fetchSessionMessagesPage } from './sessionMessagesApi';
+import { handleRealtimeMessageUpdate } from './sessionRealtimeMessageUpdate';
+import {
+    handleRealtimeDeleteSessionUpdate,
+    handleRealtimeNewSessionUpdate,
+    handleRealtimeUpdateSessionState,
+} from './sessionRealtimeSessionUpdate';
+import {
+    handleRealtimeMachineActivityUpdate,
+    handleRealtimeNewMachineUpdate,
+    handleRealtimeUpdateMachineState,
+    type MachineRealtimeUpdateDependencies,
+} from './machineRealtimeUpdate';
+import {
+    abortAndDrainPendingOutbox,
+    didBackgroundSendTimeoutExpireOnResume,
+    getBackgroundSendWatchdogDisposition,
+    hasPendingOutboxMessages,
+    shouldStartBackgroundSendWatchdog,
+} from './outboxSendLifecycle';
+import { t } from '@/text';
+import { createLiveMirrorClient } from './liveMirror';
+import {
+    LIVE_RUNTIME_SOCKET_DISCONNECT_GRACE_MS,
+    shouldDeferLiveRuntimeDetachDuringSocketRecovery,
+    resolveSessionLiveRuntimeTarget,
+    shouldKeepLiveRuntimeStateDuringSocketRecovery,
+    type SessionLiveRuntimeTarget,
+} from '@/utils/sessionLiveRuntime';
+import { requestSessionRefresh } from '@/remote/sessionRefreshRegistry';
+import { resolveTrackedSessionLastSeq } from '@/utils/sessionLastSeq';
+
+type V3PostSessionMessagesResponse = {
+    messages: Array<{
+        id: string;
+        seq: number;
+        localId: string | null;
+        createdAt: number;
+        updatedAt: number;
+    }>;
+};
+
+type EncryptedSessionRecord = {
+    id: string;
+    seq: number;
+    metadata: string;
+    metadataVersion: number;
+    agentState: string | null;
+    agentStateVersion: number;
+    dataEncryptionKey: string | null;
+    active: boolean;
+    activeAt: number;
+    createdAt: number;
+    updatedAt: number;
+};
+
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function didMachineHistoryRelevantStateChange(previous: Machine | undefined, next: Machine): boolean {
+    if (!previous) {
+        return true;
+    }
+
+    return previous.seq !== next.seq
+        || previous.updatedAt !== next.updatedAt
+        || previous.active !== next.active
+        || previous.activeAt !== next.activeAt
+        || previous.metadataVersion !== next.metadataVersion
+        || previous.daemonStateVersion !== next.daemonStateVersion;
+}
+
+type OutboxMessage = {
+    localId: string;
+    content: string;
+};
+
+type SendMessageOptions = {
+    displayText?: string;
+    source?: MessageSentSource;
+};
+
+class Sync {
+    private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
+    encryption!: Encryption;
+    serverID!: string;
+    anonID!: string;
+    private credentials!: AuthCredentials;
+    public encryptionCache = new EncryptionCache();
+    private sessionsSync: InvalidateSync;
+    private messagesSync = new Map<string, InvalidateSync>();
+    private sendSync = new Map<string, InvalidateSync>();
+    private sendAbortControllers = new Map<string, AbortController>();
+    private sessionLastSeq = new Map<string, number>();
+    private pendingOutbox = new Map<string, OutboxMessage[]>();
+    private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
+    private sessionQueueProcessing = new Set<string>();
+    private sessionMessageLocks = new Map<string, AsyncLock>();
+    private visibleSessions = new VisibleSessionTracker();
+    private liveMirrorClient = createLiveMirrorClient(apiSocket);
+    private liveRuntimeTargetsBySessionId = new Map<string, SessionLiveRuntimeTarget>();
+    private liveRuntimeLastSeqByRuntimeId = new Map<string, number>();
+    private liveRuntimeDisconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    private liveRuntimeDisconnectReason: LiveMirrorDetach['reason'] | null = null;
+    private liveRuntimeSocketStatus: 'disconnected' | 'connecting' | 'connected' | 'error' = 'disconnected';
+    private messageFetchAbortControllers = new Map<string, AbortController>();
+    private messageBackfillPromises = new Map<string, Promise<void>>();
+    private pendingVisibleSessionMessageRefreshReasons = new Map<string, 'app-active' | 'socket-reconnected' | 'realtime-message-gap' | 'session-control-returned'>();
+    private visibleSessionMessageRefreshAt = new Map<string, number>();
+    private visibleSessionStateRefreshAt = new Map<string, number>();
+    private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
+    private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
+    private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
+    private settingsSync: InvalidateSync;
+    private profileSync: InvalidateSync;
+    private purchasesSync: InvalidateSync;
+    private machinesSync: InvalidateSync;
+    private pushTokenSync: InvalidateSync;
+    private nativeUpdateSync: InvalidateSync;
+    private artifactsSync: InvalidateSync;
+    private activityAccumulator: ActivityUpdateAccumulator;
+    private pendingSettings: Partial<Settings> = loadPendingSettings();
+    private appState: AppStateStatus = AppState.currentState;
+    private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
+    private backgroundSendNotificationId: string | null = null;
+    private backgroundSendStartedAt: number | null = null;
+    revenueCatInitialized = false;
+
+    // Generic locking mechanism
+    private recalculationLockCount = 0;
+    private lastRecalculationTime = 0;
+    private lastResumeRefreshAt = 0;
+
+    constructor() {
+        this.sessionsSync = new InvalidateSync(this.fetchSessions);
+        this.settingsSync = new InvalidateSync(this.syncSettings);
+        this.profileSync = new InvalidateSync(this.fetchProfile);
+        this.purchasesSync = new InvalidateSync(this.syncPurchases);
+        this.machinesSync = new InvalidateSync(this.fetchMachines);
+        this.nativeUpdateSync = new InvalidateSync(this.fetchNativeUpdate);
+        this.artifactsSync = new InvalidateSync(this.fetchArtifactsList);
+        const registerPushToken = async () => {
+            if (__DEV__) {
+                return;
+            }
+            await this.registerPushToken();
+        }
+        this.pushTokenSync = new InvalidateSync(registerPushToken);
+        this.activityAccumulator = new ActivityUpdateAccumulator(this.flushActivityUpdates.bind(this), 2000);
+
+        // Listen for app state changes to refresh purchases
+        AppState.addEventListener('change', (nextAppState) => {
+            this.appState = nextAppState;
+            if (nextAppState === 'active') {
+                const hasPendingMessages = hasPendingOutboxMessages(this.sendAbortControllers, this.pendingOutbox);
+                const shouldFailAfterResume = didBackgroundSendTimeoutExpireOnResume({
+                    backgroundSendStartedAt: this.backgroundSendStartedAt,
+                    hasPendingMessages,
+                    now: Date.now(),
+                    timeoutMs: Sync.BACKGROUND_SEND_TIMEOUT_MS,
+                });
+                void this.cancelBackgroundSendTimeoutNotification();
+                this.clearBackgroundSendWatchdog();
+                if (shouldFailAfterResume) {
+                    void this.notifyMessageSendFailed();
+                    this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
+                }
+                log.log('📱 App became active');
+                
+                const now = Date.now();
+                const shouldThrottledRefresh = now - this.lastResumeRefreshAt > 5000;
+                
+                if (shouldThrottledRefresh) {
+                    this.lastResumeRefreshAt = now;
+                    invalidateNativeCliHistoryForMachines();
+                    this.purchasesSync.invalidate();
+                    this.profileSync.invalidate();
+                    this.machinesSync.invalidate();
+                    this.pushTokenSync.invalidate();
+                    this.sessionsSync.invalidate();
+                    this.nativeUpdateSync.invalidate();
+                    log.log('📱 App became active: Invalidating full sync (sessions, machines, artifacts)');
+                    this.artifactsSync.invalidate();
+                    for (const sessionId of this.visibleSessions.listVisible()) {
+                        this.requestSessionMessagesRefresh(sessionId, 'app-active');
+                    }
+                } else {
+                    log.log('📱 App became active: Skipping sync refresh (throttled)');
+                }
+            } else {
+                log.log(`📱 App state changed to: ${nextAppState}`);
+                this.maybeStartBackgroundSendWatchdog();
+            }
+        });
+    }
+
+    async create(credentials: AuthCredentials, encryption: Encryption) {
+        this.credentials = credentials;
+        this.encryption = encryption;
+        this.anonID = encryption.anonID;
+        this.serverID = parseToken(credentials.token);
+        await this.#init();
+
+        // Settings / profile / purchases are independent network fetches; running
+        // them in parallel shaves ~2x the per-request latency off the first-launch
+        // cold path without changing their individual semantics (each one
+        // separately queues and resolves via `awaitQueue`).
+        await Promise.all([
+            this.settingsSync.awaitQueue(),
+            this.profileSync.awaitQueue(),
+            this.purchasesSync.awaitQueue(),
+        ]);
+    }
+
+    async restore(credentials: AuthCredentials, encryption: Encryption) {
+        // NOTE: No awaiting anything here, we're restoring from a disk (ie app restarted)
+        // Purchases sync is invalidated in #init() and will complete asynchronously
+        this.credentials = credentials;
+        this.encryption = encryption;
+        this.anonID = encryption.anonID;
+        this.serverID = parseToken(credentials.token);
+        await this.#init();
+    }
+
+    async #init() {
+
+        // Subscribe to updates
+        this.subscribeToUpdates();
+
+        // Sync initial PostHog opt-out state with stored settings
+        if (tracking) {
+            const currentSettings = storage.getState().settings;
+            if (currentSettings.analyticsOptOut) {
+                tracking.optOut();
+            } else {
+                tracking.optIn();
+            }
+        }
+
+        // Invalidate sync
+        log.log('🔄 #init: Invalidating all syncs');
+        this.sessionsSync.invalidate();
+        this.settingsSync.invalidate();
+        this.profileSync.invalidate();
+        this.purchasesSync.invalidate();
+        this.machinesSync.invalidate();
+        this.pushTokenSync.invalidate();
+        this.nativeUpdateSync.invalidate();
+        this.artifactsSync.invalidate();
+        log.log('🔄 #init: All syncs invalidated, including artifacts');
+
+        // Wait for both sessions and machines to load, then mark as ready
+        Promise.all([
+            this.sessionsSync.awaitQueue(),
+            this.machinesSync.awaitQueue()
+        ]).then(() => {
+            storage.getState().applyReady();
+        }).catch((error) => {
+            console.error('Failed to load initial data:', error);
+        });
+    }
+
+
+    onSessionVisible = (sessionId: string) => {
+        const becameVisible = this.visibleSessions.markVisible(sessionId);
+        const now = Date.now();
+        if (becameVisible) {
+            this.refreshVisibleSessionMessages(sessionId, now);
+        }
+
+        const session = storage.getState().sessions[sessionId];
+        const sessionControlState = session
+            ? getSessionControlState(session, { sessionId })
+            : null;
+        if (becameVisible && shouldRefreshSessionsOnVisible(session, sessionControlState, {
+            lastRefreshedAt: this.visibleSessionStateRefreshAt.get(sessionId) ?? null,
+            now,
+        })) {
+            this.visibleSessionStateRefreshAt.set(sessionId, now);
+            this.sessionsSync.invalidate();
+        }
+        if (
+            session
+            && session.metadata?.path
+            && sessionControlState?.isConnected
+        ) {
+            gitStatusSync.getSync(sessionId).invalidate();
+        } else {
+            gitStatusSync.clearForSession(sessionId);
+        }
+
+        // Notify voice assistant about session visibility
+        if (session) {
+            voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
+        }
+
+        if (session) {
+            this.attachLiveRuntimeForSession(sessionId);
+        }
+    }
+
+    onSessionHidden = (sessionId: string) => {
+        this.visibleSessions.markHidden(sessionId);
+        if (!this.isSessionVisible(sessionId)) {
+            this.messageFetchAbortControllers.get(sessionId)?.abort();
+            this.pendingVisibleSessionMessageRefreshReasons.delete(sessionId);
+        }
+        this.detachLiveRuntimeForSession(sessionId, 'client-detached');
+    }
+
+    private isSessionVisible = (sessionId: string) => {
+        return this.visibleSessions.isVisible(sessionId);
+    }
+
+    private getSessionVisibilityVersion = (sessionId: string) => {
+        return this.visibleSessions.getVersion(sessionId);
+    }
+
+    private shouldContinueVisibleSync = (sessionId: string, expectedVersion: number) => {
+        return this.isSessionVisible(sessionId) && this.getSessionVisibilityVersion(sessionId) === expectedVersion;
+    }
+
+    private rememberLiveRuntimeTarget(sessionId: string, target: SessionLiveRuntimeTarget) {
+        this.liveRuntimeTargetsBySessionId.set(sessionId, target);
+    }
+
+    private forgetLiveRuntimeTarget(sessionId: string) {
+        this.liveRuntimeTargetsBySessionId.delete(sessionId);
+    }
+
+    private attachLiveRuntimeForSession(sessionId: string): boolean {
+        const session = storage.getState().sessions[sessionId];
+        if (!session) {
+            return false;
+        }
+
+        const target = resolveSessionLiveRuntimeTarget(session);
+        if (!target) {
+            this.forgetLiveRuntimeTarget(sessionId);
+            return false;
+        }
+
+        const existingTarget = this.liveRuntimeTargetsBySessionId.get(sessionId);
+        if (
+            existingTarget
+            && existingTarget.runtimeId === target.runtimeId
+            && existingTarget.sessionId === target.sessionId
+            && existingTarget.machineId === target.machineId
+        ) {
+            return true;
+        }
+
+        const afterSeq = this.liveRuntimeLastSeqByRuntimeId.get(target.runtimeId);
+        let didSend = false;
+        try {
+            didSend = this.liveMirrorClient.attach({
+                ...target,
+                ...(afterSeq !== undefined ? { afterSeq } : {}),
+                mode: 'viewer',
+            });
+        } catch (error) {
+            log.log(`🪞 Failed to attach live runtime for session ${sessionId}: ${String(error)}`);
+            return false;
+        }
+
+        if (didSend) {
+            this.rememberLiveRuntimeTarget(sessionId, target);
+        }
+
+        return didSend;
+    }
+
+    private detachLiveRuntimeForSession(
+        sessionId: string,
+        reason: 'client-detached' | 'error' = 'client-detached',
+    ) {
+        const existingTarget = this.liveRuntimeTargetsBySessionId.get(sessionId);
+        const resolvedTarget = existingTarget ?? (
+            storage.getState().sessions[sessionId]
+                ? resolveSessionLiveRuntimeTarget(storage.getState().sessions[sessionId]!)
+                : null
+        );
+
+        this.forgetLiveRuntimeTarget(sessionId);
+        if (!resolvedTarget) {
+            return;
+        }
+
+        try {
+            this.liveMirrorClient.detach(resolvedTarget);
+        } catch (error) {
+            log.log(`🪞 Failed to detach live runtime for session ${sessionId}: ${String(error)}`);
+        }
+        storage.getState().applyLiveRuntimeDetached({
+            runtimeId: resolvedTarget.runtimeId,
+            sessionId: resolvedTarget.sessionId,
+            machineId: resolvedTarget.machineId,
+            detachedAt: Date.now(),
+            reason,
+        });
+    }
+
+    private attachVisibleLiveRuntimes() {
+        for (const sessionId of this.visibleSessions.listVisible()) {
+            this.attachLiveRuntimeForSession(sessionId);
+        }
+    }
+
+    private cancelPendingLiveRuntimeDisconnect() {
+        if (this.liveRuntimeDisconnectTimeout) {
+            clearTimeout(this.liveRuntimeDisconnectTimeout);
+            this.liveRuntimeDisconnectTimeout = null;
+        }
+        this.liveRuntimeDisconnectReason = null;
+    }
+
+    private scheduleLiveRuntimeDisconnect(reason: LiveMirrorDetach['reason']) {
+        this.liveRuntimeDisconnectReason = reason;
+
+        if (this.liveRuntimeDisconnectTimeout) {
+            clearTimeout(this.liveRuntimeDisconnectTimeout);
+        }
+
+        this.liveRuntimeDisconnectTimeout = setTimeout(() => {
+            this.liveRuntimeDisconnectTimeout = null;
+            const pendingReason = this.liveRuntimeDisconnectReason;
+            this.liveRuntimeDisconnectReason = null;
+            if (!pendingReason) {
+                return;
+            }
+
+            if (this.liveRuntimeSocketStatus === 'connected') {
+                return;
+            }
+
+            this.clearLiveRuntimeConnections(pendingReason);
+        }, LIVE_RUNTIME_SOCKET_DISCONNECT_GRACE_MS);
+    }
+
+    private clearLiveRuntimeConnections(reason: LiveMirrorDetach['reason']) {
+        this.cancelPendingLiveRuntimeDisconnect();
+        this.liveRuntimeTargetsBySessionId.clear();
+        storage.getState().detachAllLiveRuntimeConnections(reason, Date.now());
+    }
+
+    private requestSessionMessagesRefresh(
+        sessionId: string,
+        reason: 'app-active' | 'socket-reconnected' | 'realtime-message-gap' | 'session-control-returned',
+    ) {
+        if (this.messageFetchAbortControllers.has(sessionId)) {
+            const existingReason = this.pendingVisibleSessionMessageRefreshReasons.get(sessionId);
+            if (
+                !existingReason
+                || reason === 'realtime-message-gap'
+                || reason === 'session-control-returned'
+            ) {
+                this.pendingVisibleSessionMessageRefreshReasons.set(sessionId, reason);
+            }
+            return;
+        }
+
+        this.pendingVisibleSessionMessageRefreshReasons.delete(sessionId);
+        if (!requestSessionRefresh(sessionId, reason)) {
+            this.getMessagesSync(sessionId).invalidate();
+        }
+    }
+
+    private flushPendingSessionMessagesRefresh(sessionId: string) {
+        const pendingReason = this.pendingVisibleSessionMessageRefreshReasons.get(sessionId);
+        if (!pendingReason || !this.isSessionVisible(sessionId)) {
+            this.pendingVisibleSessionMessageRefreshReasons.delete(sessionId);
+            return false;
+        }
+
+        this.pendingVisibleSessionMessageRefreshReasons.delete(sessionId);
+        if (!requestSessionRefresh(sessionId, pendingReason)) {
+            this.getMessagesSync(sessionId).invalidate();
+            return true;
+        }
+
+        return true;
+    }
+
+    private isAbortError = (error: unknown) => {
+        if (!(error instanceof Error)) {
+            return false;
+        }
+
+        const message = error.message.toLowerCase();
+        return error.name === 'AbortError' || message.includes('abort');
+    }
+
+    private getMessagesSync(sessionId: string): InvalidateSync {
+        let sync = this.messagesSync.get(sessionId);
+        if (!sync) {
+            sync = new InvalidateSync(() => this.fetchMessages(sessionId));
+            this.messagesSync.set(sessionId, sync);
+        }
+        return sync;
+    }
+
+    private getTrackedLastSeq = (sessionId: string): number | undefined => {
+        const inMemoryLastSeq = this.sessionLastSeq.get(sessionId);
+        const storedLastSeq = storage.getState().sessionMessages[sessionId]?.lastSeq;
+        return resolveTrackedSessionLastSeq(inMemoryLastSeq, storedLastSeq);
+    }
+
+    private setTrackedLastSeq = (sessionId: string, seq: number) => {
+        this.sessionLastSeq.set(sessionId, seq);
+        storage.getState().applySessionLastSeq(sessionId, seq);
+    }
+
+    private refreshVisibleSessionMessages(sessionId: string, now = Date.now()) {
+        const loadedCount = storage.getState().sessionMessages[sessionId]?.messages.length ?? 0;
+        const shouldRefresh = shouldRefreshVisibleSessionMessages({
+            loadedCount,
+            lastRefreshedAt: this.visibleSessionMessageRefreshAt.get(sessionId) ?? null,
+            now,
+        });
+        if (!shouldRefresh) {
+            return false;
+        }
+
+        this.visibleSessionMessageRefreshAt.set(sessionId, now);
+        this.getMessagesSync(sessionId).invalidate();
+        return true;
+    }
+
+    private startOlderMessagesBackfill(
+        sessionId: string,
+        beforeSeq: number,
+        visibilityVersion: number,
+    ) {
+        if (beforeSeq <= 1 || this.messageBackfillPromises.has(sessionId)) {
+            return;
+        }
+
+        const promise = (async () => {
+            let cursor = beforeSeq;
+
+            while (cursor > 1 && this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                const encryption = this.encryption.getSessionEncryption(sessionId);
+                if (!encryption) {
+                    return;
+                }
+
+                const page = await this.fetchMessagesPage(sessionId, encryption, {
+                    beforeSeq: cursor,
+                    limit: OLDER_MESSAGES_PAGE_LIMIT,
+                });
+
+                if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                    return;
+                }
+
+                if (page.normalizedMessages.length > 0) {
+                    this.enqueueMessages(sessionId, page.normalizedMessages);
+                }
+
+                if (!page.hasMore || page.oldestSeq === null || page.oldestSeq >= cursor) {
+                    return;
+                }
+
+                cursor = page.oldestSeq;
+            }
+        })()
+            .catch((error) => {
+                console.warn('Failed to backfill older session messages', error);
+            })
+            .finally(() => {
+                if (this.messageBackfillPromises.get(sessionId) === promise) {
+                    this.messageBackfillPromises.delete(sessionId);
+                }
+            });
+
+        this.messageBackfillPromises.set(sessionId, promise);
+    }
+
+    private getSendSync(sessionId: string): InvalidateSync {
+        let sync = this.sendSync.get(sessionId);
+        if (!sync) {
+            sync = new InvalidateSync(() => this.flushOutbox(sessionId));
+            this.sendSync.set(sessionId, sync);
+        }
+        return sync;
+    }
+
+    private enqueueMessages(sessionId: string, messages: NormalizedMessage[]) {
+        if (messages.length === 0) {
+            return;
+        }
+
+        let queue = this.sessionMessageQueue.get(sessionId);
+        if (!queue) {
+            queue = [];
+            this.sessionMessageQueue.set(sessionId, queue);
+        }
+        queue.push(...messages);
+
+        this.scheduleQueuedMessagesProcessing(sessionId);
+    }
+
+    private getSessionMessageLock(sessionId: string): AsyncLock {
+        let lock = this.sessionMessageLocks.get(sessionId);
+        if (!lock) {
+            lock = new AsyncLock();
+            this.sessionMessageLocks.set(sessionId, lock);
+        }
+        return lock;
+    }
+
+    private scheduleQueuedMessagesProcessing(sessionId: string) {
+        if (this.sessionQueueProcessing.has(sessionId)) {
+            return;
+        }
+
+        this.sessionQueueProcessing.add(sessionId);
+        const lock = this.getSessionMessageLock(sessionId);
+        void lock.inLock(() => {
+            while (true) {
+                const pending = this.sessionMessageQueue.get(sessionId);
+                if (!pending || pending.length === 0) {
+                    break;
+                }
+                const batch = pending.splice(0, pending.length);
+                this.applyMessages(sessionId, batch);
+            }
+        }).finally(() => {
+            this.sessionQueueProcessing.delete(sessionId);
+            const pending = this.sessionMessageQueue.get(sessionId);
+            if (pending && pending.length > 0) {
+                this.scheduleQueuedMessagesProcessing(sessionId);
+            }
+        });
+    }
+
+    private maybeStartBackgroundSendWatchdog() {
+        if (!shouldStartBackgroundSendWatchdog({
+            appState: this.appState,
+            hasPendingMessages: hasPendingOutboxMessages(this.sendAbortControllers, this.pendingOutbox),
+            hasWatchdog: this.backgroundSendTimeout !== null,
+        })) {
+            return;
+        }
+
+        log.log('📨 Pending messages detected in background. Starting 30s send watchdog.');
+        this.backgroundSendStartedAt = Date.now();
+        this.backgroundSendTimeout = setTimeout(() => {
+            this.backgroundSendTimeout = null;
+            void this.handleBackgroundSendTimeout();
+        }, Sync.BACKGROUND_SEND_TIMEOUT_MS);
+        void this.scheduleBackgroundSendTimeoutNotification();
+    }
+
+    private clearBackgroundSendWatchdog() {
+        if (this.backgroundSendTimeout) {
+            clearTimeout(this.backgroundSendTimeout);
+            this.backgroundSendTimeout = null;
+        }
+        this.backgroundSendStartedAt = null;
+    }
+
+    private async scheduleBackgroundSendTimeoutNotification() {
+        if (this.backgroundSendNotificationId) {
+            return;
+        }
+        try {
+            this.backgroundSendNotificationId = await Notifications.scheduleNotificationAsync({
+                content: {
+                    title: t('errors.messageNotSentTitle'),
+                    body: t('errors.messageNotSentBody'),
+                    sound: true
+                },
+                trigger: {
+                    type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+                    seconds: Math.ceil(Sync.BACKGROUND_SEND_TIMEOUT_MS / 1000)
+                }
+            });
+        } catch (error) {
+            log.log(`Failed to schedule background send timeout notification: ${error}`);
+        }
+    }
+
+    private async cancelBackgroundSendTimeoutNotification() {
+        if (!this.backgroundSendNotificationId) {
+            return;
+        }
+        try {
+            await Notifications.cancelScheduledNotificationAsync(this.backgroundSendNotificationId);
+        } catch (error) {
+            log.log(`Failed to cancel background send timeout notification: ${error}`);
+        } finally {
+            this.backgroundSendNotificationId = null;
+        }
+    }
+
+    private async notifyMessageSendFailed() {
+        try {
+            await Notifications.scheduleNotificationAsync({
+                content: {
+                    title: t('errors.messageFailedTitle'),
+                    body: t('errors.messageFailedBody'),
+                    sound: true
+                },
+                trigger: null
+            });
+        } catch (error) {
+            log.log(`Failed to schedule message failure notification: ${error}`);
+        }
+    }
+
+    private failPendingOutboxMessages(reasonText: string) {
+        const now = Date.now();
+        const sessionIds = abortAndDrainPendingOutbox(this.sendAbortControllers, this.pendingOutbox);
+
+        for (const sessionId of sessionIds) {
+            this.enqueueMessages(sessionId, [{
+                id: randomUUID(),
+                localId: null,
+                createdAt: now,
+                role: 'event',
+                isSidechain: false,
+                content: {
+                    type: 'message',
+                    message: reasonText
+                }
+            }]);
+        }
+    }
+
+    private async handleBackgroundSendTimeout() {
+        if (!hasPendingOutboxMessages(this.sendAbortControllers, this.pendingOutbox)) {
+            await this.cancelBackgroundSendTimeoutNotification();
+            this.backgroundSendStartedAt = null;
+            return;
+        }
+
+        await this.cancelBackgroundSendTimeoutNotification();
+        await this.notifyMessageSendFailed();
+        this.failPendingOutboxMessages(t('errors.backgroundSendFailedReason'));
+        this.backgroundSendStartedAt = null;
+    }
+
+    async sendMessage(sessionId: string, text: string, options?: SendMessageOptions) {
+
+        // Get encryption
+        const encryption = this.encryption.getSessionEncryption(sessionId);
+        if (!encryption) { // Should never happen
+            console.error(`Session ${sessionId} not found`);
+            return;
+        }
+
+        // Get session data from storage
+        const session = storage.getState().sessions[sessionId];
+        if (!session) {
+            console.error(`Session ${sessionId} not found in storage`);
+            return;
+        }
+
+        const { permissionMode, model, effortLevel } = resolveMessageModeMeta(session);
+        const { displayText, source = 'chat' } = options ?? {};
+
+        // Generate local ID
+        const localId = randomUUID();
+
+        // Determine sentFrom based on platform
+        let sentFrom: string;
+        if (Platform.OS === 'android') {
+            sentFrom = 'android';
+        } else if (Platform.OS === 'ios') {
+            // Check if running on Mac (Catalyst or Designed for iPad on Mac)
+            if (isRunningOnMac()) {
+                sentFrom = 'mac';
+            } else {
+                sentFrom = 'ios';
+            }
+        } else {
+            sentFrom = 'ios'; // fallback
+        }
+
+        const fallbackModel: string | null = null;
+
+        // Create user message content with metadata
+        const content: RawRecord = {
+            role: 'user',
+            content: {
+                type: 'text',
+                text
+            },
+            meta: {
+                sentFrom,
+                permissionMode,
+                model,
+                ...(effortLevel ? { effortLevel } : {}),
+                fallbackModel,
+                appendSystemPrompt: systemPrompt,
+                ...(displayText && { displayText }) // Add displayText if provided
+            }
+        };
+        const encryptedRawRecord = await encryption.encryptRawRecord(content);
+
+        // Add to messages - normalize the raw record
+        const createdAt = Date.now();
+        const normalizedMessage = normalizeRawMessage(localId, localId, createdAt, content);
+        if (normalizedMessage) {
+            this.enqueueMessages(sessionId, [normalizedMessage]);
+        }
+
+        let pending = this.pendingOutbox.get(sessionId);
+        if (!pending) {
+            pending = [];
+            this.pendingOutbox.set(sessionId, pending);
+        }
+        pending.push({
+            localId,
+            content: encryptedRawRecord
+        });
+        trackMessageSent(source, session.metadata);
+
+        this.getSendSync(sessionId).invalidate();
+        this.maybeStartBackgroundSendWatchdog();
+    }
+
+    applySettings = (delta: Partial<Settings>) => {
+        storage.getState().applySettingsLocal(delta);
+
+        // Save pending settings
+        this.pendingSettings = { ...this.pendingSettings, ...delta };
+        savePendingSettings(this.pendingSettings);
+
+        // Sync PostHog opt-out state if it was changed
+        if (tracking && 'analyticsOptOut' in delta) {
+            const currentSettings = storage.getState().settings;
+            if (currentSettings.analyticsOptOut) {
+                tracking.optOut();
+            } else {
+                tracking.optIn();
+            }
+        }
+
+        // Invalidate settings sync
+        this.settingsSync.invalidate();
+    }
+
+    refreshPurchases = () => {
+        this.purchasesSync.invalidate();
+    }
+
+    refreshProfile = async () => {
+        await this.profileSync.invalidateAndAwait();
+    }
+
+    purchaseProduct = async (productId: string): Promise<{ success: boolean; error?: string }> => {
+        try {
+            // Check if RevenueCat is initialized
+            if (!this.revenueCatInitialized) {
+                return { success: false, error: 'RevenueCat not initialized' };
+            }
+
+            // Fetch the product
+            const products = await RevenueCat.getProducts([productId]);
+            if (products.length === 0) {
+                return { success: false, error: `Product '${productId}' not found` };
+            }
+
+            // Purchase the product
+            const product = products[0];
+            const { customerInfo } = await RevenueCat.purchaseStoreProduct(product);
+
+            // Update local purchases data
+            storage.getState().applyPurchases(customerInfo);
+
+            return { success: true };
+        } catch (error: any) {
+            // Check if user cancelled
+            if (error.userCancelled) {
+                return { success: false, error: 'Purchase cancelled' };
+            }
+
+            // Return the error message
+            return { success: false, error: error.message || 'Purchase failed' };
+        }
+    }
+
+    getOfferings = async (): Promise<{ success: boolean; offerings?: any; error?: string }> => {
+        try {
+            // Check if RevenueCat is initialized
+            if (!this.revenueCatInitialized) {
+                return { success: false, error: 'RevenueCat not initialized' };
+            }
+
+            // Fetch offerings
+            const offerings = await RevenueCat.getOfferings();
+
+            // Return the offerings data
+            return {
+                success: true,
+                offerings: {
+                    current: offerings.current,
+                    all: offerings.all
+                }
+            };
+        } catch (error: any) {
+            return { success: false, error: error.message || 'Failed to fetch offerings' };
+        }
+    }
+
+    presentPaywall = async (flow?: string): Promise<{ success: boolean; purchased?: boolean; error?: string }> => {
+        try {
+            // Check if RevenueCat is initialized
+            if (!this.revenueCatInitialized) {
+                const error = 'RevenueCat not initialized';
+                trackPaywallError(error, flow);
+                return { success: false, error };
+            }
+
+            // Track paywall presentation
+            trackPaywallPresented(flow);
+
+            // Present the paywall (with flow custom variable if specified)
+            const result = await RevenueCat.presentPaywall(
+                flow ? { customVariables: { flow } } : undefined
+            );
+
+            // Handle the result
+            switch (result) {
+                case PaywallResult.PURCHASED:
+                    trackPaywallPurchased(flow);
+                    // Refresh customer info after purchase
+                    await this.syncPurchases();
+                    return { success: true, purchased: true };
+                case PaywallResult.RESTORED:
+                    trackPaywallRestored(flow);
+                    // Refresh customer info after restore
+                    await this.syncPurchases();
+                    return { success: true, purchased: true };
+                case PaywallResult.CANCELLED:
+                    trackPaywallCancelled(flow);
+                    return { success: true, purchased: false };
+                case PaywallResult.NOT_PRESENTED:
+                    // Don't track error for NOT_PRESENTED as it's a platform limitation
+                    return { success: false, error: 'Paywall not available on this platform' };
+                case PaywallResult.ERROR:
+                default:
+                    const errorMsg = 'Failed to present paywall';
+                    trackPaywallError(errorMsg, flow);
+                    return { success: false, error: errorMsg };
+            }
+        } catch (error: any) {
+            const errorMessage = error.message || 'Failed to present paywall';
+            trackPaywallError(errorMessage, flow);
+            return { success: false, error: errorMessage };
+        }
+    }
+
+    //
+    // Private
+    //
+
+    private fetchSessions = async () => {
+        if (!this.credentials) return;
+
+        const API_ENDPOINT = getServerUrl();
+        const response = await fetch(`${API_ENDPOINT}/v1/sessions`, {
+            headers: {
+                'Authorization': `Bearer ${this.credentials.token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (await handleUnauthorizedResponse(response, '/v1/sessions')) {
+            return;
+        }
+
+        if (!response.ok) {
+            throw new Error(`Failed to fetch sessions: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const sessions = data.sessions as Array<{
+            id: string;
+            tag: string;
+            seq: number;
+            metadata: string;
+            metadataVersion: number;
+            agentState: string | null;
+            agentStateVersion: number;
+            dataEncryptionKey: string | null;
+            active: boolean;
+            activeAt: number;
+            createdAt: number;
+            updatedAt: number;
+            lastMessage: ApiMessage | null;
+        }>;
+
+        const decryptedSessions = await this.decryptSessions(sessions);
+
+        // Apply to storage
+        this.applySessions(decryptedSessions);
+        log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
+
+    }
+
+    public refreshMachines = async () => {
+        return this.fetchMachines();
+    }
+
+    public refreshSessions = async () => {
+        return this.sessionsSync.invalidateAndAwait();
+    }
+
+    public waitForSessionReady = async (
+        sessionId: string,
+        options: {
+            timeoutMs?: number;
+            pollMs?: number;
+            allowFallbackRefresh?: boolean;
+        } = {},
+    ): Promise<boolean> => {
+        const timeoutMs = options.timeoutMs ?? 2_500;
+        const pollMs = options.pollMs ?? 50;
+        const allowFallbackRefresh = options.allowFallbackRefresh ?? true;
+
+        if (this.isSessionReadyLocally(sessionId)) {
+            return true;
+        }
+
+        const startedAt = Date.now();
+        while ((Date.now() - startedAt) < timeoutMs) {
+            await delay(pollMs);
+            if (this.isSessionReadyLocally(sessionId)) {
+                return true;
+            }
+        }
+
+        if (!allowFallbackRefresh) {
+            return this.isSessionReadyLocally(sessionId);
+        }
+
+        try {
+            await this.refreshSessions();
+        } catch {
+            // Fall back to the current local state on refresh failures.
+        }
+
+        return this.isSessionReadyLocally(sessionId);
+    }
+
+    public refreshSessionMessages = async (sessionId: string) => {
+        return this.getMessagesSync(sessionId).invalidateAndAwait();
+    }
+
+    public refreshSessionMessagesIfStale = async (sessionId: string) => {
+        const now = Date.now();
+        const didSchedule = this.refreshVisibleSessionMessages(sessionId, now);
+        if (!didSchedule) {
+            return;
+        }
+
+        return this.getMessagesSync(sessionId).awaitQueue();
+    }
+
+    public getCredentials() {
+        return this.credentials;
+    }
+
+    // Artifact methods
+    public fetchArtifactsList = async (): Promise<void> => {
+        log.log('📦 fetchArtifactsList: Starting artifact sync');
+        if (!this.credentials) {
+            log.log('📦 fetchArtifactsList: No credentials, skipping');
+            return;
+        }
+
+        try {
+            log.log('📦 fetchArtifactsList: Fetching artifacts from server');
+            const artifacts = await fetchArtifacts(this.credentials);
+            log.log(`📦 fetchArtifactsList: Received ${artifacts.length} artifacts from server`);
+            const decryptedArtifacts = await Promise.all(artifacts.map(async (artifact) => {
+                try {
+                    // Decrypt the data encryption key
+                    const decryptedKey = await this.encryption.decryptEncryptionKey(artifact.dataEncryptionKey);
+                    if (!decryptedKey) {
+                        console.error(`Failed to decrypt key for artifact ${artifact.id}`);
+                        return {
+                            id: artifact.id,
+                            title: null,
+                            body: undefined,
+                            headerVersion: artifact.headerVersion,
+                            seq: artifact.seq,
+                            createdAt: artifact.createdAt,
+                            updatedAt: artifact.updatedAt,
+                            isDecrypted: false,
+                        };
+                    }
+
+                    // Store the decrypted key in memory
+                    this.artifactDataKeys.set(artifact.id, decryptedKey);
+
+                    // Create artifact encryption instance
+                    const artifactEncryption = new ArtifactEncryption(decryptedKey);
+
+                    // Decrypt header
+                    const header = await artifactEncryption.decryptHeader(artifact.header);
+                    
+                    return {
+                        id: artifact.id,
+                        title: header?.title || null,
+                        sessions: header?.sessions,  // Include sessions from header
+                        draft: header?.draft,        // Include draft flag from header
+                        body: undefined, // Body not loaded in list
+                        headerVersion: artifact.headerVersion,
+                        bodyVersion: artifact.bodyVersion,
+                        seq: artifact.seq,
+                        createdAt: artifact.createdAt,
+                        updatedAt: artifact.updatedAt,
+                        isDecrypted: !!header,
+                    } as DecryptedArtifact;
+                } catch (err) {
+                    console.error(`Failed to decrypt artifact ${artifact.id}:`, err);
+                    // Return with decryption failed flag
+                    return {
+                        id: artifact.id,
+                        title: null,
+                        body: undefined,
+                        headerVersion: artifact.headerVersion,
+                        seq: artifact.seq,
+                        createdAt: artifact.createdAt,
+                        updatedAt: artifact.updatedAt,
+                        isDecrypted: false,
+                    } as DecryptedArtifact;
+                }
+            }));
+
+            log.log(`📦 fetchArtifactsList: Successfully decrypted ${decryptedArtifacts.length} artifacts`);
+            storage.getState().applyArtifacts(decryptedArtifacts);
+            log.log('📦 fetchArtifactsList: Artifacts applied to storage');
+        } catch (error) {
+            log.log(`📦 fetchArtifactsList: Error fetching artifacts: ${error}`);
+            console.error('Failed to fetch artifacts:', error);
+            throw error;
+        }
+    }
+
+    public async fetchArtifactWithBody(artifactId: string): Promise<DecryptedArtifact | null> {
+        if (!this.credentials) return null;
+
+        try {
+            const artifact = await fetchArtifact(this.credentials, artifactId);
+
+            // Decrypt the data encryption key
+            const decryptedKey = await this.encryption.decryptEncryptionKey(artifact.dataEncryptionKey);
+            if (!decryptedKey) {
+                console.error(`Failed to decrypt key for artifact ${artifactId}`);
+                return null;
+            }
+
+            // Store the decrypted key in memory
+            this.artifactDataKeys.set(artifact.id, decryptedKey);
+
+            // Create artifact encryption instance
+            const artifactEncryption = new ArtifactEncryption(decryptedKey);
+
+            // Decrypt header and body
+            const header = await artifactEncryption.decryptHeader(artifact.header);
+            const body = artifact.body ? await artifactEncryption.decryptBody(artifact.body) : null;
+
+            return {
+                id: artifact.id,
+                title: header?.title || null,
+                sessions: header?.sessions,  // Include sessions from header
+                draft: header?.draft,        // Include draft flag from header
+                body: body?.body || null,
+                headerVersion: artifact.headerVersion,
+                bodyVersion: artifact.bodyVersion,
+                seq: artifact.seq,
+                createdAt: artifact.createdAt,
+                updatedAt: artifact.updatedAt,
+                isDecrypted: !!header,
+            };
+        } catch (error) {
+            console.error(`Failed to fetch artifact ${artifactId}:`, error);
+            return null;
+        }
+    }
+
+    public async createArtifact(
+        title: string | null, 
+        body: string | null,
+        sessions?: string[],
+        draft?: boolean
+    ): Promise<string> {
+        if (!this.credentials) {
+            throw new Error('Not authenticated');
+        }
+
+        try {
+            // Generate unique artifact ID
+            const artifactId = this.encryption.generateId();
+
+            // Generate data encryption key
+            const dataEncryptionKey = ArtifactEncryption.generateDataEncryptionKey();
+            
+            // Store the decrypted key in memory
+            this.artifactDataKeys.set(artifactId, dataEncryptionKey);
+            
+            // Encrypt the data encryption key with user's key
+            const encryptedKey = await this.encryption.encryptEncryptionKey(dataEncryptionKey);
+            
+            // Create artifact encryption instance
+            const artifactEncryption = new ArtifactEncryption(dataEncryptionKey);
+            
+            // Encrypt header and body
+            const encryptedHeader = await artifactEncryption.encryptHeader({ title, sessions, draft });
+            const encryptedBody = await artifactEncryption.encryptBody({ body });
+            
+            // Create the request
+            const request: ArtifactCreateRequest = {
+                id: artifactId,
+                header: encryptedHeader,
+                body: encryptedBody,
+                dataEncryptionKey: encodeBase64(encryptedKey, 'base64'),
+            };
+            
+            // Send to server
+            const artifact = await createArtifact(this.credentials, request);
+            
+            // Add to local storage
+            const decryptedArtifact: DecryptedArtifact = {
+                id: artifact.id,
+                title,
+                sessions,
+                draft,
+                body,
+                headerVersion: artifact.headerVersion,
+                bodyVersion: artifact.bodyVersion,
+                seq: artifact.seq,
+                createdAt: artifact.createdAt,
+                updatedAt: artifact.updatedAt,
+                isDecrypted: true,
+            };
+            
+            storage.getState().addArtifact(decryptedArtifact);
+            
+            return artifactId;
+        } catch (error) {
+            console.error('Failed to create artifact:', error);
+            throw error;
+        }
+    }
+
+    public async updateArtifact(
+        artifactId: string, 
+        title: string | null, 
+        body: string | null,
+        sessions?: string[],
+        draft?: boolean
+    ): Promise<void> {
+        if (!this.credentials) {
+            throw new Error('Not authenticated');
+        }
+
+        try {
+            // Get current artifact to get versions and encryption key
+            const currentArtifact = storage.getState().artifacts[artifactId];
+            if (!currentArtifact) {
+                throw new Error('Artifact not found');
+            }
+
+            // Get the data encryption key from memory or fetch it
+            let dataEncryptionKey = this.artifactDataKeys.get(artifactId);
+            
+            // Fetch full artifact if we don't have version info or encryption key
+            let headerVersion = currentArtifact.headerVersion;
+            let bodyVersion = currentArtifact.bodyVersion;
+            
+            if (headerVersion === undefined || bodyVersion === undefined || !dataEncryptionKey) {
+                const fullArtifact = await fetchArtifact(this.credentials, artifactId);
+                headerVersion = fullArtifact.headerVersion;
+                bodyVersion = fullArtifact.bodyVersion;
+                
+                // Decrypt and store the data encryption key if we don't have it
+                if (!dataEncryptionKey) {
+                    const decryptedKey = await this.encryption.decryptEncryptionKey(fullArtifact.dataEncryptionKey);
+                    if (!decryptedKey) {
+                        throw new Error('Failed to decrypt encryption key');
+                    }
+                    this.artifactDataKeys.set(artifactId, decryptedKey);
+                    dataEncryptionKey = decryptedKey;
+                }
+            }
+
+            // Create artifact encryption instance
+            const artifactEncryption = new ArtifactEncryption(dataEncryptionKey);
+
+            // Prepare update request
+            const updateRequest: ArtifactUpdateRequest = {};
+            
+            // Check if header needs updating (title, sessions, or draft changed)
+            if (title !== currentArtifact.title || 
+                JSON.stringify(sessions) !== JSON.stringify(currentArtifact.sessions) ||
+                draft !== currentArtifact.draft) {
+                const encryptedHeader = await artifactEncryption.encryptHeader({ 
+                    title, 
+                    sessions, 
+                    draft 
+                });
+                updateRequest.header = encryptedHeader;
+                updateRequest.expectedHeaderVersion = headerVersion;
+            }
+
+            // Only update body if it changed
+            if (body !== currentArtifact.body) {
+                const encryptedBody = await artifactEncryption.encryptBody({ body });
+                updateRequest.body = encryptedBody;
+                updateRequest.expectedBodyVersion = bodyVersion;
+            }
+
+            // Skip if no changes
+            if (Object.keys(updateRequest).length === 0) {
+                return;
+            }
+
+            // Send update to server
+            const response = await updateArtifact(this.credentials, artifactId, updateRequest);
+            
+            if (!response.success) {
+                // Handle version mismatch
+                if (response.error === 'version-mismatch') {
+                    throw new Error('Artifact was modified by another client. Please refresh and try again.');
+                }
+                throw new Error('Failed to update artifact');
+            }
+
+            // Update local storage
+            const updatedArtifact: DecryptedArtifact = {
+                ...currentArtifact,
+                title,
+                sessions,
+                draft,
+                body,
+                headerVersion: response.headerVersion !== undefined ? response.headerVersion : headerVersion,
+                bodyVersion: response.bodyVersion !== undefined ? response.bodyVersion : bodyVersion,
+                updatedAt: Date.now(),
+            };
+            
+            storage.getState().updateArtifact(updatedArtifact);
+        } catch (error) {
+            console.error('Failed to update artifact:', error);
+            throw error;
+        }
+    }
+
+    private ensureMachineEncryption = async (machineId: string, dataEncryptionKey?: string | null) => {
+        let machineEncryption = this.encryption.getMachineEncryption(machineId);
+        if (machineEncryption) {
+            return machineEncryption;
+        }
+
+        let decryptedKey = this.machineDataKeys.get(machineId);
+        if (!decryptedKey && dataEncryptionKey) {
+            decryptedKey = await this.encryption.decryptEncryptionKey(dataEncryptionKey) ?? undefined;
+            if (decryptedKey) {
+                this.machineDataKeys.set(machineId, decryptedKey);
+            }
+        }
+
+        await this.encryption.initializeMachines(new Map([[machineId, decryptedKey ?? null]]));
+        return this.encryption.getMachineEncryption(machineId);
+    }
+
+    private getMachineRealtimeUpdateDependencies = (): MachineRealtimeUpdateDependencies => ({
+        ensureMachineEncryption: this.ensureMachineEncryption,
+        getMachine: (machineId) => storage.getState().machines[machineId],
+        applyMachines: (machines) => storage.getState().applyMachines(machines),
+        invalidateMachines: () => this.machinesSync.invalidate(),
+    })
+
+    private fetchMachines = async () => {
+        if (!this.credentials) return;
+
+        const previousMachines = storage.getState().machines;
+
+        console.log('📊 Sync: Fetching machines...');
+        const API_ENDPOINT = getServerUrl();
+        const response = await fetch(`${API_ENDPOINT}/v1/machines`, {
+            headers: {
+                'Authorization': `Bearer ${this.credentials.token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (await handleUnauthorizedResponse(response, '/v1/machines')) {
+            return;
+        }
+
+        if (!response.ok) {
+            console.error(`Failed to fetch machines: ${response.status}`);
+            return;
+        }
+
+        const data = await response.json();
+        console.log(`📊 Sync: Fetched ${Array.isArray(data) ? data.length : 0} machines from server`);
+        const machines = data as Array<{
+            id: string;
+            metadata: string;
+            metadataVersion: number;
+            daemonState?: string | null;
+            daemonStateVersion?: number;
+            dataEncryptionKey?: string | null; // Add support for per-machine encryption keys
+            seq: number;
+            active: boolean;
+            activeAt: number;  // Changed from lastActiveAt
+            createdAt: number;
+            updatedAt: number;
+        }>;
+
+        // First, collect and decrypt encryption keys for all machines
+        const machineKeysMap = new Map<string, Uint8Array | null>();
+        for (const machine of machines) {
+            if (machine.dataEncryptionKey) {
+                const decryptedKey = await this.encryption.decryptEncryptionKey(machine.dataEncryptionKey);
+                if (!decryptedKey) {
+                    console.error(`Failed to decrypt data encryption key for machine ${machine.id}`);
+                    continue;
+                }
+                machineKeysMap.set(machine.id, decryptedKey);
+                this.machineDataKeys.set(machine.id, decryptedKey);
+            } else {
+                machineKeysMap.set(machine.id, null);
+            }
+        }
+
+        // Initialize machine encryptions
+        await this.encryption.initializeMachines(machineKeysMap);
+
+        // Process all machines first, then update state once
+        const decryptedMachines: Machine[] = [];
+
+        for (const machine of machines) {
+            // Get machine-specific encryption (might exist from previous initialization)
+            const machineEncryption = this.encryption.getMachineEncryption(machine.id);
+            if (!machineEncryption) {
+                console.error(`Machine encryption not found for ${machine.id} - this should never happen`);
+                continue;
+            }
+
+            try {
+
+                // Use machine-specific encryption (which handles fallback internally)
+                const metadata = machine.metadata
+                    ? await machineEncryption.decryptMetadata(machine.metadataVersion, machine.metadata)
+                    : null;
+
+                if (machine.metadata && !metadata) {
+                    console.warn(`Failed to decrypt metadata for machine ${machine.id}; showing fallback machine entry.`);
+                }
+
+                const daemonState = machine.daemonState
+                    ? await machineEncryption.decryptDaemonState(machine.daemonStateVersion || 0, machine.daemonState)
+                    : null;
+
+                decryptedMachines.push({
+                    id: machine.id,
+                    seq: machine.seq,
+                    createdAt: machine.createdAt,
+                    updatedAt: machine.updatedAt,
+                    active: machine.active,
+                    activeAt: machine.activeAt,
+                    metadata,
+                    metadataVersion: machine.metadataVersion,
+                    daemonState,
+                    daemonStateVersion: machine.daemonStateVersion || 0
+                });
+            } catch (error) {
+                console.error(`Failed to decrypt machine ${machine.id}:`, error);
+                // Still add the machine with null metadata
+                decryptedMachines.push({
+                    id: machine.id,
+                    seq: machine.seq,
+                    createdAt: machine.createdAt,
+                    updatedAt: machine.updatedAt,
+                    active: machine.active,
+                    activeAt: machine.activeAt,
+                    metadata: null,
+                    metadataVersion: machine.metadataVersion,
+                    daemonState: null,
+                    daemonStateVersion: 0
+                });
+            }
+        }
+
+        // Replace entire machine state with fetched machines
+        storage.getState().applyMachines(decryptedMachines, true);
+        const changedMachineIds = decryptedMachines
+            .filter((machine) => didMachineHistoryRelevantStateChange(previousMachines[machine.id], machine))
+            .map((machine) => machine.id);
+        if (changedMachineIds.length > 0) {
+            invalidateNativeCliHistoryForMachines(changedMachineIds);
+        }
+        log.log(`🖥️ fetchMachines completed - processed ${decryptedMachines.length} machines`);
+    }
+
+    private syncSettings = async () => {
+        if (!this.credentials) return;
+
+        const API_ENDPOINT = getServerUrl();
+        const maxRetries = 3;
+        let retryCount = 0;
+
+        // Apply pending settings
+        if (Object.keys(this.pendingSettings).length > 0) {
+
+            while (retryCount < maxRetries) {
+                let version = storage.getState().settingsVersion;
+                let settings = applySettings(storage.getState().settings, this.pendingSettings);
+                const response = await fetch(`${API_ENDPOINT}/v1/account/settings`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        settings: await this.encryption.encryptRaw(settings),
+                        expectedVersion: version ?? 0
+                    }),
+                    headers: {
+                        'Authorization': `Bearer ${this.credentials.token}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                if (await handleUnauthorizedResponse(response, '/v1/account/settings')) {
+                    return;
+                }
+                const data = await response.json() as {
+                    success: false,
+                    error: string,
+                    currentVersion: number,
+                    currentSettings: string | null
+                } | {
+                    success: true
+                };
+                if (data.success) {
+                    this.pendingSettings = {};
+                    savePendingSettings({});
+                    break;
+                }
+                if (data.error === 'version-mismatch') {
+                    // Parse server settings
+                    const serverSettings = data.currentSettings
+                        ? settingsParse(await this.encryption.decryptRaw(data.currentSettings))
+                        : { ...settingsDefaults };
+
+                    // Merge: server base + our pending changes (our changes win)
+                    const mergedSettings = applySettings(serverSettings, this.pendingSettings);
+
+                    // Update local storage with merged result at server's version
+                    storage.getState().applySettings(mergedSettings, data.currentVersion);
+
+                    // Sync tracking state with merged settings
+                    if (tracking) {
+                        mergedSettings.analyticsOptOut ? tracking.optOut() : tracking.optIn();
+                    }
+
+                    // Log and retry
+                    console.log('settings version-mismatch, retrying', {
+                        serverVersion: data.currentVersion,
+                        retry: retryCount + 1,
+                        pendingKeys: Object.keys(this.pendingSettings)
+                    });
+                    retryCount++;
+                    continue;
+                } else {
+                    throw new Error(`Failed to sync settings: ${data.error}`);
+                }
+            }
+        }
+
+        // If exhausted retries, throw to trigger outer backoff delay
+        if (retryCount >= maxRetries) {
+            throw new Error(`Settings sync failed after ${maxRetries} retries due to version conflicts`);
+        }
+
+        // Run request
+        const response = await fetch(`${API_ENDPOINT}/v1/account/settings`, {
+            headers: {
+                'Authorization': `Bearer ${this.credentials.token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        if (await handleUnauthorizedResponse(response, '/v1/account/settings')) {
+            return;
+        }
+        if (!response.ok) {
+            throw new Error(`Failed to fetch settings: ${response.status}`);
+        }
+        const data = await response.json() as {
+            settings: string | null,
+            settingsVersion: number
+        };
+
+        // Parse response
+        let parsedSettings: Settings;
+        if (data.settings) {
+            parsedSettings = settingsParse(await this.encryption.decryptRaw(data.settings));
+        } else {
+            parsedSettings = { ...settingsDefaults };
+        }
+
+        // Log
+        console.log('settings', JSON.stringify({
+            settings: parsedSettings,
+            version: data.settingsVersion
+        }));
+
+        // Apply settings to storage
+        storage.getState().applySettings(parsedSettings, data.settingsVersion);
+
+        // Sync PostHog opt-out state with settings
+        if (tracking) {
+            if (parsedSettings.analyticsOptOut) {
+                tracking.optOut();
+            } else {
+                tracking.optIn();
+            }
+        }
+    }
+
+    private fetchProfile = async () => {
+        if (!this.credentials) return;
+
+        const API_ENDPOINT = getServerUrl();
+        const response = await fetch(`${API_ENDPOINT}/v1/account/profile`, {
+            headers: {
+                'Authorization': `Bearer ${this.credentials.token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (await handleUnauthorizedResponse(response, '/v1/account/profile')) {
+            return;
+        }
+
+        if (!response.ok) {
+            throw new Error(`Failed to fetch profile: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const parsedProfile = profileParse(data);
+
+        // Log profile data for debugging
+        console.log('profile', JSON.stringify({
+            id: parsedProfile.id,
+            timestamp: parsedProfile.timestamp,
+            firstName: parsedProfile.firstName,
+            lastName: parsedProfile.lastName,
+            hasAvatar: !!parsedProfile.avatar,
+            hasGitHub: !!parsedProfile.github
+        }));
+
+        // Apply profile to storage
+        storage.getState().applyProfile(parsedProfile);
+    }
+
+    private fetchNativeUpdate = async () => {
+        try {
+            // Skip in development
+            if ((Platform.OS !== 'android' && Platform.OS !== 'ios') || !Constants.expoConfig?.version) {
+                return;
+            }
+            if (Platform.OS === 'ios' && !Constants.expoConfig?.ios?.bundleIdentifier) {
+                return;
+            }
+            if (Platform.OS === 'android' && !Constants.expoConfig?.android?.package) {
+                return;
+            }
+
+            const serverUrl = getServerUrl();
+
+            // Get platform and app identifiers
+            const platform = Platform.OS;
+            const version = Constants.expoConfig?.version!;
+            const appId = (Platform.OS === 'ios' ? Constants.expoConfig?.ios?.bundleIdentifier! : Constants.expoConfig?.android?.package!);
+
+            const response = await fetch(`${serverUrl}/v1/version`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    platform,
+                    version,
+                    app_id: appId,
+                }),
+            });
+
+            if (!response.ok) {
+                console.log(`[fetchNativeUpdate] Request failed: ${response.status}`);
+                return;
+            }
+
+            const data = await response.json();
+            console.log('[fetchNativeUpdate] Data:', data);
+
+            // Apply update status to storage
+            if (data.update_required && data.update_url) {
+                storage.getState().applyNativeUpdateStatus({
+                    available: true,
+                    updateUrl: data.update_url
+                });
+            } else {
+                storage.getState().applyNativeUpdateStatus({
+                    available: false
+                });
+            }
+        } catch (error) {
+            console.log('[fetchNativeUpdate] Error:', error);
+            storage.getState().applyNativeUpdateStatus(null);
+        }
+    }
+
+    private syncPurchases = async () => {
+        try {
+            // Initialize RevenueCat if not already done
+            if (!this.revenueCatInitialized) {
+                // Get the appropriate API key based on platform
+                let apiKey: string | undefined;
+
+                if (Platform.OS === 'ios') {
+                    apiKey = config.revenueCatAppleKey;
+                } else if (Platform.OS === 'android') {
+                    apiKey = config.revenueCatGoogleKey;
+                }
+
+                if (!apiKey) {
+                    console.log(`RevenueCat: No API key found for platform ${Platform.OS}`);
+                    return;
+                }
+
+                // Configure RevenueCat
+                if (__DEV__) {
+                    RevenueCat.setLogLevel(LogLevel.DEBUG);
+                }
+
+                // Initialize with the public ID as user ID
+                RevenueCat.configure({
+                    apiKey,
+                    appUserID: this.serverID, // In server this is a CUID, which we can assume is globaly unique even between servers
+                    useAmazon: false,
+                });
+
+                this.revenueCatInitialized = true;
+                console.log('RevenueCat initialized successfully');
+            }
+
+            // Sync purchases
+            await RevenueCat.syncPurchases();
+
+            // Fetch customer info
+            const customerInfo = await RevenueCat.getCustomerInfo();
+
+            // Apply to storage (storage handles the transformation)
+            storage.getState().applyPurchases(customerInfo);
+
+        } catch (error) {
+            console.error('Failed to sync purchases:', error);
+            // Don't throw - purchases are optional
+        }
+    }
+
+    private flushOutbox = async (sessionId: string) => {
+        const pending = this.pendingOutbox.get(sessionId);
+        if (!pending || pending.length === 0) {
+            await this.reconcileBackgroundSendWatchdog();
+            return;
+        }
+
+        const batch = pending.slice();
+        const controller = new AbortController();
+        this.sendAbortControllers.set(sessionId, controller);
+        try {
+            const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    messages: batch.map((message) => ({
+                        localId: message.localId,
+                        content: message.content
+                    }))
+                }),
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                signal: controller.signal
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to send messages for ${sessionId}: ${response.status}`);
+            }
+
+            const data = await response.json() as V3PostSessionMessagesResponse;
+            pending.splice(0, batch.length);
+            if (Array.isArray(data.messages) && data.messages.length > 0) {
+                const currentLastSeq = this.getTrackedLastSeq(sessionId) ?? 0;
+                let maxSeq = currentLastSeq;
+                for (const message of data.messages) {
+                    if (message.seq > maxSeq) {
+                        maxSeq = message.seq;
+                    }
+                }
+                this.setTrackedLastSeq(sessionId, maxSeq);
+            }
+        } catch (error) {
+            this.maybeStartBackgroundSendWatchdog();
+            throw error;
+        } finally {
+            this.sendAbortControllers.delete(sessionId);
+        }
+
+        if (pending.length === 0) {
+            this.pendingOutbox.delete(sessionId);
+        }
+        await this.reconcileBackgroundSendWatchdog();
+    }
+
+    private reconcileBackgroundSendWatchdog = async () => {
+        const disposition = getBackgroundSendWatchdogDisposition({
+            appState: this.appState,
+            hasPendingMessages: hasPendingOutboxMessages(this.sendAbortControllers, this.pendingOutbox),
+        });
+
+        if (disposition === 'clear') {
+            this.clearBackgroundSendWatchdog();
+            await this.cancelBackgroundSendTimeoutNotification();
+            this.backgroundSendStartedAt = null;
+            return;
+        }
+
+        if (disposition === 'start') {
+            this.maybeStartBackgroundSendWatchdog();
+        }
+    }
+
+    private fetchMessages = async (sessionId: string) => {
+        log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
+        const lock = this.getSessionMessageLock(sessionId);
+        await lock.inLock(async () => {
+            const visibilityVersion = this.getSessionVisibilityVersion(sessionId);
+            if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                log.log(`💬 fetchMessages skipped for hidden session ${sessionId}`);
+                return;
+            }
+
+            const encryption = this.encryption.getSessionEncryption(sessionId);
+            if (!encryption) {
+                log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
+                throw new Error(`Session encryption not ready for ${sessionId}`);
+            }
+
+            const abortController = new AbortController();
+            this.messageFetchAbortControllers.set(sessionId, abortController);
+            const existingSessionMessages = storage.getState().sessionMessages[sessionId]?.messages ?? [];
+            const trackedLastSeq = this.getTrackedLastSeq(sessionId);
+            const afterSeq = trackedLastSeq ?? 0;
+            const shouldBootstrap = shouldBootstrapVisibleSessionMessages({
+                loadedCount: existingSessionMessages.length,
+                lastSeq: afterSeq,
+            });
+            let nextAfterSeq = afterSeq;
+            let hasMore = true;
+            let totalNormalized = 0;
+            let completed = false;
+            let backgroundBackfillBeforeSeq: number | null = null;
+
+            try {
+                if (shouldBootstrap) {
+                    let page;
+                    try {
+                        page = await this.fetchMessagesPage(sessionId, encryption, {
+                            signal: abortController.signal,
+                            tail: true,
+                            limit: INITIAL_VISIBLE_MESSAGE_LIMIT,
+                        });
+                    } catch (error) {
+                        if (this.isAbortError(error)) {
+                            log.log(`💬 fetchMessages aborted for session ${sessionId}`);
+                            return;
+                        }
+                        throw error;
+                    }
+
+                    if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                        log.log(`💬 fetchMessages discarded recent bootstrap for hidden session ${sessionId}`);
+                        return;
+                    }
+
+                    if (page.normalizedMessages.length > 0) {
+                        totalNormalized += page.normalizedMessages.length;
+                        this.enqueueMessages(sessionId, page.normalizedMessages);
+                    }
+
+                    if (page.newestSeq !== null) {
+                        this.setTrackedLastSeq(sessionId, page.newestSeq);
+                        nextAfterSeq = page.newestSeq;
+                    }
+                    backgroundBackfillBeforeSeq = page.hasMore ? page.oldestSeq : null;
+                    completed = true;
+                } else {
+                    while (hasMore) {
+                        if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                            log.log(`💬 fetchMessages stopped for hidden session ${sessionId}`);
+                            return;
+                        }
+
+                        let page;
+                        try {
+                        page = await this.fetchMessagesPage(sessionId, encryption, {
+                            signal: abortController.signal,
+                            afterSeq: nextAfterSeq,
+                            limit: 100,
+                            });
+                        } catch (error) {
+                            if (this.isAbortError(error)) {
+                                log.log(`💬 fetchMessages aborted for session ${sessionId}`);
+                                return;
+                            }
+                            throw error;
+                        }
+
+                        if (!this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                            log.log(`💬 fetchMessages discarded page for hidden session ${sessionId}`);
+                            return;
+                        }
+
+                        if (page.normalizedMessages.length > 0) {
+                            totalNormalized += page.normalizedMessages.length;
+                            this.enqueueMessages(sessionId, page.normalizedMessages);
+                        }
+
+                        const maxSeq = page.newestSeq ?? nextAfterSeq;
+                        this.setTrackedLastSeq(sessionId, maxSeq);
+                        hasMore = page.hasMore;
+                        if (hasMore && maxSeq === nextAfterSeq) {
+                            log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
+                            break;
+                        }
+                        nextAfterSeq = maxSeq;
+                    }
+
+                    completed = true;
+                }
+            } finally {
+                if (this.messageFetchAbortControllers.get(sessionId) === abortController) {
+                    this.messageFetchAbortControllers.delete(sessionId);
+                }
+            }
+
+            if (completed && this.shouldContinueVisibleSync(sessionId, visibilityVersion)) {
+                storage.getState().applyMessagesLoaded(sessionId);
+                log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);
+                if (backgroundBackfillBeforeSeq !== null && backgroundBackfillBeforeSeq > 1) {
+                    this.startOlderMessagesBackfill(sessionId, backgroundBackfillBeforeSeq, visibilityVersion);
+                }
+            }
+
+            this.flushPendingSessionMessagesRefresh(sessionId);
+        });
+    }
+
+    private registerPushToken = async () => {
+        log.log('registerPushToken');
+        try {
+            const result = await syncCurrentPushToken(this.credentials);
+            log.log('Push token sync result: ' + JSON.stringify({
+                registered: result.registered,
+                hasToken: !!result.token,
+                permission: result.permission.status,
+            }));
+            if (!result.permission.granted) {
+                console.log('Failed to get push token for push notification!');
+            }
+        } catch (error) {
+            log.log('Failed to register push token: ' + JSON.stringify(error));
+        }
+    }
+
+    private subscribeToUpdates = () => {
+        // Subscribe to message updates
+        apiSocket.onMessage('update', this.handleUpdate.bind(this));
+        apiSocket.onMessage('ephemeral', this.handleEphemeralUpdate.bind(this));
+
+        // Subscribe to connection state changes
+        apiSocket.onReconnected(() => {
+            log.log('🔌 Socket reconnected');
+            this.sessionsSync.invalidate();
+            this.machinesSync.invalidate();
+            log.log('🔌 Socket reconnected: Invalidating artifacts sync');
+            this.artifactsSync.invalidate();
+            for (const sessionId of this.visibleSessions.listVisible()) {
+                this.requestSessionMessagesRefresh(sessionId, 'socket-reconnected');
+            }
+            for (const sync of this.sendSync.values()) {
+                sync.invalidate();
+            }
+            this.attachVisibleLiveRuntimes();
+        });
+
+        apiSocket.onStatusChange((status) => {
+            this.liveRuntimeSocketStatus = status;
+            if (status === 'connected') {
+                this.cancelPendingLiveRuntimeDisconnect();
+                return;
+            }
+
+            if (shouldKeepLiveRuntimeStateDuringSocketRecovery(status)) {
+                const reason = status === 'error' ? 'error' : 'client-detached';
+                this.scheduleLiveRuntimeDisconnect(reason);
+            }
+        });
+
+        this.liveMirrorClient.onAttachAccepted((payload) => {
+            this.cancelPendingLiveRuntimeDisconnect();
+            const latestFrameSeq = Math.max(
+                payload.snapshot?.seq ?? 0,
+                ...payload.backlog.map((frame) => frame.seq),
+            );
+            const latestFrameAt = Math.max(
+                payload.snapshot?.ts ?? 0,
+                ...payload.backlog.map((frame) => frame.ts),
+                payload.runtime.updatedAt,
+            );
+
+            this.liveRuntimeLastSeqByRuntimeId.set(
+                payload.runtime.runtimeId,
+                Math.max(payload.runtime.seq, latestFrameSeq),
+            );
+
+            storage.getState().applyLiveRuntimeConnected({
+                runtimeId: payload.runtime.runtimeId,
+                sessionId: payload.runtime.sessionId,
+                machineId: payload.runtime.machineId,
+                connectedAt: payload.runtime.updatedAt,
+                lastFrameAt: latestFrameAt > 0 ? latestFrameAt : null,
+            });
+        });
+
+        this.liveMirrorClient.onFrame((payload) => {
+            this.cancelPendingLiveRuntimeDisconnect();
+            const previousSeq = this.liveRuntimeLastSeqByRuntimeId.get(payload.runtimeId) ?? 0;
+            if (payload.seq > previousSeq) {
+                this.liveRuntimeLastSeqByRuntimeId.set(payload.runtimeId, payload.seq);
+            }
+
+            if (previousSeq === 0) {
+                storage.getState().applyLiveRuntimeFrame({
+                    runtimeId: payload.runtimeId,
+                    sessionId: payload.sessionId,
+                    machineId: payload.machineId,
+                    frameAt: payload.ts,
+                });
+            }
+        });
+
+        this.liveMirrorClient.onDetach((payload) => {
+            for (const [sessionId, target] of this.liveRuntimeTargetsBySessionId.entries()) {
+                if (target.runtimeId === payload.runtimeId) {
+                    this.liveRuntimeTargetsBySessionId.delete(sessionId);
+                }
+            }
+
+            if (shouldDeferLiveRuntimeDetachDuringSocketRecovery(payload.reason, this.liveRuntimeSocketStatus)) {
+                this.scheduleLiveRuntimeDisconnect(payload.reason);
+                return;
+            }
+
+            this.liveRuntimeLastSeqByRuntimeId.delete(payload.runtimeId);
+            storage.getState().applyLiveRuntimeDetached({
+                runtimeId: payload.runtimeId,
+                sessionId: payload.sessionId,
+                machineId: payload.machineId,
+                detachedAt: Date.now(),
+                reason: payload.reason,
+            });
+        });
+    }
+
+    private handleUpdate = async (update: unknown) => {
+        const validatedUpdate = ApiUpdateContainerSchema.safeParse(update);
+        if (!validatedUpdate.success) {
+            console.log('❌ Sync: Invalid update received:', validatedUpdate.error);
+            console.error('❌ Sync: Invalid update data:', update);
+            return;
+        }
+        const updateData = validatedUpdate.data;
+        console.log(`🔄 Sync: Validated update type: ${updateData.body.t}`);
+
+        if (updateData.body.t === 'new-message') {
+            const messageUpdate = updateData as ApiUpdateContainer & { body: ApiUpdateNewMessage };
+            await handleRealtimeMessageUpdate(messageUpdate, {
+                isSessionVisible: this.isSessionVisible,
+                hasLocalMessageHistory: (sessionId) => {
+                    const sessionMessages = storage.getState().sessionMessages[sessionId];
+                    return Boolean(sessionMessages?.isLoaded || (sessionMessages?.messages.length ?? 0) > 0);
+                },
+                getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
+                getSession: (sessionId) => storage.getState().sessions[sessionId],
+                applySessions: this.applySessions,
+                fetchSessions: () => {
+                    void this.fetchSessions().catch((error) => {
+                        log.log(`🔄 Sync: Failed to refresh sessions for missing session ${messageUpdate.body.sid}: ${String(error)}`);
+                    });
+                },
+                getLastSeq: this.getTrackedLastSeq,
+                setLastSeq: (sessionId, seq) => {
+                    this.setTrackedLastSeq(sessionId, seq);
+                },
+                enqueueMessages: this.enqueueMessages.bind(this),
+                invalidateMessages: (sessionId) => {
+                    this.requestSessionMessagesRefresh(sessionId, 'realtime-message-gap');
+                },
+                isMutableToolCall: (sessionId, toolUseId) => storage.getState().isMutableToolCall(sessionId, toolUseId),
+                invalidateGitStatus: (sessionId) => {
+                    gitStatusSync.invalidate(sessionId);
+                },
+                onSessionNotReady: (sessionId) => {
+                    log.log(`🔄 Sync: Session ${sessionId} not ready locally yet, refreshing sessions`);
+                },
+                onLifecycleHint: ({ sessionId, isTaskComplete, isTaskStarted }) => {
+                    console.log(`🔄 [Sync] Session ${sessionId} thinking state: isTaskComplete=${isTaskComplete}, isTaskStarted=${isTaskStarted}`);
+                },
+            });
+
+        } else if (updateData.body.t === 'new-session') {
+            const newSessionUpdate = updateData as ApiUpdateContainer & { body: ApiUpdateNewSession };
+            log.log('🆕 New session update received');
+            await handleRealtimeNewSessionUpdate(newSessionUpdate, {
+                decryptSessions: this.decryptSessions,
+                applySessions: this.applySessions,
+                invalidateSessions: () => {
+                    log.log(`🆕 Failed to hydrate new session ${newSessionUpdate.body.id}, refreshing sessions`);
+                    this.sessionsSync.invalidate();
+                },
+                getSession: (sessionId) => storage.getState().sessions[sessionId],
+                getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
+                isSessionVisible: this.isSessionVisible,
+                invalidateMessages: (sessionId) => this.requestSessionMessagesRefresh(sessionId, 'realtime-message-gap'),
+                invalidateGitStatus: (sessionId) => gitStatusSync.invalidate(sessionId),
+                rememberDeletedSessionHints: rememberNativeCliHintsForSession,
+                deleteSession: (sessionId) => storage.getState().deleteSession(sessionId),
+                removeSessionEncryption: (sessionId) => this.encryption.removeSessionEncryption(sessionId),
+                removeProjectSession: (sessionId) => projectManager.removeSession(sessionId),
+                clearGitStatus: (sessionId) => gitStatusSync.clearForSession(sessionId),
+                clearSessionCaches: () => {},
+                onPermissionRequested: () => {},
+                didSessionControlReturnToApp,
+            });
+        } else if (updateData.body.t === 'delete-session') {
+            const deleteSessionUpdate = updateData as ApiUpdateContainer & { body: ApiDeleteSession };
+            log.log('🗑️ Delete session update received');
+            handleRealtimeDeleteSessionUpdate(deleteSessionUpdate, {
+                decryptSessions: this.decryptSessions,
+                applySessions: this.applySessions,
+                invalidateSessions: () => this.sessionsSync.invalidate(),
+                getSession: (sessionId) => storage.getState().sessions[sessionId],
+                getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
+                isSessionVisible: this.isSessionVisible,
+                invalidateMessages: (sessionId) => this.requestSessionMessagesRefresh(sessionId, 'realtime-message-gap'),
+                invalidateGitStatus: (sessionId) => gitStatusSync.invalidate(sessionId),
+                rememberDeletedSessionHints: rememberNativeCliHintsForSession,
+                deleteSession: (sessionId) => storage.getState().deleteSession(sessionId),
+                removeSessionEncryption: (sessionId) => this.encryption.removeSessionEncryption(sessionId),
+                removeProjectSession: (sessionId) => projectManager.removeSession(sessionId),
+                clearGitStatus: (sessionId) => gitStatusSync.clearForSession(sessionId),
+                clearSessionCaches: (sessionId) => {
+                    this.messagesSync.delete(sessionId);
+                    this.sendSync.delete(sessionId);
+                    this.pendingOutbox.delete(sessionId);
+                    this.sessionLastSeq.delete(sessionId);
+                    this.sessionMessageLocks.delete(sessionId);
+                    this.sessionMessageQueue.delete(sessionId);
+                    this.sessionQueueProcessing.delete(sessionId);
+                },
+                onPermissionRequested: () => {},
+                didSessionControlReturnToApp,
+            });
+            log.log(`🗑️ Session ${deleteSessionUpdate.body.sid} deleted from local storage`);
+        } else if (updateData.body.t === 'update-session') {
+            const updateSessionState = updateData as ApiUpdateContainer & { body: ApiUpdateSessionState };
+            await handleRealtimeUpdateSessionState(updateSessionState, {
+                decryptSessions: this.decryptSessions,
+                applySessions: this.applySessions,
+                invalidateSessions: () => this.sessionsSync.invalidate(),
+                getSession: (sessionId) => storage.getState().sessions[sessionId],
+                getSessionEncryption: (sessionId) => this.encryption.getSessionEncryption(sessionId),
+                isSessionVisible: this.isSessionVisible,
+                invalidateMessages: (sessionId) => {
+                    log.log(`🔄 Control returned to mobile for session ${sessionId}, re-fetching messages`);
+                    this.requestSessionMessagesRefresh(sessionId, 'session-control-returned');
+                },
+                invalidateGitStatus: (sessionId) => gitStatusSync.invalidate(sessionId),
+                rememberDeletedSessionHints: rememberNativeCliHintsForSession,
+                deleteSession: (sessionId) => storage.getState().deleteSession(sessionId),
+                removeSessionEncryption: (sessionId) => this.encryption.removeSessionEncryption(sessionId),
+                removeProjectSession: (sessionId) => projectManager.removeSession(sessionId),
+                clearGitStatus: (sessionId) => gitStatusSync.clearForSession(sessionId),
+                clearSessionCaches: () => {},
+                onPermissionRequested: (sessionId, requestId, toolName, args) => {
+                    voiceHooks.onPermissionRequested(sessionId, requestId, toolName ?? 'unknown', args);
+                },
+                onMissingSessionEncryption: (sessionId) => {
+                    console.error(`Session encryption not found for ${sessionId} - this should never happen`);
+                },
+                didSessionControlReturnToApp,
+            });
+        } else if (updateData.body.t === 'update-account') {
+            const accountUpdate = updateData.body;
+            const currentProfile = storage.getState().profile;
+            const hadGitHub = !!currentProfile.github?.login;
+
+            // Build updated profile with new data
+            const updatedProfile: Profile = {
+                ...currentProfile,
+                firstName: accountUpdate.firstName !== undefined ? accountUpdate.firstName : currentProfile.firstName,
+                lastName: accountUpdate.lastName !== undefined ? accountUpdate.lastName : currentProfile.lastName,
+                avatar: accountUpdate.avatar !== undefined ? accountUpdate.avatar : currentProfile.avatar,
+                github: accountUpdate.github !== undefined ? accountUpdate.github : currentProfile.github,
+                timestamp: updateData.createdAt // Update timestamp to latest
+            };
+
+            // Apply the updated profile to storage
+            storage.getState().applyProfile(updatedProfile);
+
+            if (!hadGitHub && updatedProfile.github?.login) {
+                trackGitHubConnected();
+            }
+
+            // Handle settings updates (new for profile sync)
+            if (accountUpdate.settings) {
+                try {
+                    const parsedSettings = accountUpdate.settings.value
+                        ? settingsParse(await this.encryption.decryptRaw(accountUpdate.settings.value))
+                        : { ...settingsDefaults };
+
+                    // Version compatibility check
+                    const settingsSchemaVersion = parsedSettings.schemaVersion ?? 1;
+                    if (settingsSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+                        console.warn(
+                            `⚠️ Received settings schema v${settingsSchemaVersion}, ` +
+                            `we support v${SUPPORTED_SCHEMA_VERSION}. Update app for full functionality.`
+                        );
+                    }
+
+                    storage.getState().applySettings(parsedSettings, accountUpdate.settings.version);
+                    log.log(`📋 Settings synced from server (schema v${settingsSchemaVersion}, version ${accountUpdate.settings.version})`);
+                } catch (error) {
+                    console.error('❌ Failed to process settings update:', error);
+                    // Don't crash on settings sync errors, just log
+                }
+            }
+        } else if (updateData.body.t === 'new-machine') {
+            await handleRealtimeNewMachineUpdate(
+                updateData as Parameters<typeof handleRealtimeNewMachineUpdate>[0],
+                this.getMachineRealtimeUpdateDependencies(),
+            );
+        } else if (updateData.body.t === 'update-machine') {
+            await handleRealtimeUpdateMachineState(
+                updateData as Parameters<typeof handleRealtimeUpdateMachineState>[0],
+                this.getMachineRealtimeUpdateDependencies(),
+            );
+        } else if (updateData.body.t === 'new-artifact') {
+            log.log('📦 Received new-artifact update');
+            const artifactUpdate = updateData.body;
+            const artifactId = artifactUpdate.artifactId;
+            
+            try {
+                // Decrypt the data encryption key
+                const decryptedKey = await this.encryption.decryptEncryptionKey(artifactUpdate.dataEncryptionKey);
+                if (!decryptedKey) {
+                    console.error(`Failed to decrypt key for new artifact ${artifactId}`);
+                    return;
+                }
+                
+                // Store the decrypted key in memory
+                this.artifactDataKeys.set(artifactId, decryptedKey);
+                
+                // Create artifact encryption instance
+                const artifactEncryption = new ArtifactEncryption(decryptedKey);
+                
+                // Decrypt header
+                const header = await artifactEncryption.decryptHeader(artifactUpdate.header);
+                
+                // Decrypt body if provided
+                let decryptedBody: string | null | undefined = undefined;
+                if (artifactUpdate.body && artifactUpdate.bodyVersion !== undefined) {
+                    const body = await artifactEncryption.decryptBody(artifactUpdate.body);
+                    decryptedBody = body?.body || null;
+                }
+                
+                // Add to storage
+                const decryptedArtifact: DecryptedArtifact = {
+                    id: artifactId,
+                    title: header?.title || null,
+                    body: decryptedBody,
+                    headerVersion: artifactUpdate.headerVersion,
+                    bodyVersion: artifactUpdate.bodyVersion,
+                    seq: artifactUpdate.seq,
+                    createdAt: artifactUpdate.createdAt,
+                    updatedAt: artifactUpdate.updatedAt,
+                    isDecrypted: !!header,
+                };
+                
+                storage.getState().addArtifact(decryptedArtifact);
+                log.log(`📦 Added new artifact ${artifactId} to storage`);
+            } catch (error) {
+                console.error(`Failed to process new artifact ${artifactId}:`, error);
+            }
+        } else if (updateData.body.t === 'update-artifact') {
+            log.log('📦 Received update-artifact update');
+            const artifactUpdate = updateData.body;
+            const artifactId = artifactUpdate.artifactId;
+            
+            // Get existing artifact
+            const existingArtifact = storage.getState().artifacts[artifactId];
+            if (!existingArtifact) {
+                console.error(`Artifact ${artifactId} not found in storage`);
+                // Fetch all artifacts to sync
+                this.artifactsSync.invalidate();
+                return;
+            }
+            
+            try {
+                // Get the data encryption key from memory
+                let dataEncryptionKey = this.artifactDataKeys.get(artifactId);
+                if (!dataEncryptionKey) {
+                    console.error(`Encryption key not found for artifact ${artifactId}, fetching artifacts`);
+                    this.artifactsSync.invalidate();
+                    return;
+                }
+                
+                // Create artifact encryption instance
+                const artifactEncryption = new ArtifactEncryption(dataEncryptionKey);
+                
+                // Update artifact with new data  
+                const updatedArtifact: DecryptedArtifact = {
+                    ...existingArtifact,
+                    seq: updateData.seq,
+                    updatedAt: updateData.createdAt,
+                };
+                
+                // Decrypt and update header if provided
+                if (artifactUpdate.header) {
+                    const header = await artifactEncryption.decryptHeader(artifactUpdate.header.value);
+                    updatedArtifact.title = header?.title || null;
+                    updatedArtifact.sessions = header?.sessions;
+                    updatedArtifact.draft = header?.draft;
+                    updatedArtifact.headerVersion = artifactUpdate.header.version;
+                }
+                
+                // Decrypt and update body if provided
+                if (artifactUpdate.body) {
+                    const body = await artifactEncryption.decryptBody(artifactUpdate.body.value);
+                    updatedArtifact.body = body?.body || null;
+                    updatedArtifact.bodyVersion = artifactUpdate.body.version;
+                }
+                
+                storage.getState().updateArtifact(updatedArtifact);
+                log.log(`📦 Updated artifact ${artifactId} in storage`);
+            } catch (error) {
+                console.error(`Failed to process artifact update ${artifactId}:`, error);
+            }
+        } else if (updateData.body.t === 'delete-artifact') {
+            log.log('📦 Received delete-artifact update');
+            const artifactUpdate = updateData.body;
+            const artifactId = artifactUpdate.artifactId;
+            
+            // Remove from storage
+            storage.getState().deleteArtifact(artifactId);
+            
+            // Remove encryption key from memory
+            this.artifactDataKeys.delete(artifactId);
+        }
+    }
+
+    private flushActivityUpdates = (updates: Map<string, ApiEphemeralActivityUpdate>) => {
+        // log.log(`🔄 Flushing activity updates for ${updates.size} sessions - acquiring lock`);
+
+
+        const sessions: Session[] = [];
+
+        for (const [sessionId, update] of updates) {
+            const session = storage.getState().sessions[sessionId];
+            if (session) {
+                sessions.push({
+                    ...session,
+                    active: update.active,
+                    activeAt: update.activeAt,
+                    thinking: update.thinking ?? false,
+                    thinkingAt: update.activeAt // Always use activeAt for consistency
+                });
+            }
+        }
+
+        if (sessions.length > 0) {
+            // console.log('flushing activity updates ' + sessions.length);
+            this.applySessions(sessions);
+            // log.log(`🔄 Activity updates flushed - updated ${sessions.length} sessions`);
+        }
+    }
+
+    private handleEphemeralUpdate = (update: unknown) => {
+        const validatedUpdate = ApiEphemeralUpdateSchema.safeParse(update);
+        if (!validatedUpdate.success) {
+            console.log('Invalid ephemeral update received:', validatedUpdate.error);
+            console.error('Invalid ephemeral update received:', update);
+            return;
+        } else {
+            // console.log('Ephemeral update received:', update);
+        }
+        const updateData = validatedUpdate.data;
+
+        // Process activity updates through smart debounce accumulator
+        if (updateData.type === 'activity') {
+            // console.log('adding activity update ' + updateData.id);
+            this.activityAccumulator.addUpdate(updateData);
+        }
+
+        // Handle machine activity updates
+        if (updateData.type === 'machine-activity') {
+            handleRealtimeMachineActivityUpdate(updateData, this.getMachineRealtimeUpdateDependencies());
+        }
+
+        // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity
+    }
+
+    //
+    // Apply store
+    //
+
+    private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
+        const result = storage.getState().applyMessages(sessionId, messages);
+        let m: Message[] = [];
+        for (let messageId of result.changed) {
+            const message = storage.getState().sessionMessages[sessionId].messagesMap[messageId];
+            if (message) {
+                m.push(message);
+            }
+        }
+        if (m.length > 0) {
+            voiceHooks.onMessages(sessionId, m);
+        }
+        if (result.hasReadyEvent) {
+            voiceHooks.onReady(sessionId);
+        }
+    }
+
+    private applySessions = (sessions: (Omit<Session, "presence"> & {
+        presence?: "online" | number;
+    })[]) => {
+        const active = storage.getState().getActiveSessions();
+        storage.getState().applySessions(sessions);
+        const newActive = storage.getState().getActiveSessions();
+        this.applySessionDiff(active, newActive);
+
+        for (const session of sessions) {
+            if (this.isSessionVisible(session.id)) {
+                this.attachLiveRuntimeForSession(session.id);
+            }
+        }
+    }
+
+    private applySessionDiff = (active: Session[], newActive: Session[]) => {
+        let wasActive = new Set(active.map(s => s.id));
+        let isActive = new Set(newActive.map(s => s.id));
+        for (let s of active) {
+            if (!isActive.has(s.id)) {
+                voiceHooks.onSessionOffline(s.id, s.metadata ?? undefined);
+            }
+        }
+        for (let s of newActive) {
+            if (!wasActive.has(s.id)) {
+                voiceHooks.onSessionOnline(s.id, s.metadata ?? undefined);
+            }
+        }
+    }
+
+    private isSessionReadyLocally = (sessionId: string): boolean => {
+        return Boolean(
+            storage.getState().sessions[sessionId]
+            && this.encryption.getSessionEncryption(sessionId),
+        );
+    }
+
+    private fetchMessagesPage = (
+        sessionId: string,
+        encryption: NonNullable<ReturnType<Encryption['getSessionEncryption']>>,
+        options: {
+            signal?: AbortSignal;
+            afterSeq?: number;
+            beforeSeq?: number;
+            tail?: boolean;
+            limit: number;
+        },
+    ) => {
+        return fetchSessionMessagesPage(sessionId, encryption.decryptMessages.bind(encryption), options);
+    }
+
+    private decryptSessions = async (
+        sessions: EncryptedSessionRecord[],
+    ): Promise<(Omit<Session, 'presence'> & { presence?: "online" | number })[]> => {
+        const sessionKeys = new Map<string, Uint8Array | null>();
+        
+        // Parallelize initial key decryption
+        await Promise.all(sessions.map(async (session) => {
+            if (session.dataEncryptionKey) {
+                const decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
+                if (decrypted) {
+                    sessionKeys.set(session.id, decrypted);
+                } else {
+                    console.error(`Failed to decrypt data encryption key for session ${session.id}`);
+                }
+            } else {
+                sessionKeys.set(session.id, null);
+            }
+        }));
+
+        await this.encryption.initializeSessions(sessionKeys);
+
+        // Parallelize metadata and agent state decryption
+        const decryptedSessions = await Promise.all(sessions.map(async (session) => {
+            const sessionEncryption = this.encryption.getSessionEncryption(session.id);
+            if (!sessionEncryption) {
+                console.error(`Session encryption not found for ${session.id} - skipping`);
+                return null;
+            }
+
+            const [metadata, agentState] = await Promise.all([
+                sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata),
+                sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState)
+            ]);
+
+            return {
+                id: session.id,
+                seq: session.seq,
+                createdAt: session.createdAt,
+                updatedAt: session.updatedAt,
+                active: session.active,
+                activeAt: session.activeAt,
+                metadata,
+                metadataVersion: session.metadataVersion,
+                agentState,
+                agentStateVersion: session.agentStateVersion,
+                thinking: false,
+                thinkingAt: 0,
+            };
+        }));
+
+        return decryptedSessions.filter((s): s is NonNullable<typeof s> => s !== null);
+    }
+
+}
+
+// Global singleton instance
+export const sync = new Sync();
+
+//
+// Init sequence
+//
+
+let isInitialized = false;
+export async function syncCreate(credentials: AuthCredentials) {
+    if (isInitialized) {
+        return;
+    }
+    try {
+        await syncInit(credentials, false);
+        isInitialized = true;
+    } catch (error) {
+        isInitialized = false;
+        throw error;
+    }
+}
+
+export async function syncRestore(credentials: AuthCredentials) {
+    if (isInitialized) {
+        return;
+    }
+    try {
+        await syncInit(credentials, true);
+        isInitialized = true;
+    } catch (error) {
+        isInitialized = false;
+        throw error;
+    }
+}
+
+async function syncInit(credentials: AuthCredentials, restore: boolean) {
+
+    // Initialize sync engine
+    const secretKey = decodeBase64(credentials.secret, 'base64url');
+    if (secretKey.length !== 32) {
+        throw new Error(`Invalid secret key length: ${secretKey.length}, expected 32`);
+    }
+    const encryption = await Encryption.create(secretKey);
+
+    // Initialize tracking
+    initializeTracking(encryption.anonID);
+
+    // Initialize socket connection
+    const API_ENDPOINT = await ensureReachableServerUrl();
+    apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
+
+    // Wire socket status to storage
+    apiSocket.onStatusChange((status) => {
+        storage.getState().setSocketStatus(status);
+    });
+
+    // Initialize sessions engine
+    if (restore) {
+        await sync.restore(credentials, encryption);
+    } else {
+        await sync.create(credentials, encryption);
+    }
+}

@@ -1,4 +1,4 @@
-# Happy Roadmap
+# Orbit Roadmap
 
 ## Next Up
 
@@ -73,7 +73,7 @@
 
 ## Customization
 
-- UI self-customization ("change X" → happy obliges)
+- UI self-customization ("change X" → Orbit obliges)
 - Custom widgets per session / project
 - Widgets on mobile (iOS/Android) + desktop
 
@@ -88,5 +88,4 @@
   - sprites — same
 - Linear
 - GitHub — PR reviews
-
 

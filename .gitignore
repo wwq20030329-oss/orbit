@@ -10,8 +10,8 @@ web-build/
 expo-env.d.ts
 /ios
 /android
-/packages/happy-app/ios
-/packages/happy-app/android
+/packages/orbit-app/ios
+/packages/orbit-app/android
 
 # Native
 .kotlin/
